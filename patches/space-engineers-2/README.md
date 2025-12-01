@@ -4,7 +4,7 @@ Run Space Engineers 2 on macOS via CrossOver or Wine.
 
 ## Status
 
-✅ **Working** - Tested with version 1.5.0.3105 on Apple Silicon (M4 Max)
+✅ **Working** - Tested with version 2.0.2.14 on Apple Silicon (M4 Max)
 
 ## The Problem
 
@@ -91,6 +91,7 @@ Backups are created automatically (`.backup` extension).
 
 | macOS | CrossOver | Game Version | Status |
 |-------|-----------|--------------|--------|
+| 15.1 (Sequoia) | 24.0.5 | 2.0.2.14 | ✅ Working |
 | 15.1 (Sequoia) | 24.0.5 | 1.5.0.3105 | ✅ Working |
 
 ## Technical Details

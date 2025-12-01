@@ -34,19 +34,19 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-TESTED_VERSION = "1.5.0.3105"
+TESTED_VERSION = "2.0.2.14"
 
 PATCHES = {
     "VRage.Render.dll": {
         "description": "ForceAllAdaptersSupported - always return true",
-        "offset": 0x43DF1,
-        "original": bytes([0x02, 0x7b, 0x80, 0x0a, 0x00, 0x04, 0x2a]),
+        "offset": 0x58588,
+        "original": bytes([0x02, 0x7b, 0x58, 0x0d, 0x00, 0x04, 0x2a]),
         "patched": bytes([0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a]),
     },
     "VRage.Render12.dll": {
         "description": "IsSupported bypass - skip GPU compatibility check",
-        "offset": 0x6E36D,
-        "original": bytes([0x02, 0x28, 0x97, 0x12, 0x00, 0x06]),
+        "offset": 0x81FF2,
+        "original": bytes([0x02, 0x28, 0xe4, 0x14, 0x00, 0x06]),
         "patched": bytes([0x00, 0x17, 0x00, 0x00, 0x00, 0x00]),
     },
 }

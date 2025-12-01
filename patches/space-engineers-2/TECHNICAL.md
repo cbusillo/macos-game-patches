@@ -45,8 +45,8 @@ The GPU is detected as "Apple M4 Max" (or "AMD Compatibility Mode" under D3DMeta
 - **File**: `VRage.Render.dll`
 - **Class**: `Keen.VRage.Render.CoreConfigurations.RenderConfiguration`
 - **Method**: `get_ForceAllAdaptersSupported()`
-- **RVA**: 0x45BF0
-- **File Offset**: 0x43DF1 (after 1-byte tiny header)
+- **RVA**: 0x5a387 (v2.0.2.14)
+- **File Offset**: 0x58588 (after 1-byte tiny header)
 
 ### Original Code
 
@@ -75,7 +75,7 @@ IL_0006: ret                  ; 0x2a - return true
 
 | Offset | Original | Patched |
 |--------|----------|---------|
-| 0x43DF1 | `02 7b 80 0a 00 04 2a` | `17 00 00 00 00 00 2a` |
+| 0x58588 | `02 7b 58 0d 00 04 2a` | `17 00 00 00 00 00 2a` |
 
 ### Effect
 
@@ -88,8 +88,8 @@ When the renderer checks adapters, this property now returns `true`, causing all
 - **File**: `VRage.Render12.dll`
 - **Class**: `Keen.VRage.Render12.EngineComponents.Render12EngineComponent`
 - **Method**: `Init(Render12ObjectBuilder ob)` (call site)
-- **RVA**: 0x700BC (Init method start)
-- **File Offset**: 0x6E36D (IL_00a5 within method)
+- **RVA**: 0x83d40 (Init method start, v2.0.2.14)
+- **File Offset**: 0x81FF2 (IL_00a6 within method)
 
 ### Original Code
 
@@ -123,7 +123,7 @@ IL_00ab: brtrue.s IL_00e0     ; 0x2d 0x33 - branch taken (stack has true)
 
 | Offset | Original | Patched |
 |--------|----------|---------|
-| 0x6E36D | `02 28 97 12 00 06` | `00 17 00 00 00 00` |
+| 0x81FF2 | `02 28 e4 14 00 06` | `00 17 00 00 00 00` |
 
 ### Stack Balance
 
@@ -181,7 +181,7 @@ static HRESULT d3d12_device_CheckFeatureSupport(...)
 - **Python** - Binary patching and PE parsing
 - **xxd/hexdump** - Binary inspection
 
-## File Hashes (v1.5.0.3105)
+## File Hashes (v2.0.2.14)
 
 For verification:
 
