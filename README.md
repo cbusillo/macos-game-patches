@@ -28,6 +28,12 @@ cd macos-game-patches
 python3 patches/space-engineers-2/patch.py
 ```
 
+Or run directly without cloning:
+
+```bash
+curl -sL https://raw.githubusercontent.com/cbusillo/macos-game-patches/main/patches/space-engineers-2/patch.py | python3
+```
+
 ## Requirements
 
 - macOS 12+ (Monterey or later)
