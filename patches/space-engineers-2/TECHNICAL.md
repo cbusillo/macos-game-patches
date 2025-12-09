@@ -9,11 +9,11 @@
 
 ## Patch points
 
-- `VRage.Render.dll` @ `0x5856C`: `ldfld; ret` -> `ldc.i4.1; ret` (bypass GPU gate)
 - `VRage.Render12.dll` @ `0x3C143`: vendor ID -> `-1` (skip AMD AGS path)
 - `VRage.Render12.dll` @ `0x99136`: same vendor tweak (second occurrence)
+- `VRage.Render12.dll` @ `0x9925F`: force adapter support override (push `true` instead of calling `RenderConfiguration.ForceAllAdaptersSupported`)
 
-Tested on build **2.0.2.21** (hash matches 2.0.2.39).
+Tested on build **2.0.2.39** (Steam build **21100537**, updated 2025-12-09). Offsets are unchanged from 2.0.2.21.
 
 ## Notes for future builds
 

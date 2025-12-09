@@ -1,5 +1,5 @@
 game_name = "Space Engineers 2"
-tested_version = "2.0.2.21"
+tested_version = "2.0.2.39 (Steam build 21100537)"
 
 [autodetect]
 search_globs = [
@@ -7,15 +7,6 @@ search_globs = [
   "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bottles/*/drive_c/Program Files (x86)/Steam/steamapps/common/SpaceEngineers2/Game2",
   "/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver/bottles/*/drive_c/Program Files (x86)/Steam/steamapps/common/SpaceEngineers2/Game2",
 ]
-
-[[files]]
-filename = "VRage.Render.dll"
-
-  [[files.segments]]
-  description = "ForceAllAdaptersSupported - always return true (GPU gate bypass)"
-  offset = "0x5856C"
-  original = "02 7B 58 0D 00 04 2A"
-  patched  = "17 2A 00 00 00 00 00"
 
 [[files]]
 filename = "VRage.Render12.dll"
@@ -31,3 +22,9 @@ filename = "VRage.Render12.dll"
   offset = "0x99136"
   original = "20 02 10 00 00"
   patched  = "20 FF FF FF FF"
+
+  [[files.segments]]
+  description = "Force adapter support override at render adapter enumeration"
+  offset = "0x9925F"
+  original = "6F 3B 1A 00 0A"
+  patched  = "17 00 00 00 00"

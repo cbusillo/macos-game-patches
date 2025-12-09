@@ -1,14 +1,15 @@
 # Space Engineers 2 – macOS Compatibility Patch
 
 This patch bypasses launch-time GPU checks that block Apple Silicon under
-CrossOver/Wine and skips an AMD AGS code path that asserts under D3DMetal.
+CrossOver/Wine (now handled inside `VRage.Render12.dll`) and skips an AMD AGS
+code path that asserts under D3DMetal.
 
 ## What it does
 
 - Forces `ForceAllAdaptersSupported` to return true (removes FP64-based GPU gate)
 - Skips the AMD AGS teraflops vendor path in `VRage.Render12.dll`
 
-Tested with Space Engineers 2 build **2.0.2.21**.
+Tested with Space Engineers 2 build **2.0.2.39** (Steam build **21100537**, updated 2025-12-09).
 
 ## Requirements
 
