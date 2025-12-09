@@ -8,6 +8,7 @@ args = [
   "-resolution:1024x768",
   "-disablevsync",
   "-startLast",
+  "-forceAllAdaptersSupported",
 ]
 steam_app_id = "1133870"
 
