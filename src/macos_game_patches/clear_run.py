@@ -59,12 +59,6 @@ def main() -> int:
     )
     parser.add_argument("--skip-patch", action="store_true", help="Skip running the patch before launch")
     parser.add_argument("--skip-clear-args", action="store_true", help="Do not append spec-defined clear_run args to the launch command")
-    parser.add_argument(
-        "--use-steam-applaunch",
-        action="store_true",
-        help="Launch via steam.exe -applaunch <appid> (avoids custom-args popup); defaults to True",
-        default=True,
-    )
     args = parser.parse_args()
 
     game_exe = args.game_exe or f"{args.game_folder}.exe"
@@ -136,20 +130,13 @@ def main() -> int:
     env["WINEPREFIX"] = str(bottle_root)
 
     print("\nLaunching via CrossOver...")
-    if args.use_steam_applaunch:
-        cmd = [
-            str(crossover_bin),
-            "C:\\Program Files (x86)\\Steam\\steam.exe",
-            "-applaunch",
-            "1133870",
-            *launch_args,
-        ]
-    else:
-        cmd = [
-            str(crossover_bin),
-            f"C:\\Program Files (x86)\\Steam\\steamapps\\common\\{args.game_folder}\\Game2\\{game_exe}",
-            *launch_args,
-        ]
+    cmd = [
+        str(crossover_bin),
+        "C:\\Program Files (x86)\\Steam\\steam.exe",
+        "-applaunch",
+        "1133870",
+        *launch_args,
+    ]
     try:
         subprocess.Popen(cmd, env=env)
     except Exception as exc:  # noqa: BLE001
