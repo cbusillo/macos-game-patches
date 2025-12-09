@@ -58,6 +58,7 @@ def main() -> int:
         help="Path to CrossOver wine binary",
     )
     parser.add_argument("--skip-patch", action="store_true", help="Skip running the patch before launch")
+    parser.add_argument("--skip-clear-args", action="store_true", help="Do not append spec-defined clear_run args to the launch command")
     args = parser.parse_args()
 
     game_exe = args.game_exe or f"{args.game_folder}.exe"
@@ -97,7 +98,7 @@ def main() -> int:
             return 1
         run_patch(spec, game_path, restore=False, check_only=False)
 
-    launch_args = spec.clear_run_args or []
+    launch_args = [] if args.skip_clear_args else (spec.clear_run_args or [])
 
     user_root = bottle_root / "drive_c/users/crossover/AppData"
     roaming_root = user_root / "Roaming" / args.game_folder
