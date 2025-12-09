@@ -30,6 +30,7 @@ class PatchSpec:
     files: list[FilePatch]
     find_game_path: Optional[Callable[[], Optional[Path]]] = None
     search_globs: Optional[list[str]] = None
+    clear_run_args: Optional[list[str]] = None
 
 
 def _check_file_status(filepath: Path, segments: Iterable[PatchSegment]) -> str:
@@ -182,11 +183,14 @@ def _build_spec_from_toml(spec_path: Path) -> PatchSpec:
     if "autodetect" in data and "search_globs" in data["autodetect"]:
         search_globs = data["autodetect"]["search_globs"]
 
+    clear_run_args = data.get("clear_run", {}).get("args") if isinstance(data.get("clear_run"), dict) else None
+
     return PatchSpec(
         game_name=data["game_name"],
         tested_version=data.get("tested_version"),
         files=files,
         search_globs=search_globs,
+        clear_run_args=clear_run_args,
     )
 
 

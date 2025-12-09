@@ -97,6 +97,8 @@ def main() -> int:
             return 1
         run_patch(spec, game_path, restore=False, check_only=False)
 
+    launch_args = spec.clear_run_args or []
+
     user_root = bottle_root / "drive_c/users/crossover/AppData"
     roaming_root = user_root / "Roaming" / args.game_folder
     shader_cache_dir = roaming_root / "Temp/ShaderCache"
@@ -130,6 +132,7 @@ def main() -> int:
     cmd = [
         str(crossover_bin),
         f"C:\\Program Files (x86)\\Steam\\steamapps\\common\\{args.game_folder}\\Game2\\{game_exe}",
+        *launch_args,
     ]
     try:
         subprocess.Popen(cmd, env=env)

@@ -1,11 +1,18 @@
 game_name = "Space Engineers 2"
 tested_version = "2.0.2.39 (Steam build 21100537)"
 
+[clear_run]
+args = [
+  "-nosplash",
+  "-windowed",
+  "-resolution:1600x900",
+  "-disablevsync",
+  "-startLast",
+]
+
 [autodetect]
 search_globs = [
   "~/Library/Application Support/CrossOver/Bottles/*/drive_c/Program Files (x86)/Steam/steamapps/common/SpaceEngineers2/Game2",
-  "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bottles/*/drive_c/Program Files (x86)/Steam/steamapps/common/SpaceEngineers2/Game2",
-  "/Applications/CrossOver Preview.app/Contents/SharedSupport/CrossOver/bottles/*/drive_c/Program Files (x86)/Steam/steamapps/common/SpaceEngineers2/Game2",
 ]
 
 [[files]]
