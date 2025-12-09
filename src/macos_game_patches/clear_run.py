@@ -139,7 +139,7 @@ def main() -> int:
     if args.use_steam_applaunch:
         cmd = [
             str(crossover_bin),
-            "C\\Program Files (x86)\\Steam\\steam.exe",
+            "C:\\Program Files (x86)\\Steam\\steam.exe",
             "-applaunch",
             "1133870",
             *launch_args,
