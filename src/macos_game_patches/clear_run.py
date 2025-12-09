@@ -64,6 +64,12 @@ def main() -> int:
         action="store_true",
         help="Launch the game executable directly instead of steam -applaunch",
     )
+    parser.add_argument(
+        "--steam-extra",
+        nargs="*",
+        default=None,
+        help="Extra args to append after -applaunch <appid> (useful for Steam launch options).",
+    )
     args = parser.parse_args()
 
     game_exe = args.game_exe or f"{args.game_folder}.exe"
@@ -136,6 +142,7 @@ def main() -> int:
 
     print("\nLaunching via CrossOver...")
     steam_app_id = spec.clear_run_steam_app_id or "1133870"
+    steam_extra = args.steam_extra or []
 
     if args.no_steam_applaunch:
         cmd = [
@@ -150,6 +157,7 @@ def main() -> int:
             "-applaunch",
             steam_app_id,
             *launch_args,
+            *steam_extra,
         ]
     try:
         subprocess.Popen(cmd, env=env)
