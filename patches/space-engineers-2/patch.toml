@@ -5,10 +5,11 @@ tested_version = "2.0.2.39 (Steam build 21100537)"
 args = [
   "-nosplash",
   "-windowed",
-  "-resolution:1600x900",
+  "-resolution:1024x768",
   "-disablevsync",
   "-startLast",
 ]
+steam_app_id = "1133870"
 
 [autodetect]
 search_globs = [
