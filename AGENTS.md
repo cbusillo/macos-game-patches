@@ -1,67 +1,91 @@
 # AI Agent Guidelines
 
-This document helps AI agents (Claude, Codex, Copilot, etc.) understand and contribute to this project.
+This document helps AI agents (Claude, Codex, Copilot, etc.) understand and
+contribute to this project.
+
+See also:
+
+- [README.md](README.md) for user-facing usage and patching instructions
+- [TOOLS.md](TOOLS.md) for a quick reference of analysis and runtime tooling
 
 ## Project Overview
 
-This repository contains binary patches that enable Windows games to run on macOS via CrossOver/Wine. Patches bypass unnecessary hardware compatibility checks that incorrectly reject Apple Silicon GPUs.
+This repository contains binary patches that enable Windows games to run on
+macOS via CrossOver/Wine. Patches bypass unnecessary hardware compatibility
+checks that incorrectly reject Apple Silicon GPUs.
 
 ## Repository Structure
 
-```
+```text
 macos-game-patches/
 ├── README.md           # User-facing documentation
 ├── AGENTS.md           # This file - AI agent guidelines
 ├── LICENSE             # MIT License
 └── patches/
     └── {game-name}/
-        ├── patch.py    # Standalone patch script
+        ├── patch.toml  # Data-only patch spec
         ├── README.md   # User documentation
         └── TECHNICAL.md # Technical analysis
 ```
 
 ## Common Patterns
 
+## Style & coding baseline
+
+- Target Python 3.12+. Use type hints everywhere and prefer small, single-purpose
+  functions with early returns.
+- F-strings only for formatting; avoid bare string concatenation.
+- Avoid blanket `except Exception`; catch specific errors.
+- Prefer descriptive identifiers over comments; add comments only when intent is
+  non-obvious.
+- Use `apply_patch` for edits; preserve history with `git mv` when moving files.
+- When touching docs or layout, keep `README.md` / per-game `README.md` /
+  `TECHNICAL.md` in sync with code changes.
+
 ### Why Games Fail on macOS
 
-1. **FP64 Shader Check**: Games check for double-precision float shader support. Apple Silicon GPUs don't support FP64 in shaders (hardware limitation), but games rarely actually use FP64.
+1. **FP64 Shader Check**: Games check for double-precision float shader
+   support. Apple Silicon GPUs don't support FP64 in shaders (hardware
+   limitation).
 
-2. **Driver Version Check**: Games verify driver versions against known-good values. Wine reports different version strings that fail these checks.
+2. **Driver Version Check**: Games verify driver versions against
+   known-good values. Wine reports different version strings that fail
+   these checks.
 
-3. **Feature Level Checks**: DirectX 12 feature level queries may return unexpected values through translation layers.
+3. **Feature Level Checks**: DirectX 12 feature level queries may return
+   unexpected values through translation layers.
 
 4. **Query Heap Creation**: D3D12 timestamp query heaps may fail creation with E_INVALIDARG.
 
 ### Patch Development Workflow
 
 1. **Collect Logs**: Game logs typically in `AppData/Roaming/{GameName}/Logs/`
-
 2. **Identify Error**: Look for keywords like:
    - `NoSupportedDevice`
    - `GPU not supported`
    - `IsDoublePrecisionFloatShaderOps`
    - `HasMinimumDriverVersion`
-
 3. **Decompile**: For .NET games use ILSpy:
+
    ```bash
    dotnet tool install -g ilspycmd
    ilspycmd GameAssembly.dll | grep -A 20 "ErrorMethod"
    ```
 
 4. **Find Check Location**: Search for the error string, trace back to the condition
-
 5. **Analyze IL**: Get exact byte offsets:
+
    ```bash
    ilspycmd -il GameAssembly.dll | grep -B 10 "MethodName"
    ```
 
 6. **Calculate File Offset**: Convert RVA to file offset using PE headers
-
 7. **Create Patch**: Minimal byte changes to bypass check
 
 ### .NET IL Patching Tips
 
 Common IL opcodes for patches:
+
 - `0x17` (ldc.i4.1) - Push true/1
 - `0x16` (ldc.i4.0) - Push false/0
 - `0x2a` (ret) - Return
@@ -71,6 +95,7 @@ Common IL opcodes for patches:
 - `0x2d` (brtrue.s) - Branch if true (short)
 
 Stack balance is critical:
+
 - Method calls consume arguments AND push return value
 - Branches like `brtrue.s` consume a value, `br.s` does not
 - Match the original stack effect or CLR throws InvalidProgramException
@@ -99,6 +124,18 @@ def rva_to_file_offset(data, rva):
 ```
 
 ### Patch Script Template
+
+Use the shared runner (`uv run patch <slug>`) with a per-game `patch.toml`
+under `patches/<game>/`. Specs define bytes to change; the CLI handles
+backup/restore and status checks. Keep any code in the shared runner; specs are
+data-only.
+
+### Style references
+
+- Local Python style quick ref: `docs/style/python.md`.
+- Keep docs in sync with code: update `README.md`, per-game `README.md`, and
+  `TECHNICAL.md` when behavior or layout changes.
+- Target Python 3.12+: no need for `from __future__ import annotations`.
 
 ```python
 #!/usr/bin/env python3
@@ -149,12 +186,14 @@ def main():
 ## Documentation Standards
 
 ### README.md (User-facing)
+
 - What the patch does (non-technical)
 - Requirements
 - Installation steps
 - Troubleshooting
 
 ### TECHNICAL.md (Developer-facing)
+
 - Root cause analysis
 - Decompilation findings
 - Exact patch locations and bytes
@@ -175,7 +214,7 @@ This helps Wine developers implement proper fixes upstream.
 
 ## Commit Message Format
 
-```
+```text
 feat(game-name): Add macOS compatibility patch
 
 - Bypass FP64 shader capability check

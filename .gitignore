@@ -29,6 +29,15 @@ env/
 
 # Backups created by patches (don't commit game files)
 *.backup
+temp/
+*.dll
+*.exe
+*.dmp
+*.pdb
+
+# Build outputs
+**/bin/
+**/obj/
 
 # Logs
 *.log

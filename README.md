@@ -2,9 +2,20 @@
 
 Binary patches to run Windows games on macOS via CrossOver, Wine, or Game Porting Toolkit.
 
+## Start Here
+
+- User docs: `README.md` (this file)
+- Game docs: `patches/space-engineers-2/README.md`
+- Patch CLI usage: `docs/cli.md`
+- Tools list: `TOOLS.md`
+- Cache clear + launch helper: `uv run clear-run -- --help`
+- Patch specs are data-only TOML files under `patches/<game>/`; shared code
+  lives in `src/macos_game_patches/`.
+
 ## Why This Exists
 
 Many Windows games perform hardware checks that incorrectly reject macOS systems:
+
 - **GPU capability checks** that fail on Apple Silicon (M1/M2/M3/M4)
 - **Driver version checks** that fail under Wine's emulation layer
 - **DirectX feature checks** that translation layers don't fully expose
@@ -13,9 +24,9 @@ These patches bypass unnecessary compatibility checks, allowing games to run whe
 
 ## Available Patches
 
-| Game | Status | Issue | Solution |
-|------|--------|-------|----------|
-| [Space Engineers 2](patches/space-engineers-2/) | ✅ Working | FP64 shader check, driver version | Binary patch |
+| Game                                           | Status    | Issue                             | Solution     |
+|------------------------------------------------|-----------|-----------------------------------|--------------|
+| [Space Engineers 2](patches/space-engineers-2) | ✅ Working | FP64 shader check, driver version | Binary patch |
 
 ## Quick Start
 
@@ -24,26 +35,37 @@ These patches bypass unnecessary compatibility checks, allowing games to run whe
 git clone https://github.com/cbusillo/macos-game-patches.git
 cd macos-game-patches
 
-# Run a specific patch
-python3 patches/space-engineers-2/patch.py
+# Run a specific patch (uses pyproject entrypoint)
+uv run patch se2
+
+# Status / restore examples
+uv run patch se2 --check
+uv run patch se2 --restore
 ```
 
 Or run directly without cloning:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/cbusillo/macos-game-patches/main/patches/space-engineers-2/patch.py | python3
+# (raw-run example removed for now; run from local clone)| python3
 ```
+
+## Working files (do not commit binaries)
+
+- Use `temp/` for any extracted game DLLs, EXEs, dumps, or other proprietary assets. This folder is gitignored.
+- Patch scripts create `.backup` files next to binaries; these are also ignored.
+- Keep docs and scripts under version control; keep vendor binaries out.
 
 ## Requirements
 
 - macOS 12+ (Monterey or later)
 - [CrossOver](https://www.codeweavers.com/crossover) 24+ or Wine 8+
-- Python 3.9+ (included with macOS)
+- Python 3.13+ (use `uv` for pinned tooling)
 - Game installed via Steam in CrossOver/Wine
 
 ## How Patches Work
 
-Each patch is a standalone Python script that:
+Each patch is a data spec (`patch.toml`) consumed by the shared runner that:
+
 1. **Detects** the game installation automatically
 2. **Backs up** original files before modification
 3. **Patches** specific bytes in game binaries
@@ -57,7 +79,7 @@ All patches are reversible with the `--restore` flag.
 
 1. Create a folder under `patches/` with the game name (lowercase, hyphens)
 2. Include:
-   - `patch.py` - The patch script
+   - `patch.toml` - Data-only patch spec
    - `README.md` - Documentation for users
    - `TECHNICAL.md` - Technical details for developers
 

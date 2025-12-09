@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "macos-game-patches"
+version = "0.1.0"
+description = "macOS compatibility patch runner for Windows games under CrossOver/Wine"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [{ name = "macos-game-patches" }]
+dependencies = []
+
+[project.scripts]
+patch = "macos_game_patches.cli:main"
+clear-run = "macos_game_patches.clear_run:main"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/macos_game_patches"]
+
+[tool.black]
+line-length = 120
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
