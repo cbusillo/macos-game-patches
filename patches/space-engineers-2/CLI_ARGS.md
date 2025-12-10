@@ -120,6 +120,14 @@ render assemblies). No game binaries are modified by this document.
   - **Effect:** Disables VSync entirely (`VSync = VSyncMode.None`) and
     clears both VRR and classic VSync flags from the display strategy.
 
+## Render overrides
+
+- `-forceAllAdaptersSupported`
+  - **Form:** bare flag
+  - **Parsed in:** `RenderConfiguration` ArgSwitch (render startup)
+  - **Effect:** Forces the renderer to treat all DXGI adapters as supported. Useful on Wine/Metal
+    to suppress the “No supported GPU” gate when the adapter is otherwise rejected.
+
 ---
 
 ## Platform / UI behavior

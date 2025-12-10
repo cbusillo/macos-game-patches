@@ -3,9 +3,8 @@ tested_version = "2.0.2.39 (Steam build 21100537)"
 
 [clear_run]
 args = [
-  "-nosplash",
   "-windowed",
-  "-resolution:1024x768",
+  "-resolution:1600x900",
   "-disablevsync",
   "-startLast",
   "-forceAllAdaptersSupported",

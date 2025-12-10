@@ -141,10 +141,10 @@ def main() -> int:
     env["WINEPREFIX"] = str(bottle_root)
 
     print("\nLaunching via CrossOver...")
-    steam_app_id = spec.clear_run_steam_app_id or "1133870"
+    steam_app_id = spec.clear_run_steam_app_id
     steam_extra = args.steam_extra or []
 
-    if args.no_steam_applaunch:
+    if args.no_steam_applaunch or not steam_app_id:
         cmd = [
             str(crossover_bin),
             f"C:\\Program Files (x86)\\Steam\\steamapps\\common\\{args.game_folder}\\Game2\\{game_exe}",
