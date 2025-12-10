@@ -2,10 +2,8 @@
 
 ## Root cause
 
-- Launcher rejects GPUs without FP64 shader ops by checking
-  `ForceAllAdaptersSupported` in `VRage.Render.dll`.
-- Renderer also enters an AMD AGS teraflops path that asserts under
-  Wine/Metal.
+- Renderer checks adapter support and enters an AMD AGS teraflops path inside
+  `VRage.Render12.dll` that fails on Wine/Metal.
 
 ## Patch points
 
@@ -14,6 +12,13 @@
 - `VRage.Render12.dll` @ `0x9925F`: force adapter support override (push `true` instead of calling `RenderConfiguration.ForceAllAdaptersSupported`)
 
 Tested on build **2.0.2.39** (Steam build **21100537**, updated 2025-12-09). Offsets are unchanged from 2.0.2.21.
+
+## Observations (2025-12-09 run)
+
+- GPU gate is bypassed; adapter is reported as supported in Render12 logs.
+- Foreground geometry is missing because many shaders fail to load, e.g.
+  `geometry/materials/flatcolor*.hlsl`, `shadedcolor*.hlsl`, and physics debug/SSR shaders are reported missing in `SpaceEngineers2_251209_192504_437_2044_Render12.log`.
+- Recommended next action: verify game files in Steam inside the CrossOver bottle to restore missing shader/content files.
 
 ## Notes for future builds
 
