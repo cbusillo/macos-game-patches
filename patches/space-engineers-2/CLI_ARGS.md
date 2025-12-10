@@ -10,123 +10,59 @@ render assemblies). No game binaries are modified by this document.
 
 ---
 
-## App data & crash tagging
+## Command-line arguments (current build)
 
-- `-appData:<path>`
-  - **Form:** `flag:value`
-  - **Parsed in:** `Keen.Game2.Program.Main`
-  - **Effect:** Sets `CoreSettings.CustomUserDataPath` to `<path>`,
-    overriding the default user data / logs / config location.
+Below are the managed CLI switches found in the current build (2025-12-09, Space Engineers 2 v2.0.2.39) after re-decompiling the shipped assemblies. Only switches that are still present are listed.
 
-- `-startupTag:<string>`
-  - **Form:** `flag:value`
-  - **Parsed in:** `GameApp` engine setup
-    (`CrashReportingSetup.StartUpTag`)
-  - **Effect:** Tags crash reports / analytics for this run with the
-    given string (useful for distinguishing experiment types).
+### App data & crash tagging
 
----
+- `-appData:<path>` — parsed in `Program.Main`; sets `CoreSettings.CustomUserDataPath`.
+- `-startupTag:<string>` — parsed in `CrashReportingSetup`; tags crash reports/analytics.
 
-## Projects & global content directories
+### Projects & global content directories
 
-- `-projectPaths:<path1;path2;...>`
-  - **Form:** `flag:value` (semicolon-separated paths, quotes stripped)
-  - **Parsed in:** `GameApp.GetProjects(string[] args)`
-  - **Effect:** Replaces the default content project list. Each
-    `<pathN>` is fed to `GameContent.GetProjectByPath` to build the
-    project set.
+- `-projectPaths:<p1;...>` — parsed in `GameApp.GetProjects`; replaces default content project list.
+- `-globalProjectDirs:<p1;...>` — parsed in `GameApp.TryGetGlobalProjectDirs`; adds global search paths for mods/content.
 
-- `-globalProjectDirs:<path1;path2;...>`
-  - **Form:** `flag:value` (semicolon-separated paths, quotes stripped)
-  - **Parsed in:** `GameApp.TryGetGlobalProjectDirs(string[] args)`
-  - **Effect:** Adds directories to `LocalProjectLocator.GlobalSearchPaths`
-    for locating projects and mods globally.
+### World / session selection
 
----
+- `-start:<idOrName>` — parsed in `StartPlayerExperienceAsync`; loads the specified save/world.
+- `-startContent:<nameOrId>` — parsed in `StartPlayerExperienceAsync`; loads a content container/default world.
+- `-startLast` — parsed in `StartPlayerExperienceAsync`; loads the latest game if present.
 
-## World / session selection
+### Physics / simulation debug
 
-- `-start:<idOrName>`
-  - **Form:** `flag:value` (parsed via `"-start:(.+)"`)
-  - **Parsed in:** `GameApp.StartPlayerExperienceAsync()`
-  - **Effect:** Attempts to construct a `ContainerId` from `<idOrName>`
-    and loads that save/world on startup.
+- `-measurePhysics` — parsed in Havok physics config; enables physics profiling.
+- `-disableLodding` — parsed in physics config; disables physics LOD.
 
-- `-startContent:<nameOrId>`
-  - **Form:** `flag:value` (parsed via `"-startContent:(.+)"`)
-  - **Parsed in:** `StartPlayerExperienceAsync()`
-  - **Effect:** Resolves a content container or default world to load
-    on startup. It first tries `DefaultWorldsComponent` by name, then
-    falls back to `SaveHelper.GetContentContainerIdString`.
+### Windowing, display, and VSync
 
-- `-startLast`
-  - **Form:** bare flag
-  - **Parsed in:** `StartPlayerExperienceAsync()`
-  - **Effect:** Tries to load the latest game from
-    `GameOptions.LatestGame`. Logs a message if no previous save exists.
+- `-fullscreen` — parsed in render setup; forces fullscreen.
+- `-windowed` — parsed in render setup; forces windowed (defaults to 1600x900 if no resolution flag).
+- `-vrr` — parsed in render setup; enables VRR VSync (fullscreen only).
+- `-enablevsync` — parsed in render setup; classic VSync on.
+- `-disablevsync` — parsed in render setup; VSync off.
+- `-resolution:<W>x<H>` — parsed in render setup; sets resolution (windowed default 1600x900).
 
----
+### Render overrides
 
-## Physics / simulation debug
+- `-forceAllAdaptersSupported` — ArgSwitch in `RenderConfiguration`; forces all adapters treated as supported (suppresses GPU gate on Wine/Metal).
 
-- `-measurePhysics`
-  - **Form:** bare flag
-  - **Parsed in:** physics engine configuration
-    (`HavokPhysicsEngineComponentObjectBuilder`)
-  - **Effect:** Enables physics statistics/profiling
-    (`MeasureStatistics = true`).
+### Asset journal / content
 
-- `-disableLodding`
-  - **Form:** bare flag
-  - **Parsed in:** physics engine configuration
-  - **Effect:** Disables physics LOD (`UseLodding = false`),
-    increasing simulation detail at a performance cost.
+- `-noAssetJournal` — ArgSwitch in `AssetJournalComponentCoreConfiguration`; disables asset journal.
 
----
+### Game core startup
 
-## Windowing, display, and VSync
+- `-noNextFrameHotfix` — ArgSwitch in `GameCoreConfiguration`; disables the next-frame hotfix.
+- `-dumpJobs` — ArgSwitch in `GameCoreConfiguration`; enables job dumping.
+- `-defaultWorld` — ArgSwitch in `GameCoreConfiguration`; starts default world.
+- `-startWithSpectator` — ArgSwitch in `GameCoreConfiguration`; spawns spectator on start.
+- `-noPillars` — ArgSwitch in `GameCoreConfiguration`; disables pillar spawning.
 
-- `-fullscreen`
-  - **Form:** bare flag
-  - **Parsed in:** `GameApp.AddRender12`
-  - **Effect:** Forces fullscreen mode via
-    `ForcedDisplayOptionsConfigurationObjectBuilder.FullScreen = true`.
-    Also sets the render display strategy to fullscreen with classic
-    VSync enabled by default.
+### UI / client presentation
 
-- `-windowed`
-  - **Form:** bare flag
-  - **Parsed in:** `AddRender12` (when `-fullscreen` is not present)
-  - **Effect:** Forces windowed mode. Sets `FullScreen = false` and
-    resolution from `PresetArgsParseUtils.TryGetResolutionFromArgs(_args)`
-    or falls back to `1600x900`.
-
-- `-vrr`
-  - **Form:** bare flag
-  - **Parsed in:** `AddRender12` (only meaningful with `-fullscreen`)
-  - **Effect:** Enables variable refresh rate VSync:
-    `VSync = VSyncMode.VariableRefreshRate`, adjusts display strategy
-    flags to favor VRR over classic VSync.
-
-- `-enablevsync`
-  - **Form:** bare flag
-  - **Parsed in:** `AddRender12` (fullscreen case)
-  - **Effect:** Enables classic VSync (`VSync = VSyncMode.VSync`) and
-    updates the display strategy accordingly.
-
-- `-disablevsync`
-  - **Form:** bare flag
-  - **Parsed in:** `AddRender12` (fullscreen case)
-  - **Effect:** Disables VSync entirely (`VSync = VSyncMode.None`) and
-    clears both VRR and classic VSync flags from the display strategy.
-
-## Render overrides
-
-- `-forceAllAdaptersSupported`
-  - **Form:** bare flag
-  - **Parsed in:** `RenderConfiguration` ArgSwitch (render startup)
-  - **Effect:** Forces the renderer to treat all DXGI adapters as supported. Useful on Wine/Metal
-    to suppress the “No supported GPU” gate when the adapter is otherwise rejected.
+- `-hideVersion` — ArgSwitch in `Game2.Client` UI; hides version string in UI overlays (two aliases to same flag).
 
 ---
 
