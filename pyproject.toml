@@ -14,8 +14,12 @@ dependencies = []
 
 [project.scripts]
 patch = "macos_game_patches.cli:main"
-clear-run = "macos_game_patches.clear_run:main"
-clean-patch-run = "macos_game_patches.clear_run:main"
+run = "macos_game_patches.clean_run:main_run"
+clean-run = "macos_game_patches.clean_run:main_clean_run"
+clean-patch-run = "macos_game_patches.clean_run:main_clean_patch_run"
+
+# Backward-compat alias (deprecated)
+clear-run = "macos_game_patches.clean_run:main_clear_run"
 clean = "macos_game_patches.clean:main"
 
 [tool.uv]

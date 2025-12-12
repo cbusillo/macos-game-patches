@@ -1,3 +1,11 @@
-from . import patch_runner, cli, clear_run
+"""Tools for patching and running Windows games on macOS."""
 
-__all__ = ["patch_runner", "cli", "clear_run"]
+__all__ = [
+    "cli",
+    "clean",
+    "clean_run",
+    "patch_runner",
+]
+
+from . import cli, clean, clean_run, patch_runner  # noqa: E402
+

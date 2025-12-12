@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from .clear_run import get_darwin_cache_root, kill_processes, remove_path
+from .clean_run import get_darwin_cache_root, kill_processes, remove_path
 from .cli import discover_specs, find_repo_root
 
 
@@ -76,4 +76,3 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
