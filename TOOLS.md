@@ -18,10 +18,13 @@ tools here when they become repeat-use.
 
 ## Wine/CrossOver runtime
 
-- `uv run clean-patch-run -- --help` — clear caches, reapply a patch spec, and launch
+- `uv run run -- --help` — launch via CrossOver
+- `uv run clean-run -- --help` — clear caches, then launch
+- `uv run clean-patch-run -- --help` — clear caches, reapply a patch spec, then launch
 - `uv run clean -- --help` — clear caches and kill processes (no patch or launch)
-  via CrossOver. Defaults target `space-engineers-2`; customize with
-  `--patch-target`, `--bottle`, `--game-folder`, etc.
+
+Defaults target `space-engineers-2`; customize with `--patch-target`, `--bottle`,
+`--game-folder`, etc.
 
 If you add other repeat-use tools, list them here so future sessions can find
 

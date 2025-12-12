@@ -20,7 +20,9 @@ This repo currently contains two major tracks:
 - Patch CLI usage: `docs/cli.md`
 - Dev environments (macOS + optional Windows): `docs/dev-environments.md`
 - Tools list: `TOOLS.md`
-- Cache clear + launch helper: `uv run clean-patch-run -- --help`
+- Launch helper: `uv run run -- --help`
+- Clean + launch helper: `uv run clean-run -- --help`
+- Clean + patch + launch helper: `uv run clean-patch-run -- --help`
 - Clean only (no patch/launch): `uv run clean -- --help`
 
 Patch specs are data-only TOML files under `patches/<game>/`; shared code lives
