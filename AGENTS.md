@@ -37,7 +37,8 @@ macos-game-patches/
 - F-strings only for formatting; avoid bare string concatenation.
 - Avoid blanket `except Exception`; catch specific errors.
 - Prefer descriptive identifiers over comments; add comments only when intent is
-  non-obvious.
+  non-obvious.  Our goal is zero comments and docstrings because everything is using
+  descriptive function names and variable names.
 - Use `apply_patch` for edits; preserve history with `git mv` when moving files.
 - When touching docs or layout, keep `README.md` / per-game `README.md` /
   `TECHNICAL.md` in sync with code changes.
