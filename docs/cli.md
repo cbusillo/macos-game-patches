@@ -32,3 +32,9 @@ Use the packaged entry point `patch` (via uv) to apply or inspect patches.
 - Python 3.12+
 - `uv` installed (`pip install uv`), or use `python -m macos_game_patches.cli`
   directly if you prefer.
+
+## Scope
+
+This CLI is for the `patches/` workflow only.
+
+VR runtime work lives under `vr-on-macos/` and is documented separately.

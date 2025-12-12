@@ -43,3 +43,6 @@ temp/
 *.log
 
 .code/
+
+# Local-only notes (do not commit)
+.local.md

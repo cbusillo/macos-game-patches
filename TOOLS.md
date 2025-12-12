@@ -1,7 +1,10 @@
-# macOS Game Patches – Tooling
+# VR on macOS – Tooling
 
 This repo is currently scratch-only, but we keep a short list of tools that are
 useful for SE2 and other Windows-on-macOS patch work.
+
+This repo also includes VR runtime work under `vr-on-macos/`; keep VR-specific
+tools here when they become repeat-use.
 
 ## Binary / IL inspection
 
@@ -21,3 +24,7 @@ useful for SE2 and other Windows-on-macOS patch work.
   `--patch-target`, `--bottle`, `--game-folder`, etc.
 
 If you add other repeat-use tools, list them here so future sessions can find
+
+## Windows dev environment
+
+- `winget` (Windows): install tools repeatably on a native Windows VM/host.

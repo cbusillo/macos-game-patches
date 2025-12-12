@@ -1,21 +1,39 @@
-# macOS Game Patches
+# VR on macOS (Apple-only)
 
-Binary patches to run Windows games on macOS via CrossOver, Wine, or Game Porting Toolkit.
+This repo is a workspace for running Windows VR games on Apple hardware.
+
+Primary goal:
+
+- Run the game under CrossOver/Wine on Apple Silicon.
+- Provide a VR runtime path that works without a Windows PC.
+- Stream to Apple Vision Pro (ALVR client) with hardware encoding on Apple Silicon.
+
+This repo currently contains two major tracks:
+
+1. **VR runtime experiments** (ALVR + OpenVR work)
+2. **Binary patch specs** that bypass unnecessary compatibility checks in games
 
 ## Start Here
 
-- User docs: `README.md` (this file)
-- Game docs: `patches/space-engineers-2/README.md`
+- Repo overview: `README.md` (this file)
+- VR runtime work: `vr-on-macos/README.md`
 - Patch CLI usage: `docs/cli.md`
+- Dev environments (macOS + optional Windows): `docs/dev-environments.md`
 - Tools list: `TOOLS.md`
 - Cache clear + launch helper: `uv run clean-patch-run -- --help`
 - Clean only (no patch/launch): `uv run clean -- --help`
-- Patch specs are data-only TOML files under `patches/<game>/`; shared code
-  lives in `src/macos_game_patches/`.
+
+Patch specs are data-only TOML files under `patches/<game>/`; shared code lives
+in `src/macos_game_patches/`.
+
+VR runtime work lives under `vr-on-macos/`.
+
+Local-only host notes (not committed): see `.local.md.example`.
 
 ## Why This Exists
 
-Many Windows games perform hardware checks that incorrectly reject macOS systems:
+Many Windows games (including VR titles) perform hardware checks that incorrectly
+reject macOS systems:
 
 - **GPU capability checks** that fail on Apple Silicon (M1/M2/M3/M4)
 - **Driver version checks** that fail under Wine's emulation layer
@@ -23,18 +41,32 @@ Many Windows games perform hardware checks that incorrectly reject macOS systems
 
 These patches bypass unnecessary compatibility checks, allowing games to run when the underlying hardware is actually capable.
 
+For VR specifically, the long-term goal is to run Windows VR titles under
+CrossOver while presenting a compatible OpenVR/SteamVR-like runtime backed by an
+Apple-native streaming stack (ALVR), so video encoding can use Apple Silicon
+hardware.
+
 ## Available Patches
 
 | Game                                           | Status    | Issue                             | Solution     |
 |------------------------------------------------|-----------|-----------------------------------|--------------|
 | [Space Engineers 2](patches/space-engineers-2) | ✅ Working | FP64 shader check, driver version | Binary patch |
 
+## VR Runtime Status
+
+VR work-in-progress docs live under `vr-on-macos/`.
+
+If you're trying to understand the current blocker quickly, start with:
+
+- `vr-on-macos/ALVR/docs/CURRENT_STATUS_AND_NEXT_STEPS.md`
+- `vr-on-macos/ALVR/docs/VRCLIENT_MACOS_STATUS.md`
+
 ## Quick Start
 
 ```bash
 # Clone the repo
-git clone https://github.com/cbusillo/macos-game-patches.git
-cd macos-game-patches
+git clone <repo-url>
+cd <repo-folder>
 
 # Run a specific patch (uses pyproject entrypoint)
 uv run patch se2
@@ -59,9 +91,13 @@ Or run directly without cloning:
 ## Requirements
 
 - macOS 12+ (Monterey or later)
-- [CrossOver](https://www.codeweavers.com/crossover) 24+ or Wine 8+
-- Python 3.13+ (use `uv` for pinned tooling)
-- Game installed via Steam in CrossOver/Wine
+- Apple Silicon recommended
+- CrossOver (or Wine)
+- Python 3.12+ (use `uv` for pinned tooling)
+
+Some work (reverse engineering / Windows-side tooling) is easier with access to a
+native Windows dev environment; keep any machine-specific details in `.local.md`
+(gitignored) so this repo stays contributor-friendly.
 
 ## How Patches Work
 
@@ -73,6 +109,14 @@ Each patch is a data spec (`patch.toml`) consumed by the shared runner that:
 4. **Verifies** the patch was applied correctly
 
 All patches are reversible with the `--restore` flag.
+
+## Local Docs (gitignored)
+
+Use `.local.md` for machine-specific details (hostnames, mounts, personal paths,
+credentials, etc.).
+
+- Copy `.local.md.example` to `.local.md` and edit it.
+- `.local.md` is intentionally gitignored.
 
 ## Contributing
 

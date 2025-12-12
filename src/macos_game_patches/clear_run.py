@@ -40,62 +40,9 @@ def get_darwin_cache_root(game_exe: str) -> Path:
     return Path(base) / "d3dm" / game_exe
 
 
-def load_spec(target: str):
-    repo_root = find_repo_root()
-    specs = discover_specs(repo_root)
-
-    if target in specs:
-        spec_path = specs[target]
-    else:
-        spec_candidate = Path(target)
-        if spec_candidate.exists():
-            spec_path = spec_candidate
-        else:
-            raise ValueError(
-                f"Unknown patch target '{target}'. Use --patch-target or --list via 'uv run patch -- --list'."
-            )
-
-    return load_spec_from_path(spec_path)
-
-
-def resolve_game_dirs(bottle: str, game_folder: str, game_exe: str) -> tuple[Path, Path]:
-    bottle_root = Path.home() / "Library/Application Support/CrossOver/Bottles" / bottle
-    game_root = bottle_root / "drive_c/Program Files (x86)/Steam/steamapps/common" / game_folder
-    game_dir = game_root / "Game2"
-    if not game_dir.exists():
-        raise FileNotFoundError(f"Game directory not found: {game_dir}")
-    return bottle_root, game_dir
-
-
-def clear_caches(bottle_root: Path, game_folder: str, game_exe: str, bottle_name: str | None = None) -> None:
-    user_root = bottle_root / "drive_c/users/crossover/AppData"
-    roaming_root = user_root / "Roaming" / game_folder
-    shader_cache_dir = roaming_root / "Temp/ShaderCache"
-    logs_dir = roaming_root / "Temp/Logs"
-    d3dm_root = get_darwin_cache_root(game_exe)
-
-    print("\nClearing shader caches...")
-    remove_path(shader_cache_dir)
-    remove_path(d3dm_root / "shaders.cache")
-
-    print(f"Leaving logs in place at: {logs_dir}")
-
-    print("\nKilling stray processes...")
-    kill_list = [
-        game_exe,
-        "steam.exe",
-        "steamwebhelper.exe",
-        "cxmanip.exe",
-        game_folder,
-    ]
-    if bottle_name:
-        kill_list.append(bottle_name)
-    kill_processes(kill_list)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Clean caches, apply patch spec, and launch via CrossOver",
+        description="Clear caches, apply patch spec, and launch via CrossOver",
     )
     parser.add_argument(
         "--patch-target",
@@ -127,16 +74,32 @@ def main() -> int:
 
     game_exe = args.game_exe or f"{args.game_folder}.exe"
 
+    repo_root = find_repo_root()
+    specs = discover_specs(repo_root)
+
+    target = args.patch_target
+    if target in specs:
+        spec_path = specs[target]
+    else:
+        spec_candidate = Path(target)
+        if spec_candidate.exists():
+            spec_path = spec_candidate
+        else:
+            print(f"ERROR: Unknown patch target '{target}'. Use --patch-target or --list via 'uv run patch -- --list'.")
+            return 1
+
     try:
-        spec = load_spec(args.patch_target)
+        spec = load_spec_from_path(spec_path)
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: Failed to load spec: {exc}")
         return 1
 
-    try:
-        bottle_root, game_dir = resolve_game_dirs(args.bottle, args.game_folder, game_exe)
-    except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: {exc}")
+    bottle_root = Path.home() / "Library/Application Support/CrossOver/Bottles" / args.bottle
+    game_root = bottle_root / "drive_c/Program Files (x86)/Steam/steamapps/common" / args.game_folder
+    game_dir = game_root / "Game2"
+
+    if not game_dir.exists():
+        print(f"ERROR: Game directory not found: {game_dir}")
         return 1
 
     if not args.skip_patch:
@@ -146,9 +109,28 @@ def main() -> int:
             return 1
         run_patch(spec, game_path, restore=False, check_only=False)
 
-    clear_caches(bottle_root, args.game_folder, game_exe, args.bottle)
-
     launch_args = [] if args.skip_clear_args else (spec.clear_run_args or [])
+
+    user_root = bottle_root / "drive_c/users/crossover/AppData"
+    roaming_root = user_root / "Roaming" / args.game_folder
+    shader_cache_dir = roaming_root / "Temp/ShaderCache"
+    logs_dir = roaming_root / "Temp/Logs"
+    d3dm_root = get_darwin_cache_root(game_exe)
+
+    print("\nClearing shader caches...")
+    remove_path(shader_cache_dir)
+    remove_path(d3dm_root / "shaders.cache")
+
+    print(f"Leaving logs in place at: {logs_dir}")
+
+    print("\nKilling stray processes...")
+    kill_processes([
+        game_exe,
+        "steam.exe",
+        "steamwebhelper.exe",
+        "cxmanip.exe",
+        args.bottle,
+    ])
 
     crossover_bin = Path(args.crossover_bin)
     if not crossover_bin.exists():
@@ -184,39 +166,6 @@ def main() -> int:
         return 1
 
     print("Launch command issued. Configure Steam launch args as needed.")
-    return 0
-
-
-def main_clean() -> int:
-    parser = argparse.ArgumentParser(
-        description="Clean caches and kill game/Steam processes (no patching or launch)",
-    )
-    parser.add_argument(
-        "--patch-target",
-        default="space-engineers-2",
-        help="Patch target slug or path to a patch.toml (for locating game defaults)",
-    )
-    parser.add_argument("--bottle", default="Space Engineers", help="CrossOver bottle name")
-    parser.add_argument("--game-folder", default="SpaceEngineers2", help="Game folder under Steam common")
-    parser.add_argument("--game-exe", default=None, help="Game exe name (defaults to <game-folder>.exe)")
-    args = parser.parse_args()
-
-    game_exe = args.game_exe or f"{args.game_folder}.exe"
-
-    try:
-        _ = load_spec(args.patch_target)
-    except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: Failed to load spec: {exc}")
-        return 1
-
-    try:
-        bottle_root, _ = resolve_game_dirs(args.bottle, args.game_folder, game_exe)
-    except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: {exc}")
-        return 1
-
-    clear_caches(bottle_root, args.game_folder, game_exe, args.bottle)
-    print("Clean completed (no patch applied, no launch).")
     return 0
 
 

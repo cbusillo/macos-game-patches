@@ -1,0 +1,46 @@
+# Local Project Notes (gitignored)
+
+Copy this file to `.local.md` and customize it.
+
+`.local.md` is gitignored so you can safely record machine-specific details
+(hostnames, mounts, personal paths, credentials).
+
+## Windows VM / Native Windows Dev Env
+
+### Access
+
+- SSH user/host: `gaming@<your-windows-host>`
+- Terminal: `ssh gaming@<your-windows-host>`
+
+### macOS mount
+
+- Mounted volume: `/Volumes/<your-windows-host>`
+- Example: `/Volumes/winders`
+
+### Windows paths
+
+- Dev artifacts root: `C:\\dev`
+- Notes:
+  - keep logs/dumps/binaries/scripts here
+  - avoid storing proprietary game binaries in git
+
+### Package management
+
+- `winget` available
+- Suggested installs (fill in as needed):
+  - `winget install Git.Git`
+  - `winget install Microsoft.VisualStudioCode`
+  - `winget install 7zip.7zip`
+
+## CrossOver / Wine
+
+- Primary bottle(s):
+  - `<bottle-name>`
+- Primary game(s):
+  - `<game>`
+
+## Notes / Scratch
+
+- Keep proprietary assets under `temp/` (gitignored).
+- Record one-off commands and experiment logs here.
+
