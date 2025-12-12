@@ -1,0 +1,4 @@
+[submodule "vr-on-macos/ALVR"]
+	path = vr-on-macos/ALVR
+	url = https://github.com/cbusillo/ALVR.git
+

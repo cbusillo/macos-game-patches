@@ -30,6 +30,12 @@ VR runtime work lives under `vr-on-macos/`.
 
 Local-only host notes (not committed): see `.local.md.example`.
 
+If you cloned the repo and `vr-on-macos/ALVR` is empty, initialize submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 ## Why This Exists
 
 Many Windows games (including VR titles) perform hardware checks that incorrectly

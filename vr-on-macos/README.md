@@ -1,5 +1,11 @@
 ### ALVR + OpenVR on macOS
 
+If `ALVR/` is empty after cloning, initialize submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
 - `ALVR/docs/MACOS.md`  
   High-level architecture of the ALVR macOS stack (CrossOver/Wine, shared memory, VideoToolbox encoder, AVP client).
 
