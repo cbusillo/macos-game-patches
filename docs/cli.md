@@ -13,8 +13,9 @@ Use the packaged entry point `patch` (via uv) to apply or inspect patches.
 - Restore from backups:
   - `uv run patch se2 --restore`
 - Clear caches and launch via CrossOver (defaults to SE2):
-  - `uv run clear-run`
-  - See `uv run clear-run -- --help` for bottle/game overrides.
+  - `uv run clean-patch-run`
+  - See `uv run clean-patch-run -- --help` for bottle/game overrides.
+  - Clean only: `uv run clean -- --help`
 
 ## Arguments
 

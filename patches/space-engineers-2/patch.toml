@@ -8,6 +8,7 @@ args = [
   "-disablevsync",
   "-startLast",
   "-forceAllAdaptersSupported",
+  "-nodirectstorage",
 ]
 steam_app_id = "1133870"
 

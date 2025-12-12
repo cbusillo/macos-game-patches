@@ -15,9 +15,9 @@ useful for SE2 and other Windows-on-macOS patch work.
 
 ## Wine/CrossOver runtime
 
-- `uv run clear-run -- --help` — clear caches, reapply a patch spec, and launch
+- `uv run clean-patch-run -- --help` — clear caches, reapply a patch spec, and launch
+- `uv run clean -- --help` — clear caches and kill processes (no patch or launch)
   via CrossOver. Defaults target `space-engineers-2`; customize with
   `--patch-target`, `--bottle`, `--game-folder`, etc.
 
 If you add other repeat-use tools, list them here so future sessions can find
-them quickly.

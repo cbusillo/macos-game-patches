@@ -14,7 +14,8 @@ dependencies = []
 
 [project.scripts]
 patch = "macos_game_patches.cli:main"
-clear-run = "macos_game_patches.clear_run:main"
+clean = "macos_game_patches.clear_run:main_clean"
+clean-patch-run = "macos_game_patches.clear_run:main"
 
 [tool.uv]
 package = true

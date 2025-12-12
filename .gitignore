@@ -41,3 +41,5 @@ temp/
 
 # Logs
 *.log
+
+.code/

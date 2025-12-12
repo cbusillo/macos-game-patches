@@ -8,7 +8,8 @@ Binary patches to run Windows games on macOS via CrossOver, Wine, or Game Portin
 - Game docs: `patches/space-engineers-2/README.md`
 - Patch CLI usage: `docs/cli.md`
 - Tools list: `TOOLS.md`
-- Cache clear + launch helper: `uv run clear-run -- --help`
+- Cache clear + launch helper: `uv run clean-patch-run -- --help`
+- Clean only (no patch/launch): `uv run clean -- --help`
 - Patch specs are data-only TOML files under `patches/<game>/`; shared code
   lives in `src/macos_game_patches/`.
 
