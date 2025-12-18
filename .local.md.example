@@ -7,10 +7,61 @@ Copy this file to `.local.md` and customize it.
 
 ## Windows VM / Native Windows Dev Env
 
-### Access
+### Identity
 
-- SSH user/host: `gaming@<your-windows-host>`
-- Terminal: `ssh gaming@<your-windows-host>`
+- SSH user: `gaming`
+- Host alias: `win-dev`
+- Windows dev artifacts: `C:\\dev`
+
+### Reachability
+
+Fill in:
+
+- `winders_ip = <ip>`
+- `winders_mac = <mac>`
+
+Quick connectivity check:
+
+```bash
+ssh -o ConnectTimeout=3 gaming@<ip> 'echo OK && hostname'
+```
+
+Optional `~/.ssh/config` snippet:
+
+```sshconfig
+Host win-dev
+  HostName <ip>
+  User gaming
+```
+
+### IP vs hostname
+
+For repeatability, prefer one of:
+
+- Configure a DHCP reservation on your router for `<mac>`
+- Or make `win-dev` resolvable on the Mac (router DNS, `hosts` entry, or mDNS)
+
+### Wake-on-LAN (if asleep)
+
+If SSH fails and the machine is asleep, send a WOL magic packet:
+
+```bash
+python3 - <<'PY'
+import socket
+
+mac = "<mac>"  # aa:bb:cc:dd:ee:ff
+broadcast = "192.168.1.255"
+port = 9
+
+mac_bytes = bytes.fromhex(mac.replace(":", ""))
+packet = b"\xff" * 6 + mac_bytes * 16
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+sock.sendto(packet, (broadcast, port))
+print("sent")
+PY
+```
 
 ### macOS mount
 
@@ -32,6 +83,20 @@ Copy this file to `.local.md` and customize it.
   - `winget install Microsoft.VisualStudioCode`
   - `winget install 7zip.7zip`
 
+## SteamVR / OpenVR ground truth (Windows)
+
+### Important: SSH session vs console session
+
+The Windows OpenSSH server runs remote commands in **session 0** by default.
+SteamVR/VR apps often need to run in the active **console session** (typically
+session 1) to see GPU outputs and behave normally.
+
+Check current sessions:
+
+```cmd
+query user
+```
+
 ## CrossOver / Wine
 
 - Primary bottle(s):
@@ -43,4 +108,3 @@ Copy this file to `.local.md` and customize it.
 
 - Keep proprietary assets under `temp/` (gitignored).
 - Record one-off commands and experiment logs here.
-

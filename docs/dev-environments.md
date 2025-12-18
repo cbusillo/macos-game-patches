@@ -9,6 +9,11 @@ This doc describes the *general* pattern so others can contribute.
 Machine-specific details (hostnames, mounts, personal paths, credentials) should
 live in `.local.md` (gitignored).
 
+To get started:
+
+- Copy `.local.md.example` to `.local.md` and fill in your environment.
+- Keep `.local.md` limited to details that should never land in a PR.
+
 ## macOS (primary)
 
 - CrossOver/Wine used to run the Windows game binaries.
@@ -30,5 +35,11 @@ Recommended baseline:
   scripts).
 - Use `winget` to install common tools in a repeatable way.
 
-Add your actual host connection details to `.local.md`.
+Practical notes:
 
+- VR titles often behave differently when launched from a background service
+  context. Prefer launching SteamVR/VR apps in the active console session.
+- If your Windows host is asleep, Wake-on-LAN can be a reliable way to resume it
+  without walking over to a keyboard.
+
+Add your actual host connection details to `.local.md`.
