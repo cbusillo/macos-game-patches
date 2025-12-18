@@ -89,7 +89,7 @@ def _resolve_spec_path(target: str) -> Path | None:
     if candidate.exists():
         return candidate
 
-    print(f"ERROR: Unknown patch target '{target}'. Use 'uv run patch -- --list' to see options.")
+    print(f"ERROR: Unknown patch target '{target}'. Use 'uv run patch --list' to see options.")
     return None
 
 

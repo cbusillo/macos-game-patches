@@ -5,7 +5,7 @@ Use the packaged entry point `patch` (via uv) to apply or inspect patches.
 ## Basic commands
 
 - List available patch specs:
-  - `uv run patch -- --list`
+  - `uv run patch --list`
 - Apply Space Engineers 2 patch:
   - `uv run patch se2`
 - Check status without modifying files:
@@ -18,9 +18,9 @@ Use the packaged entry point `patch` (via uv) to apply or inspect patches.
   - `uv run clean-run`
 - Clean + patch + launch via CrossOver:
   - `uv run clean-patch-run`
-  - See `uv run clean-patch-run -- --help` for bottle/game overrides.
+  - See `uv run clean-patch-run --help` for bottle/game overrides.
 - Clean only (no patch/launch):
-  - `uv run clean -- --help`
+  - `uv run clean --help`
 
 ## Arguments
 

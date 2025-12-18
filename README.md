@@ -17,13 +17,14 @@ This repo currently contains two major tracks:
 
 - Repo overview: `README.md` (this file)
 - VR runtime work: `vr-on-macos/README.md`
+- VR iteration tasks (optional): `cd vr-on-macos && just --list`
 - Patch CLI usage: `docs/cli.md`
 - Dev environments (macOS + optional Windows): `docs/dev-environments.md`
 - Tools list: `TOOLS.md`
-- Launch helper: `uv run run -- --help`
-- Clean + launch helper: `uv run clean-run -- --help`
-- Clean + patch + launch helper: `uv run clean-patch-run -- --help`
-- Clean only (no patch/launch): `uv run clean -- --help`
+- Launch helper: `uv run run --help`
+- Clean + launch helper: `uv run clean-run --help`
+- Clean + patch + launch helper: `uv run clean-patch-run --help`
+- Clean only (no patch/launch): `uv run clean --help`
 
 Patch specs are data-only TOML files under `patches/<game>/`; shared code lives
 in `src/macos_game_patches/`.
@@ -47,7 +48,8 @@ reject macOS systems:
 - **Driver version checks** that fail under Wine's emulation layer
 - **DirectX feature checks** that translation layers don't fully expose
 
-These patches bypass unnecessary compatibility checks, allowing games to run when the underlying hardware is actually capable.
+These patches bypass unnecessary compatibility checks, allowing games to run
+when the underlying hardware is actually capable.
 
 For VR specifically, the long-term goal is to run Windows VR titles under
 CrossOver while presenting a compatible OpenVR/SteamVR-like runtime backed by an
@@ -56,9 +58,10 @@ hardware.
 
 ## Available Patches
 
-| Game                                           | Status    | Issue                             | Solution     |
-|------------------------------------------------|-----------|-----------------------------------|--------------|
-| [Space Engineers 2](patches/space-engineers-2) | ✅ Working | FP64 shader check, driver version | Binary patch |
+- [Space Engineers 2](patches/space-engineers-2)
+  - Status: ✅ Working
+  - Issue: FP64 shader check, driver version
+  - Solution: binary patch
 
 ## VR Runtime Status
 
@@ -92,7 +95,9 @@ Or run directly without cloning:
 
 ## Working files (do not commit binaries)
 
-- Use `temp/` for any extracted game DLLs, EXEs, dumps, or other proprietary assets. This folder is gitignored.
+- Use `temp/` for any extracted game DLLs, EXEs, dumps, or other proprietary
+  assets. This folder is gitignored.
+- For VR runtime iteration, store per-run traces under `temp/vr_runs/` (gitignored).
 - Patch scripts create `.backup` files next to binaries; these are also ignored.
 - Keep docs and scripts under version control; keep vendor binaries out.
 
@@ -103,8 +108,9 @@ Or run directly without cloning:
 - CrossOver (or Wine)
 - Python 3.12+ (use `uv` for pinned tooling)
 
-Some work (reverse engineering / Windows-side tooling) is easier with access to a
-native Windows dev environment; keep any machine-specific details in `.local.md`
+Some work (reverse engineering / Windows-side tooling) is easier with access to
+a native Windows dev environment; keep any machine-specific details in
+`.local.md`
 (gitignored) so this repo stays contributor-friendly.
 
 ## How Patches Work
