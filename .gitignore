@@ -41,6 +41,7 @@ temp/
 
 # Logs
 *.log
+*.dxvk-cache
 
 .code/
 

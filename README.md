@@ -1,170 +1,151 @@
-# VR on macOS (Apple-only)
+# VR on macOS: Fresh Start
 
-This repo is a workspace for running Windows VR games on Apple hardware.
+This repository was intentionally reset to a docs-first baseline.
 
-Primary goal:
+Current objective:
 
-- Run the game under CrossOver/Wine on Apple Silicon.
-- Provide a VR runtime path that works without a Windows PC.
-- Stream to Apple Vision Pro (ALVR client) with hardware encoding on Apple Silicon.
+- Run a Windows VR game on Apple Silicon via CrossOver.
+- Use Apple Vision Pro as the headset.
+- Require H.265 hardware encoding on macOS hardware.
+- Reject any software-encode path.
 
-This repo currently contains two major tracks:
+## What Is Kept
 
-1. **VR runtime experiments** (ALVR + OpenVR work)
-2. **Binary patch specs** that bypass unnecessary compatibility checks in games
+- `README.md`: project intent and reset status.
+- `docs/facts.md`: verified external facts and links.
+- `docs/local-facts.md`: current machine and network facts for this workspace.
+- `docs/alvr-source.md`: where ALVR runtime code lives and how it is managed.
+- `docs/rebuild-plan.md`: practical rebuild sequence from zero.
+- `docs/steamvr-alvr-plan.md`: interaction and phase-gate plan for HEVC + Opus.
+- `docs/steamvr-compositor-blocker.md`: current compositor startup blocker,
+  hashes, and patch direction.
+- `docs/external-projects-map.md`: external projects and escalation channels
+  mapped to current blockers.
+- `docs/crossover-repro-bundle.md`: deterministic repro bundle checklist and
+  escalation template.
+- `docs/bridge-ipc-v1.md`: mirrored snapshot of bridge protocol v1.
+- `docs/steamvr-smoke.md`: minimal SteamVR runtime smoke harness.
+- `tools/hevc_gate.py`: H.265 VideoToolbox hardware gate.
+- `tools/steamvr_smoke.py`: deterministic SteamVR launch/log capture harness.
+  Captures per-run `*.delta.txt` log slices and supports
+  `--graphics-backend {default,d3dmetal,dxvk}`. Default backend is `dxvk`
+  because current `d3dmetal` runs crash `vrcompositor` with `Exception c0000005`.
+- `tools/vr_stack_cleanup.py`: explicit preflight cleanup for stale CrossOver,
+  Wine, SteamVR, and `winetemp` wrapper processes. Supports
+  `--sterile-native-steam` to also terminate native Steam `ipcserver` for fully
+  sterile runs.
+- `tools/live_avp_checkpoint.py`: strict one-shot live AVP harness with
+  mandatory preflight/postflight cleanup, `dxvk`-first backend defaults, and
+  per-run outcome gating (`bridge_connected`, `frame_ready_seen`, decoder
+  probes, client present probes, host frame-signal probes).
+- `tools/live_avp_nondirect_prod.py`: locked strict non-direct profile runner
+  for the current production fallback path (single command with fixed strict
+  gates).
+- `tools/live_avp_directmode_matrix.py`: strict direct-mode research runner
+  that executes DXVK + D3DMetal and writes a blocker report.
+- `tools/live_avp_release_gate.py`: one-shot CI/operations gate that runs the
+  strict non-direct pipeline twice and emits artifact summaries.
+- `tools/alvr_lock.py`: writes the currently referenced ALVR commit lock file.
+- `tools/alvr_driver_register.py`: forces SteamVR to prefer `alvr_server` and
+  registers external ALVR driver paths in the CrossOver bottle.
+- `tools/alvr_driver_deploy.py`: deploys `driver_alvr_server.dll` and
+  manifest into the SteamVR driver folder in the CrossOver bottle, and verifies
+  runtime DLL presence for imported `openvr_api.dll` / `libvpl.dll`.
+- `tools/vtbridge_protocol.py`: bridge protocol constants and framing helpers.
+- `tools/vtbridge_daemon.py`: local daemon skeleton with ring-state handling.
+- `tools/vtbridge_probe.py`: local probe client for handshake verification.
+- `tools/vtbridge_handshake_gate.py`: deterministic local handshake gate runner.
+- `tools/vtbridge_ring_conformance.py`: ring slot state transition conformance test.
+- `tools/vtbridge_hw_stream_gate.py`: strict hardware-HEVC stream gate for
+  the bridge path.
+- `tools/package_crossover_repro_bundle.py`: package a reproducible escalation
+  zip from a run directory.
+- `LICENSE`.
 
-## Start Here
+## Current Status
 
-- Repo overview: `README.md` (this file)
-- VR runtime work: `vr-on-macos/README.md`
-- VR iteration tasks (optional): `cd vr-on-macos && just --list`
-- Patch CLI usage: `docs/cli.md`
-- Dev environments (macOS + optional Windows): `docs/dev-environments.md`
-- Tools list: `TOOLS.md`
-- Launch helper: `uv run run --help`
-- Clean + launch helper: `uv run clean-run --help`
-- Clean + patch + launch helper: `uv run clean-patch-run --help`
-- Clean only (no patch/launch): `uv run clean --help`
+- No runtime code is considered production-ready.
+- Previous experiments were removed from versioned source.
+- We are rebuilding only from verified constraints.
 
-Patch specs are data-only TOML files under `patches/<game>/`; shared code lives
-in `src/macos_game_patches/`.
+## Next Step
 
-VR runtime work lives under `vr-on-macos/`.
+Start with `docs/facts.md`, then `docs/local-facts.md`, then execute
+`docs/rebuild-plan.md` top-down.
 
-Local-only host notes (not committed): see `.local.md.example`.
-
-If you cloned the repo and `vr-on-macos/ALVR` is empty, initialize submodules:
-
-```bash
-git submodule update --init --recursive
-```
-
-## Why This Exists
-
-Many Windows games (including VR titles) perform hardware checks that incorrectly
-reject macOS systems:
-
-- **GPU capability checks** that fail on Apple Silicon (M1/M2/M3/M4)
-- **Driver version checks** that fail under Wine's emulation layer
-- **DirectX feature checks** that translation layers don't fully expose
-
-These patches bypass unnecessary compatibility checks, allowing games to run
-when the underlying hardware is actually capable.
-
-For VR specifically, the long-term goal is to run Windows VR titles under
-CrossOver while presenting a compatible OpenVR/SteamVR-like runtime backed by an
-Apple-native streaming stack (ALVR), so video encoding can use Apple Silicon
-hardware.
-
-## Available Patches
-
-- [Space Engineers 2](patches/space-engineers-2)
-  - Status: ✅ Working
-  - Issue: FP64 shader check, driver version
-  - Solution: binary patch
-
-## VR Runtime Status
-
-VR work-in-progress docs live under `vr-on-macos/`.
-
-If you're trying to understand the current blocker quickly, start with:
-
-- `vr-on-macos/ALVR/docs/CURRENT_STATUS_AND_NEXT_STEPS.md`
-- `vr-on-macos/ALVR/docs/VRCLIENT_MACOS_STATUS.md`
-
-## Quick Start
-
-```bash
-# Clone the repo
-git clone <repo-url>
-cd <repo-folder>
-
-# Run a specific patch (uses pyproject entrypoint)
-uv run patch se2
-
-# Status / restore examples
-uv run patch se2 --check
-uv run patch se2 --restore
-```
-
-Or run directly without cloning:
+First executable gate:
 
 ```bash
-# (raw-run example removed for now; run from local clone)| python3
+python3 tools/hevc_gate.py
 ```
 
-## Working files (do not commit binaries)
+First runtime smoke:
 
-- Use `temp/` for any extracted game DLLs, EXEs, dumps, or other proprietary
-  assets. This folder is gitignored.
-- For VR runtime iteration, store per-run traces under `temp/vr_runs/` (gitignored).
-- Patch scripts create `.backup` files next to binaries; these are also ignored.
-- Keep docs and scripts under version control; keep vendor binaries out.
+```bash
+python3 tools/vr_stack_cleanup.py
+python3 tools/steamvr_smoke.py --mode null
+```
 
-## Requirements
+Strict live checkpoint (minimal AVP attention window):
 
-- macOS 12+ (Monterey or later)
-- Apple Silicon recommended
-- CrossOver (or Wine)
-- Python 3.12+ (use `uv` for pinned tooling)
+```bash
+python3 tools/live_avp_checkpoint.py --sterile-native-steam --require-pass
+```
 
-Some work (reverse engineering / Windows-side tooling) is easier with access to
-a native Windows dev environment; keep any machine-specific details in
-`.local.md`
-(gitignored) so this repo stays contributor-friendly.
+Strict real-source validation (fails if client synthetic fallback or host idle
+fallback is enabled/used):
 
-## How Patches Work
+```bash
+python3 tools/live_avp_checkpoint.py \
+  --sterile-native-steam \
+  --host-only \
+  --codec hevc \
+  --synthetic-fallback disable \
+  --forbid-synthetic-fallback \
+  --host-idle-fallback disable \
+  --forbid-host-idle-fallback \
+  --require-real-decode \
+  --require-client-video-present \
+  --require-host-frame-signals \
+  --require-source-motion \
+  --forbid-static-source \
+  --require-pass
+```
 
-Each patch is a data spec (`patch.toml`) consumed by the shared runner that:
+Current direct-mode status and strict repro evidence:
 
-1. **Detects** the game installation automatically
-2. **Backs up** original files before modification
-3. **Patches** specific bytes in game binaries
-4. **Verifies** the patch was applied correctly
+- `docs/direct-mode-blocker-dossier.md`
 
-All patches are reversible with the `--restore` flag.
+Current best production path:
 
-## Local Docs (gitignored)
+- strict `direct-mode off` validation (see `docs/steamvr-smoke.md`)
 
-Use `.local.md` for machine-specific details (hostnames, mounts, personal paths,
-credentials, etc.).
+One-command strict non-direct production run:
 
-- Copy `.local.md.example` to `.local.md` and edit it.
-- `.local.md` is intentionally gitignored.
+```bash
+python3 tools/live_avp_nondirect_prod.py
+```
 
-## Contributing
+Two-run strict confirmation (recommended before calling the path stable):
 
-### Adding a New Patch
+```bash
+python3 tools/live_avp_nondirect_prod.py --confirm-twice
+```
 
-1. Create a folder under `patches/` with the game name (lowercase, hyphens)
-2. Include:
-   - `patch.toml` - Data-only patch spec
-   - `README.md` - Documentation for users
-   - `TECHNICAL.md` - Technical details for developers
+Direct-mode research matrix (strict, evidence-first):
 
-### Patch Development Process
+```bash
+python3 tools/live_avp_directmode_matrix.py
+```
 
-1. **Identify the issue** - Check game logs for error messages
-2. **Decompile** - Use ILSpy, dnSpy, or Ghidra to analyze binaries
-3. **Find the check** - Locate the compatibility check in code
-4. **Create minimal patch** - Modify only what's necessary
-5. **Test thoroughly** - Verify game runs and patch is reversible
-6. **Document everything** - Others should understand what and why
+One-shot release gate with artifacts:
 
-See [AGENTS.md](AGENTS.md) for AI-assisted development guidelines.
+```bash
+python3 tools/live_avp_release_gate.py
+```
 
-## Disclaimer
+ALVR reference lock update:
 
-- These patches modify game files - use at your own risk
-- Always keep backups (patches create them automatically)
-- Patches may break after game updates
-- This project is not affiliated with any game developers
-
-## License
-
-MIT License - See [LICENSE](LICENSE) for details.
-
-## Credits
-
-- Patches developed with [Claude Code](https://claude.ai/code)
-- Thanks to the CrossOver, Wine, and DXVK communities
+```bash
+python3 tools/alvr_lock.py
+```

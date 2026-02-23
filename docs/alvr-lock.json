@@ -1,0 +1,19 @@
+{
+  "captured_at_utc": "2026-02-15T00:06:21.303618+00:00",
+  "alvr_dir": "/Users/cbusillo/Developer/ALVR",
+  "head": "1a4194ff137937c0a4f416ad2d6d1acedb851e8a",
+  "branch": "master",
+  "commit_date": "2026-01-06T12:34:51Z",
+  "summary": "fix: missing libvpl.dll causes driver_alvr_server to crash (#3156)",
+  "upstream_master_head": "1a4194ff137937c0a4f416ad2d6d1acedb851e8a",
+  "remotes": {
+    "origin": {
+      "fetch": "git@github.com:cbusillo/ALVR.git",
+      "push": "git@github.com:cbusillo/ALVR.git"
+    },
+    "upstream": {
+      "fetch": "git@github.com:alvr-org/ALVR.git",
+      "push": "git@github.com:alvr-org/ALVR.git"
+    }
+  }
+}
