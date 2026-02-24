@@ -1281,8 +1281,8 @@ def run_once(args: argparse.Namespace) -> int:
     elif args.host_idle_fallback == "disable":
         launch_env["ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK"] = "1"
 
-    # Route winedbg auto-crash output into a deterministic bottle-local file so
-    # unhandled exceptions are captured in run artifacts.
+    # Configure AeDebug for this run. Default mode suppresses debugger popups
+    # (cmd /c exit 0). Capture mode redirects winedbg output to a file.
     paths["windows_temp"].mkdir(parents=True, exist_ok=True)
     if paths["winedbg_log"].exists():
         paths["winedbg_log"].unlink()
@@ -1291,7 +1291,10 @@ def run_once(args: argparse.Namespace) -> int:
         run_dir / "logs/aedebug-query-before.log",
         env=launch_env,
     )
-    debugger_value = r"cmd /c winedbg --auto %ld %ld >> C:\windows\temp\winedbg-auto.log 2>&1"
+    if args.winedbg_mode == "capture":
+        debugger_value = r"cmd /c winedbg --auto %ld %ld >> C:\windows\temp\winedbg-auto.log 2>&1"
+    else:
+        debugger_value = r"cmd /c exit 0"
     aedebug_set_rc = set_aedebug_debugger(
         cxstart,
         debugger_value,
@@ -1306,6 +1309,7 @@ def run_once(args: argparse.Namespace) -> int:
     meta["aedebug_previous_debugger"] = previous_debugger
     meta["aedebug_set_exit_code"] = aedebug_set_rc
     meta["aedebug_current_debugger"] = current_debugger
+    meta["winedbg_mode"] = args.winedbg_mode
     meta["winedbg_capture_log"] = str(paths["winedbg_log"])
     write_json(run_dir / "config/meta.json", meta)
 
@@ -1734,6 +1738,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--wine-debug-channels",
         default="",
         help="optional WINEDEBUG channels (for example: +d3d11,+dxgi,+vulkan)",
+    )
+    parser.add_argument(
+        "--winedbg-mode",
+        choices=["off", "capture"],
+        default="off",
+        help=(
+            "AeDebug mode: off suppresses debugger popups (cmd /c exit 0); "
+            "capture routes winedbg output to logs/winedbg-auto.log"
+        ),
     )
     parser.add_argument(
         "--direct-mode",
