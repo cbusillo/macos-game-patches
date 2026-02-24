@@ -117,6 +117,31 @@ Result summary:
   (`steamvr_external_memory_extensions_missing=true`) but does not block
   current non-direct production acceptance criteria
 
+### Local visionOS app build/install validation
+
+Build/deploy command path:
+
+```bash
+python3 tools/avp_client_build_install.py
+```
+
+Direct command evidence (local `ALVR-visionos` checkout):
+
+- build succeeded:
+  - `xcodebuild -project ALVRClient.xcodeproj -scheme ALVRClient`
+    `-configuration Release -destination generic/platform=visionOS build`
+- install succeeded to paired AVP via `devicectl`.
+- launch succeeded and console reports ALVR client runtime startup
+  (`ALVR v21.0.0-dev12`, mDNS advertisement active, searching for streamer).
+
+Smoke with local-built client:
+
+- `temp/vr_runs/20260223-235619-live-avp-checkpoint` (`pass=true`) with base
+  host/runtime gates.
+- note: strict client probe-dependent gates currently fail with the local build
+  because `client_probe_log_bytes=0`; strict release gating remains tied to the
+  probe-capable client path.
+
 ## 2026-02-18 Run Set
 
 ### Run: `temp/vr_runs/20260218-032035-live-avp-checkpoint` (pass)

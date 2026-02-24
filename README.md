@@ -60,6 +60,9 @@ Current objective:
   the bridge path.
 - `tools/package_crossover_repro_bundle.py`: package a reproducible escalation
   zip from a run directory.
+- `tools/avp_client_build_install.py`: one-command helper to build and deploy
+  the ALVR visionOS client from `~/Developer/ALVR-visionos` to a paired Apple
+  Vision Pro using `xcodebuild` + `devicectl`.
 - `LICENSE`.
 
 ## Current Status
@@ -148,4 +151,10 @@ ALVR reference lock update:
 
 ```bash
 python3 tools/alvr_lock.py
+```
+
+Local visionOS client build + deploy:
+
+```bash
+python3 tools/avp_client_build_install.py
 ```
