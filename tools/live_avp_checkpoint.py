@@ -79,6 +79,56 @@ def run_capture_timeout(
     return result.returncode
 
 
+def query_aedebug_debugger(cxstart: Path, output_path: Path, env: dict[str, str] | None = None) -> str | None:
+    reg_exe = r"C:\windows\system32\reg.exe"
+    key = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug"
+    rc = run_capture_timeout(
+        [str(cxstart), "--bottle", "Steam", "--no-gui", reg_exe, "query", key, "/v", "Debugger"],
+        output_path,
+        env=env,
+        timeout_seconds=15,
+    )
+    if rc != 0:
+        return None
+
+    text = output_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"\bDebugger\s+REG_SZ\s+(.+)$", text, re.MULTILINE)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def set_aedebug_debugger(
+    cxstart: Path,
+    debugger_value: str,
+    output_path: Path,
+    env: dict[str, str] | None = None,
+) -> int:
+    reg_exe = r"C:\windows\system32\reg.exe"
+    key = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug"
+    return run_capture_timeout(
+        [
+            str(cxstart),
+            "--bottle",
+            "Steam",
+            "--no-gui",
+            reg_exe,
+            "add",
+            key,
+            "/v",
+            "Debugger",
+            "/t",
+            "REG_SZ",
+            "/d",
+            debugger_value,
+            "/f",
+        ],
+        output_path,
+        env=env,
+        timeout_seconds=15,
+    )
+
+
 def start_logged_process(
     command: list[str],
     output_path: Path,
@@ -127,12 +177,15 @@ def steam_paths() -> dict[str, Path]:
     bottle_root = Path.home() / "Library/Application Support/CrossOver/Bottles/Steam"
     drive_c = bottle_root / "drive_c"
     steam_root = drive_c / "Program Files (x86)/Steam"
+    windows_temp = drive_c / "windows/temp"
     return {
         "bottle_root": bottle_root,
         "steam_logs": steam_root / "logs",
         "steamvr_settings": steam_root / "config/steamvr.vrsettings",
         "alvr_session": steam_root / "steamapps/common/SteamVR/drivers/alvr_server/session.json",
         "alvr_log": steam_root / "steamapps/common/SteamVR/drivers/alvr_server/session_log.txt",
+        "windows_temp": windows_temp,
+        "winedbg_log": windows_temp / "winedbg-auto.log",
     }
 
 
@@ -1227,6 +1280,35 @@ def run_once(args: argparse.Namespace) -> int:
         launch_env["ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK"] = "0"
     elif args.host_idle_fallback == "disable":
         launch_env["ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK"] = "1"
+
+    # Route winedbg auto-crash output into a deterministic bottle-local file so
+    # unhandled exceptions are captured in run artifacts.
+    paths["windows_temp"].mkdir(parents=True, exist_ok=True)
+    if paths["winedbg_log"].exists():
+        paths["winedbg_log"].unlink()
+    previous_debugger = query_aedebug_debugger(
+        cxstart,
+        run_dir / "logs/aedebug-query-before.log",
+        env=launch_env,
+    )
+    debugger_value = r"cmd /c winedbg --auto %ld %ld >> C:\windows\temp\winedbg-auto.log 2>&1"
+    aedebug_set_rc = set_aedebug_debugger(
+        cxstart,
+        debugger_value,
+        run_dir / "logs/aedebug-set.log",
+        env=launch_env,
+    )
+    current_debugger = query_aedebug_debugger(
+        cxstart,
+        run_dir / "logs/aedebug-query-after.log",
+        env=launch_env,
+    )
+    meta["aedebug_previous_debugger"] = previous_debugger
+    meta["aedebug_set_exit_code"] = aedebug_set_rc
+    meta["aedebug_current_debugger"] = current_debugger
+    meta["winedbg_capture_log"] = str(paths["winedbg_log"])
+    write_json(run_dir / "config/meta.json", meta)
+
     startup_exe = r"C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrstartup.exe"
     launch_rc = run_capture_timeout(
         [str(cxstart), "--bottle", "Steam", "--no-gui", "--no-wait", startup_exe],
@@ -1359,6 +1441,9 @@ def run_once(args: argparse.Namespace) -> int:
     if paths["alvr_log"].exists():
         copy_log_with_delta(paths["alvr_log"], logs_dir, baseline_alvr_size)
 
+    if paths["winedbg_log"].exists():
+        copy_log_with_delta(paths["winedbg_log"], logs_dir, 0)
+
     alvr_text, alvr_delta_fallback_used = read_alvr_session_text(logs_dir)
     meta["alvr_delta_fallback_used"] = alvr_delta_fallback_used
     write_json(run_dir / "config/meta.json", meta)
@@ -1407,6 +1492,15 @@ def run_once(args: argparse.Namespace) -> int:
         avp_probe_text,
         steam_runtime_text,
     )
+
+    winedbg_text = ""
+    winedbg_run_log = logs_dir / "winedbg-auto.log"
+    if winedbg_run_log.exists():
+        winedbg_text = winedbg_run_log.read_text(encoding="utf-8", errors="replace")
+    outcome["winedbg_unhandled_exception"] = "Unhandled exception:" in winedbg_text
+    outcome["winedbg_page_fault_execute"] = "page fault on execute access" in winedbg_text
+    outcome["winedbg_no_code_accessible"] = "-- no code accessible --" in winedbg_text
+    outcome["winedbg_log_bytes"] = len(winedbg_text.encode("utf-8"))
     outcome["client_probe_log_collected"] = probe_copy_rc == 0
     outcome["client_probe_log_bytes"] = len(avp_probe_text.encode("utf-8"))
 
