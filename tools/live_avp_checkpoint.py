@@ -196,7 +196,15 @@ def patch_steamvr_settings(
     after_path.write_text(steamvr_settings.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
 
 
-def patch_session_contract(session_path: Path, run_dir: Path, codec: str, stream_protocol: str) -> None:
+def patch_session_contract(
+    session_path: Path,
+    run_dir: Path,
+    codec: str,
+    stream_protocol: str,
+    *,
+    manual_client_host: str | None,
+    manual_client_ip: str | None,
+) -> None:
     before_path = run_dir / "config/session.before.json"
     after_path = run_dir / "config/session.after.json"
     if not session_path.exists():
@@ -205,9 +213,30 @@ def patch_session_contract(session_path: Path, run_dir: Path, codec: str, stream
     before_path.write_text(session_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     session = read_json(session_path)
 
-    # Remove stale client records so retries are evaluated against the current
-    # active AVP endpoint, not historical disconnected hostnames.
-    session["client_connections"] = {}
+    # Keep trusted client records by default so reconnect runs can reuse the
+    # last-known endpoint. Optionally override with a manual route when mDNS
+    # discovery is flaky.
+    existing_connections = session.get("client_connections", {})
+    trusted_connections: dict[str, Any] = {}
+    if isinstance(existing_connections, dict):
+        for key, value in existing_connections.items():
+            if not isinstance(value, dict):
+                continue
+            if value.get("trusted") is True:
+                trusted_connections[str(key)] = value
+
+    if manual_client_host and manual_client_ip:
+        session["client_connections"] = {
+            manual_client_host: {
+                "display_name": "Apple Vision Pro",
+                "current_ip": manual_client_ip,
+                "manual_ips": [manual_client_ip],
+                "trusted": True,
+                "connection_state": "Disconnected",
+            }
+        }
+    else:
+        session["client_connections"] = trusted_connections
 
     session_settings = session.setdefault("session_settings", {})
     connection = session_settings.setdefault("connection", {})
@@ -1090,7 +1119,14 @@ def run_once(args: argparse.Namespace) -> int:
         enable_home_app=(args.steamvr_home == "on"),
         direct_mode=args.direct_mode,
     )
-    patch_session_contract(paths["alvr_session"], run_dir, args.codec, args.stream_protocol)
+    patch_session_contract(
+        paths["alvr_session"],
+        run_dir,
+        args.codec,
+        args.stream_protocol,
+        manual_client_host=args.manual_client_host.strip() or None,
+        manual_client_ip=args.manual_client_ip.strip() or None,
+    )
 
     # Enforce ALVR driver registration each run.
     run_capture(
@@ -1734,6 +1770,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--avp-bundle-id",
         default="com.shinycomputers.alvrclient",
         help="visionOS ALVR bundle identifier",
+    )
+    parser.add_argument(
+        "--manual-client-host",
+        default="",
+        help="optional manual ALVR client host key (for example: 5130.client.local..alvr)",
+    )
+    parser.add_argument(
+        "--manual-client-ip",
+        default="",
+        help="optional manual ALVR client IP used to seed client_connections",
     )
     return parser
 
