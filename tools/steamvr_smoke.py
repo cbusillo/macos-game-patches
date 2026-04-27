@@ -28,6 +28,64 @@ class SmokePaths:
     wineserver: Path
 
 
+def start_logged_process(
+    command: list[str],
+    log_path: Path,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.Popen[str]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        command,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        cwd=str(cwd) if cwd is not None else None,
+        start_new_session=True,
+    )
+    setattr(process, "_smoke_log_file", log_file)
+    return process
+
+
+def close_process_log(process: subprocess.Popen[str]) -> None:
+    log_file = getattr(process, "_smoke_log_file", None)
+    if log_file is None:
+        return
+    try:
+        log_file.close()
+    except Exception:
+        pass
+    finally:
+        setattr(process, "_smoke_log_file", None)
+
+
+def terminate_process(process: subprocess.Popen[str], timeout_seconds: float = 3.0) -> None:
+    if process.poll() is not None:
+        close_process_log(process)
+        return
+
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        close_process_log(process)
+        return
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            close_process_log(process)
+            return
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+    close_process_log(process)
+
+
 def resolve_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -65,6 +123,180 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def run_capture_timeout(
+    command: list[str],
+    output_path: Path,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float | None = None,
+) -> int:
+    def normalize_output(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value).decode("utf-8", errors="replace")
+        return str(value)
+
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout_text = normalize_output(exc.stdout)
+        stderr_text = normalize_output(exc.stderr)
+        output_path.write_text(
+            stdout_text + stderr_text + f"\n[timeout after {timeout_seconds}s]\n",
+            encoding="utf-8",
+        )
+        return 124
+
+    output_path.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
+    return result.returncode
+
+
+def run_preflight_cleanup(
+    repo_root: Path,
+    log_path: Path,
+    sterile_native_steam: bool,
+) -> tuple[int, list[str]]:
+    cleanup_script = repo_root / "tools" / "vr_stack_cleanup.py"
+    command = [sys.executable, str(cleanup_script)]
+    if sterile_native_steam:
+        command.append("--sterile-native-steam")
+    rc = run_capture_timeout(command, log_path, timeout_seconds=180)
+    return rc, command
+
+
+def query_aedebug_debugger(
+    cxstart: Path,
+    bottle_name: str,
+    output_path: Path,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    reg_exe = r"C:\windows\system32\reg.exe"
+    key = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug"
+    rc = run_capture_timeout(
+        [str(cxstart), "--bottle", bottle_name, "--no-gui", reg_exe, "query", key, "/v", "Debugger"],
+        output_path,
+        env=env,
+        timeout_seconds=15,
+    )
+    if rc != 0:
+        return None
+
+    text = output_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"\bDebugger\s+REG_SZ\s+(.+)$", text, re.MULTILINE)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def configure_wine_crash_handling(
+    cxstart: Path,
+    bottle_name: str,
+    log_dir: Path,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    reg_exe = r"C:\windows\system32\reg.exe"
+    aedebug_key = r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\AeDebug"
+    winedbg_key = r"HKCU\Software\Wine\WineDbg"
+
+    desired_debugger = r"cmd /c exit 0"
+    previous_debugger = query_aedebug_debugger(
+        cxstart,
+        bottle_name,
+        log_dir / "aedebug-query-before.log",
+        env=env,
+    )
+
+    set_debugger_rc = run_capture_timeout(
+        [
+            str(cxstart),
+            "--bottle",
+            bottle_name,
+            "--no-gui",
+            reg_exe,
+            "add",
+            aedebug_key,
+            "/v",
+            "Debugger",
+            "/t",
+            "REG_SZ",
+            "/d",
+            desired_debugger,
+            "/f",
+        ],
+        log_dir / "aedebug-set.log",
+        env=env,
+        timeout_seconds=15,
+    )
+
+    set_auto_rc = run_capture_timeout(
+        [
+            str(cxstart),
+            "--bottle",
+            bottle_name,
+            "--no-gui",
+            reg_exe,
+            "add",
+            aedebug_key,
+            "/v",
+            "Auto",
+            "/t",
+            "REG_SZ",
+            "/d",
+            "0",
+            "/f",
+        ],
+        log_dir / "aedebug-auto-set.log",
+        env=env,
+        timeout_seconds=15,
+    )
+
+    show_crash_dialog_rc = run_capture_timeout(
+        [
+            str(cxstart),
+            "--bottle",
+            bottle_name,
+            "--no-gui",
+            reg_exe,
+            "add",
+            winedbg_key,
+            "/v",
+            "ShowCrashDialog",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ],
+        log_dir / "winedbg-show-crash-dialog-set.log",
+        env=env,
+        timeout_seconds=15,
+    )
+
+    current_debugger = query_aedebug_debugger(
+        cxstart,
+        bottle_name,
+        log_dir / "aedebug-query-after.log",
+        env=env,
+    )
+
+    return {
+        "aedebug_previous_debugger": previous_debugger,
+        "aedebug_current_debugger": current_debugger,
+        "aedebug_set_exit_code": set_debugger_rc,
+        "aedebug_auto_set_exit_code": set_auto_rc,
+        "winedbg_show_crash_dialog_set_exit_code": show_crash_dialog_rc,
+    }
 
 
 def apply_mode(settings: dict[str, Any], mode: str) -> None:
@@ -234,8 +466,10 @@ def smoke_process_pattern() -> re.Pattern[str]:
     return re.compile(
         r"(winedbg|wineserver|winedevice\.exe|winesync\.exe|"
         r"wineboot\.exe|conhost\.exe|services\.exe|explorer\.exe|"
+        r"plugplay\.exe|svchost\.exe|rpcss\.exe|"
         r"vrserver\.exe|vrcompositor\.exe|vrmonitor\.exe|vrdashboard\.exe|"
         r"vrwebhelper\.exe|vrstartup\.exe|steam\.exe|steamservice\.exe|"
+        r"steamwebhelper\.exe|gameoverlayui64\.exe|"
         r"steamtours\.exe|steamtourscfg\.exe|steamvr_room_setup\.exe|"
         r"steamvr_tutorial\.exe|overlay_viewer\.exe|"
         r"cxmanip\.exe)",
@@ -257,6 +491,14 @@ def is_smoke_process(args: str, pattern: re.Pattern[str]) -> bool:
     first_lower = first_token.lower()
     first_basename = process_token_basename(first_lower)
 
+    # Wine crash handlers often run under cmd wrappers and are not matched by
+    # token-prefix checks below. Treat these as cleanup targets.
+    if first_basename in {"cmd", "cmd.exe"}:
+        if "winedbg" in lowered:
+            return True
+        if "\\steamapps\\common\\" in lowered and ".exe" in lowered:
+            return True
+
     if first_basename in {
         "crossover",
         "steam",
@@ -276,7 +518,13 @@ def is_smoke_process(args: str, pattern: re.Pattern[str]) -> bool:
         return True
 
     if first_lower.startswith("c:\\"):
-        return bool(pattern.search(lowered))
+        if bool(pattern.search(lowered)):
+            return True
+        # Include Steam game binaries so stale scene processes do not survive
+        # preflight cleanup and poison follow-up runs.
+        if "\\steamapps\\common\\" in lowered and ".exe" in lowered:
+            return True
+        return False
 
     if "/winetemp-" in first_lower and bool(pattern.search(lowered)):
         return True
@@ -375,6 +623,8 @@ def run_smoke(
     kill_first: bool,
     kill_after: bool,
     graphics_backend: str,
+    preflight_cleanup: bool,
+    sterile_native_steam: bool,
 ) -> int:
     if not paths.bottle_root.exists():
         print(f"Bottle not found: {paths.bottle_root}")
@@ -396,6 +646,23 @@ def run_smoke(
     meta["graphics_backend"] = graphics_backend
     meta["wait_seconds"] = wait_seconds
     write_json(meta_path, meta)
+
+    meta["preflight_cleanup_enabled"] = preflight_cleanup
+    meta["preflight_cleanup_sterile_native_steam"] = sterile_native_steam
+    if preflight_cleanup:
+        preflight_log = bundle_dir / "logs" / "preflight-cleanup.log"
+        preflight_rc, preflight_cmd = run_preflight_cleanup(
+            paths.repo_root,
+            preflight_log,
+            sterile_native_steam,
+        )
+        meta["preflight_cleanup_exit_code"] = preflight_rc
+        meta["preflight_cleanup_command"] = preflight_cmd
+        write_json(meta_path, meta)
+        if preflight_rc != 0:
+            print("Preflight cleanup failed; aborting smoke run.")
+            print(f"Run bundle: {bundle_dir}")
+            return 1
 
     cleanup_before: dict[str, Any] = {"killed": [], "remaining": []}
     if kill_first:
@@ -419,12 +686,89 @@ def run_smoke(
 
     env = dict(os.environ)
     env["WINEPREFIX"] = str(paths.bottle_root)
+
+    # Keep ALVR mode behavior deterministic across shells/runs. The ALVR
+    # driver reads these env vars at startup; stale exported values can
+    # silently force direct-mode code paths even when SteamVR settings ask for
+    # non-direct mode.
+    alvr_env_keys = [
+        "ALVR_DISABLE_DIRECT_MODE",
+        "ALVR_ENABLE_DISPLAY_REDIRECT",
+        "ALVR_DISABLE_NON_DIRECT_FRAME_SOURCE",
+        "ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK",
+        "ALVR_VTBRIDGE_REQUIRED",
+    ]
+    needs_vtbridge = mode in {"alvr", "alvr_nodirect"}
+    alvr_env_overrides: dict[str, str] = {}
+    if mode == "alvr":
+        alvr_env_overrides = {
+            "ALVR_DISABLE_DIRECT_MODE": "0",
+            "ALVR_ENABLE_DISPLAY_REDIRECT": "0",
+            "ALVR_DISABLE_NON_DIRECT_FRAME_SOURCE": "1",
+            "ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK": "1",
+            "ALVR_VTBRIDGE_REQUIRED": "1",
+        }
+    elif mode == "alvr_nodirect":
+        alvr_env_overrides = {
+            "ALVR_DISABLE_DIRECT_MODE": "1",
+            "ALVR_ENABLE_DISPLAY_REDIRECT": "1",
+            "ALVR_DISABLE_NON_DIRECT_FRAME_SOURCE": "0",
+            "ALVR_DISABLE_VTBRIDGE_IDLE_FALLBACK": "1",
+            "ALVR_VTBRIDGE_REQUIRED": "1",
+        }
+
+    for key in alvr_env_keys:
+        env.pop(key, None)
+    env.update(alvr_env_overrides)
+
+    meta["alvr_env_overrides"] = alvr_env_overrides
+    write_json(meta_path, meta)
+
     if graphics_backend == "d3dmetal":
         env["CX_GRAPHICS_BACKEND"] = "d3dmetal"
         env["WINED3DMETAL"] = "1"
     elif graphics_backend == "dxvk":
         env["CX_GRAPHICS_BACKEND"] = "dxvk"
         env["WINED3DMETAL"] = "0"
+
+    crash_handling = configure_wine_crash_handling(
+        paths.cxstart,
+        paths.bottle_name,
+        bundle_dir / "logs",
+        env=env,
+    )
+    meta["wine_crash_handling"] = crash_handling
+    write_json(meta_path, meta)
+
+    vtbridge_proc: subprocess.Popen[str] | None = None
+    vtbridge_meta: dict[str, Any] = {"enabled": False}
+    if needs_vtbridge:
+        subprocess.run(["pkill", "-f", "tools/vtbridge_daemon.py"], check=False)
+        time.sleep(0.3)
+
+        vtbridge_command = [
+            sys.executable,
+            str(paths.repo_root / "tools" / "vtbridge_daemon.py"),
+            "--port",
+            "37317",
+            "--accept-configure",
+            "--report-hardware-active",
+            "--ring-path",
+            "/tmp/alvr-vtbridge-ring.bin",
+            "--force-codec",
+            "hevc",
+        ]
+        vtbridge_proc = start_logged_process(
+            vtbridge_command,
+            bundle_dir / "logs" / "vtbridge-daemon.log",
+        )
+        vtbridge_meta = {
+            "enabled": True,
+            "command": vtbridge_command,
+            "pid": vtbridge_proc.pid,
+        }
+    meta["vtbridge"] = vtbridge_meta
+    write_json(meta_path, meta)
 
     startup_exe = r"C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrstartup.exe"
     cx_log = bundle_dir / "logs" / "cxstart.log"
@@ -449,10 +793,13 @@ def run_smoke(
         encoding="utf-8",
     )
     if launch.returncode != 0:
+        if vtbridge_proc is not None:
+            terminate_process(vtbridge_proc)
+            vtbridge_meta["exit_code"] = vtbridge_proc.poll()
         if kill_after:
             cleanup_after_fail = kill_smoke_processes()
             meta["cleanup_after"] = cleanup_after_fail
-            write_json(meta_path, meta)
+        write_json(meta_path, meta)
         print(f"SteamVR launch command failed with exit code {launch.returncode}")
         print(f"Run bundle: {bundle_dir}")
         return 1
@@ -536,9 +883,15 @@ def run_smoke(
 
     cleanup_after: dict[str, Any] = {"killed": [], "remaining": []}
     if kill_after:
+        if vtbridge_proc is not None:
+            terminate_process(vtbridge_proc)
+            vtbridge_meta["exit_code"] = vtbridge_proc.poll()
         cleanup_after = kill_smoke_processes()
         meta["cleanup_after"] = cleanup_after
-        write_json(meta_path, meta)
+    elif vtbridge_proc is not None and vtbridge_proc.poll() is not None:
+        close_process_log(vtbridge_proc)
+        vtbridge_meta["exit_code"] = vtbridge_proc.poll()
+    write_json(meta_path, meta)
 
     print(f"SteamVR smoke complete. Run bundle: {bundle_dir}")
     for line in summary_lines:
@@ -559,6 +912,16 @@ def parser() -> argparse.ArgumentParser:
         help="SteamVR driver mode applied before launch",
     )
     arg_parser.add_argument("--wait", type=int, default=30, help="seconds to wait after launch before capturing logs")
+    arg_parser.add_argument(
+        "--skip-preflight-cleanup",
+        action="store_true",
+        help="skip required vr_stack_cleanup.py preflight",
+    )
+    arg_parser.add_argument(
+        "--sterile-native-steam",
+        action="store_true",
+        help="include native Steam helper cleanup in preflight",
+    )
     arg_parser.add_argument("--no-kill-first", action="store_true", help="skip wineserver -k before launch")
     arg_parser.add_argument("--no-kill-after", action="store_true", help="leave Wine/SteamVR processes running after capture")
     arg_parser.add_argument(
@@ -590,6 +953,8 @@ def main() -> int:
         not args.no_kill_first,
         not args.no_kill_after,
         args.graphics_backend,
+        not args.skip_preflight_cleanup,
+        args.sterile_native_steam,
     )
 
 

@@ -18,8 +18,22 @@ Script:
 ## Basic Usage
 
 ```bash
-python3 tools/vr_stack_cleanup.py
 python3 tools/steamvr_smoke.py
+```
+
+`tools/steamvr_smoke.py` now runs `tools/vr_stack_cleanup.py` as a required
+preflight by default and aborts if cleanup exits nonzero.
+
+For fully sterile preflight (including native Steam helper cleanup):
+
+```bash
+python3 tools/steamvr_smoke.py --sterile-native-steam
+```
+
+To bypass preflight cleanup (not recommended):
+
+```bash
+python3 tools/steamvr_smoke.py --skip-preflight-cleanup
 ```
 
 ## Process Hygiene
@@ -106,10 +120,12 @@ python3 tools/live_avp_checkpoint.py \
   --sterile-native-steam \
   --host-only \
   --codec hevc \
-  --stream-protocol udp \
+  --stream-protocol tcp \
+  --foveated-encoding off \
   --direct-mode off \
   --steamvr-home on \
-  --steamvr-tool steamvr_room_setup \
+  --mirror-view on \
+  --steamvr-tool steamvr_monitor \
   --synthetic-fallback disable \
   --forbid-synthetic-fallback \
   --host-idle-fallback disable \
@@ -119,8 +135,124 @@ python3 tools/live_avp_checkpoint.py \
   --require-host-frame-signals \
   --require-source-motion \
   --forbid-static-source \
+  --require-real-source \
   --require-pass
 ```
+
+Use `--require-real-source` when validating actual game imagery. This fails
+runs that only pass due non-direct synthetic fallback frames.
+
+Use `--mirror-view on` for non-direct runs that need window-capture friendly
+SteamVR mirror surfaces (`VR View` / `Legacy Mirror`).
+
+Experimental native app-window override:
+
+- Use this when Wine-side mirror capture is known-bad but a real CrossOver app
+  window is visible on macOS.
+- This keeps the existing VTBridge/VideoToolbox encode flow and only swaps the
+  pixel payload inside `tools/vtbridge_daemon.py`.
+- Proof bundle:
+  - `temp/vr_runs/20260305-231634-live-avp-checkpoint`
+
+Focused proof command:
+
+```bash
+python3 tools/live_avp_checkpoint.py \
+  --sterile-native-steam \
+  --graphics-backend d3dmetal \
+  --direct-mode off \
+  --display-redirect on \
+  --non-direct-source enable \
+  --mirror-view on \
+  --minimize-crossover-windows off \
+  --steamvr-home on \
+  --steamvr-tool steamvr_tutorial \
+  --stream-protocol tcp \
+  --codec hevc \
+  --foveated-encoding off \
+  --synthetic-fallback disable \
+  --host-idle-fallback disable \
+  --vtbridge-debug-dump-limit 12 \
+  --require-client-ready \
+  --require-client-video-present \
+  --forbid-synthetic-fallback \
+  --forbid-host-idle-fallback \
+  --require-real-decode \
+  --require-source-motion \
+  --require-host-frame-signals \
+  --forbid-static-source \
+  --forbid-known-synthetic-source \
+  --native-window-capture-title-contains "SteamVR Tutorial" \
+  --native-window-capture-owner-contains steamvr_tutorial.exe \
+  --native-window-capture-fps 10
+```
+
+Current proof status (2026-03-05):
+
+- daemon log shows `native_window_capture_debug_dump_reset` plus repeated
+  `native_window_capture_override ...`
+- `config/outcome.json` reports:
+  - `source_quality_grade = real_candidate`
+  - `source_debug_nonflat_frame_count = 5`
+  - `source_debug_all_flat = false`
+  - `client_video_presenting = true`
+- strongest injected-phase artifact:
+  - `logs/vtbridge-debug-frames/frame-000068-nonblack-crc704d01a6.png`
+
+Current first-gate status (2026-03-06):
+
+- tutorial repeatability proven with:
+  - `temp/vr_runs/20260306-061815-live-avp-checkpoint`
+  - `temp/vr_runs/20260306-062643-live-avp-checkpoint`
+- exact tutorial refs:
+  - `20260306-061815`
+    - `logs/vtbridge-daemon.log:178`
+    - `logs/vtbridge-daemon.log:200`
+    - `config/outcome.json:19`
+    - `config/outcome.json:242`
+    - `logs/vtbridge-debug-frames/frame-000076-nonblack-crc704d01a6.png`
+  - `20260306-062643`
+    - `logs/vtbridge-daemon.log:175`
+    - `logs/vtbridge-daemon.log:197`
+    - `config/outcome.json:19`
+    - `config/outcome.json:277`
+    - `logs/vtbridge-debug-frames/frame-000058-nonblack-crc704d01a6.png`
+- first real-game AirCar native override proven with:
+  - `temp/vr_runs/20260306-064123-live-avp-checkpoint`
+- AirCar repeatability proven with:
+  - `temp/vr_runs/20260306-130639-live-avp-checkpoint`
+  - `temp/vr_runs/20260306-132336-live-avp-checkpoint`
+- strongest AirCar artifact:
+  - `logs/vtbridge-debug-frames/frame-001133-nonblack-crcd3a2ad7f.png`
+- repeat AirCar artifact:
+  - `logs/vtbridge-debug-frames/frame-000799-nonblack-crcd1bde59c.png`
+- second repeat AirCar artifact:
+  - `logs/vtbridge-debug-frames/frame-000300-nonblack-crcd9051352.png`
+- exact AirCar refs:
+  - `logs/vtbridge-daemon.log:708`
+  - `logs/vtbridge-daemon.log:724`
+  - `config/outcome.json:19`
+  - `config/outcome.json:494`
+  - `config/outcome.json:500`
+  - repeat bundle refs:
+    - `logs/vtbridge-daemon.log:582`
+    - `logs/vtbridge-daemon.log:599`
+    - `config/outcome.json:19`
+    - `config/outcome.json:429`
+    - `config/outcome.json:435`
+  - second repeat bundle refs:
+    - `logs/vtbridge-daemon.log:527`
+    - `logs/vtbridge-daemon.log:545`
+    - `config/outcome.json:19`
+    - `config/outcome.json:454`
+    - `config/outcome.json:460`
+
+Temporary diagnostic note: if foveated encoding is disabled during source
+isolation, re-enable it after baseline real-source imagery is confirmed.
+
+Current empirical status (2026-02-28): strict non-direct runs pass reliably
+with `--foveated-encoding off`; forcing `--foveated-encoding on` can regress
+to static-black source signatures on this stack.
 
 Behavior:
 

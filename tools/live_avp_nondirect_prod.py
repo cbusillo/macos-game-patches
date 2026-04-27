@@ -50,18 +50,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--steamvr-tool",
         choices=[
             "none",
+            "steamvr_monitor",
             "steamvr_tutorial",
             "steamvr_room_setup",
             "steamvr_overlay_viewer",
             "steamvr_steamtours",
         ],
-        default="steamvr_overlay_viewer",
-        help="tool app to launch for deterministic source motion (default avoids narrated Room Setup prompts)",
+        default="steamvr_monitor",
+        help=(
+            "tool app to launch for deterministic source motion; monitor tends to expose "
+            "a stable VR View mirror window"
+        ),
+    )
+    parser.add_argument(
+        "--vtbridge-debug-dump-limit",
+        type=int,
+        default=20,
+        help=(
+            "dump up to N VT bridge source frames for post-run evidence checks "
+            "(set 0 to disable)"
+        ),
     )
     parser.add_argument(
         "--confirm-twice",
         action="store_true",
         help="run the strict profile twice back-to-back and require both runs to pass",
+    )
+    parser.add_argument(
+        "--keep-session-alive",
+        action="store_true",
+        help=(
+            "forward --keep-session-alive to live_avp_checkpoint.py so the "
+            "stack remains running after capture"
+        ),
     )
     parser.add_argument(
         "extra_args",
@@ -107,16 +128,22 @@ def main() -> int:
         args.graphics_backend,
         "--wine-debug-channels",
         args.wine_debug_channels,
+        "--foveated-encoding",
+        "off",
         "--capture-seconds",
         str(args.capture_seconds),
         "--steamvr-home",
         args.steamvr_home,
+        "--mirror-view",
+        "on",
         "--steamvr-tool",
         args.steamvr_tool,
         "--synthetic-fallback",
         "disable",
         "--host-idle-fallback",
         "disable",
+        "--vtbridge-debug-dump-limit",
+        str(args.vtbridge_debug_dump_limit),
         "--require-client-ready",
         "--require-client-video-present",
         "--forbid-synthetic-fallback",
@@ -126,6 +153,7 @@ def main() -> int:
         "--require-host-frame-signals",
         "--forbid-static-source",
         "--forbid-known-synthetic-source",
+        "--require-real-source",
         "--require-pass",
     ]
 
@@ -133,6 +161,9 @@ def main() -> int:
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
     command.extend(forwarded)
+
+    if args.keep_session_alive and "--keep-session-alive" not in command:
+        command.append("--keep-session-alive")
 
     run_count = 2 if args.confirm_twice else 1
     print("PROFILE: strict non-direct production")

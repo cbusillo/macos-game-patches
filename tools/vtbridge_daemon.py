@@ -3,11 +3,13 @@
 import argparse
 import mmap
 import os
+from pathlib import Path
 import shutil
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -55,6 +57,161 @@ class ServerConfig:
     ring_path: str
     force_codec: str
     force_test_pattern_hevc: bool
+    debug_dump_dir: str
+    debug_dump_limit: int
+    native_window_capture_title_filters: list[str]
+    native_window_capture_owner_filters: list[str]
+    native_window_capture_fps: int
+
+
+@dataclass
+class NativeWindowCaptureFrame:
+    width: int
+    height: int
+    row_bytes: int
+    sequence: int
+    capture_ns: int
+    payload: bytes
+
+
+class NativeWindowCaptureStream:
+    HEADER_STRUCT = struct.Struct("<7Q")
+    HEADER_MAGIC = 0x4D574346  # MWCF
+
+    def __init__(
+        self,
+        *,
+        title_filters: list[str],
+        owner_filters: list[str],
+        width: int,
+        height: int,
+        fps: int,
+    ) -> None:
+        script_path = Path(__file__).with_name("macos_window_capture_stream.swift")
+        if not script_path.exists():
+            raise FileNotFoundError(f"missing capture helper: {script_path}")
+
+        binary_path = Path("/tmp/macos_window_capture_stream")
+        if (not binary_path.exists()) or binary_path.stat().st_mtime < script_path.stat().st_mtime:
+            build = subprocess.run(
+                ["swiftc", "-O", str(script_path), "-o", str(binary_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=180,
+            )
+            if build.returncode != 0:
+                stderr_text = (build.stderr or "").strip()
+                raise RuntimeError(
+                    f"failed to build native capture helper rc={build.returncode} stderr={stderr_text}"
+                )
+            log(f"native_window_capture_built path={binary_path}")
+
+        command = [
+            str(binary_path),
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--fps",
+            str(max(1, fps)),
+        ]
+        if title_filters:
+            command.extend(["--title-contains", ",".join(title_filters)])
+        if owner_filters:
+            command.extend(["--owner-contains", ",".join(owner_filters)])
+
+        self._process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        self._lock = threading.Lock()
+        self._latest_frame: NativeWindowCaptureFrame | None = None
+        self._latest_arrival_ns: int | None = None
+        self._closed = False
+        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
+        self._reader_thread.start()
+        self._stderr_thread.start()
+        log(
+            "native_window_capture_start "
+            + f"pid={self._process.pid} width={width} height={height} fps={fps}"
+        )
+
+    def _read_exact(self, size: int) -> bytes:
+        if self._process.stdout is None:
+            raise RuntimeError("capture helper stdout unavailable")
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining > 0:
+            chunk = self._process.stdout.read(remaining)
+            if not chunk:
+                raise EOFError("capture helper stdout closed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _reader_loop(self) -> None:
+        try:
+            while True:
+                header = self._read_exact(self.HEADER_STRUCT.size)
+                magic, width, height, row_bytes, payload_bytes, sequence, capture_ns = (
+                    self.HEADER_STRUCT.unpack(header)
+                )
+                if magic != self.HEADER_MAGIC:
+                    raise ValueError(f"bad native capture header magic: 0x{magic:08x}")
+                payload = self._read_exact(payload_bytes)
+                frame = NativeWindowCaptureFrame(
+                    width=int(width),
+                    height=int(height),
+                    row_bytes=int(row_bytes),
+                    sequence=int(sequence),
+                    capture_ns=int(capture_ns),
+                    payload=payload,
+                )
+                with self._lock:
+                    self._latest_frame = frame
+                    self._latest_arrival_ns = time.monotonic_ns()
+                if sequence <= 5 or sequence % 120 == 0:
+                    log(
+                        "native_window_capture_frame "
+                        + f"sequence={sequence} width={width} height={height} payload_bytes={payload_bytes}"
+                    )
+        except Exception as exc:
+            if not self._closed:
+                log(f"native_window_capture_reader_stopped reason={type(exc).__name__}: {exc}")
+
+    def _stderr_loop(self) -> None:
+        if self._process.stderr is None:
+            return
+        for raw_line in self._process.stderr:
+            if self._closed:
+                return
+            text = raw_line.decode("utf-8", errors="replace").strip()
+            if text:
+                log(f"native_window_capture {text}")
+
+    def latest_frame(self, *, max_age_ns: int | None = None) -> NativeWindowCaptureFrame | None:
+        with self._lock:
+            if self._latest_frame is None:
+                return None
+            if max_age_ns is not None and self._latest_arrival_ns is not None:
+                if time.monotonic_ns() - self._latest_arrival_ns > max_age_ns:
+                    return None
+            return self._latest_frame
+
+    def stop(self) -> None:
+        self._closed = True
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=1)
+        log(f"native_window_capture_stop rc={self._process.returncode}")
 
 
 @dataclass
@@ -81,7 +238,16 @@ class SessionState:
     bootstrap_pattern_index: int
     last_encoded_frame: bytes | None
     reused_frame_count: int
+    last_fresh_encode_sequence: int | None
+    last_observed_spread_crc: int | None
+    last_observed_sample_nonzero: int | None
+    debug_dump_dir: str
+    debug_dump_limit: int
+    debug_dump_count: int
+    debug_dump_last_spread_crc: int | None
     codec: str
+    native_window_capture: NativeWindowCaptureStream | None
+    native_window_capture_override_seen: bool
 
 
 def now() -> str:
@@ -333,6 +499,7 @@ def encode_frame_with_videotoolbox(
     height: int,
     row_pitch_bytes: int,
     codec: str,
+    input_pix_fmt: str = "rgba",
 ) -> tuple[bytes, float]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -377,7 +544,7 @@ def encode_frame_with_videotoolbox(
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "bgra",
+            input_pix_fmt,
             "-s:v",
             f"{width}x{height}",
             "-r",
@@ -419,6 +586,102 @@ def encode_frame_with_videotoolbox(
         raise RuntimeError(f"frame encode produced no output elapsed_ms={elapsed_ms:.1f}")
 
     return result.stdout, elapsed_ms
+
+
+def payload_spread_sample(payload: bytes, sample_points: int = 4096) -> tuple[bytes, int, int, int, int]:
+    if not payload:
+        return b"", 0, 0, 0, 0
+
+    # Treat alpha-only variation as noise: classify motion from RGB channels.
+    rgb_sample = bytearray()
+    rgb_nonzero = 0
+
+    step = max(4, (len(payload) // sample_points) // 4 * 4)
+    for offset in range(0, len(payload) - 3, step):
+        b = payload[offset]
+        g = payload[offset + 1]
+        r = payload[offset + 2]
+
+        rgb_sample.extend((b, g, r))
+        if b != 0 or g != 0 or r != 0:
+            rgb_nonzero += 1
+
+        if len(rgb_sample) >= sample_points * 3:
+            break
+
+    spread_sample = bytes(rgb_sample)
+    spread_crc = zlib.crc32(spread_sample) & 0xFFFFFFFF
+    sample_min = min(spread_sample) if spread_sample else 0
+    sample_max = max(spread_sample) if spread_sample else 0
+    return spread_sample, spread_crc, rgb_nonzero, sample_min, sample_max
+
+
+def maybe_dump_debug_frame(
+    state: SessionState,
+    payload: bytes,
+    sequence: int,
+    spread_crc: int,
+    sample_nonzero: int,
+    input_pix_fmt: str = "rgba",
+) -> None:
+    if state.debug_dump_limit <= 0 or state.debug_dump_count >= state.debug_dump_limit:
+        return
+    if state.debug_dump_last_spread_crc == spread_crc:
+        return
+
+    output_dir = Path(state.debug_dump_dir)
+    tag = "nonblack" if sample_nonzero > 0 else "black"
+    output_path = output_dir / f"frame-{sequence:06d}-{tag}-crc{spread_crc:08x}.png"
+
+    ffmpeg = shutil.which("ffmpeg")
+    input_bytes = repack_bgra(payload, state.width, state.height, state.row_pitch_bytes)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if ffmpeg is None:
+            raw_path = output_path.with_suffix(".bgra")
+            raw_path.write_bytes(input_bytes)
+            log(f"debug_frame_dump_raw sequence={sequence} path={raw_path}")
+        else:
+            command = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                input_pix_fmt,
+                "-s:v",
+                f"{state.width}x{state.height}",
+                "-i",
+                "-",
+                "-frames:v",
+                "1",
+                str(output_path),
+            ]
+            result = subprocess.run(
+                command,
+                input=input_bytes,
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                stderr_text = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+                log(
+                    "debug_frame_dump_failed "
+                    + f"sequence={sequence} rc={result.returncode} stderr={stderr_text}"
+                )
+            else:
+                log(f"debug_frame_dump_png sequence={sequence} path={output_path}")
+    except Exception as exc:
+        log(
+            "debug_frame_dump_failed "
+            + f"sequence={sequence} error={type(exc).__name__}: {exc}"
+        )
+    finally:
+        state.debug_dump_count += 1
+        state.debug_dump_last_spread_crc = spread_crc
 
 
 def encode_bootstrap_frame_with_videotoolbox(width: int, height: int) -> bytes:
@@ -652,6 +915,24 @@ def handle_configure(
         state.sent_video_config = False
         state.bootstrap_encoded_frame = None
         state.last_encoded_frame = None
+        if state.native_window_capture is not None:
+            state.native_window_capture.stop()
+            state.native_window_capture = None
+        if cfg.native_window_capture_title_filters or cfg.native_window_capture_owner_filters:
+            try:
+                state.native_window_capture = NativeWindowCaptureStream(
+                    title_filters=cfg.native_window_capture_title_filters,
+                    owner_filters=cfg.native_window_capture_owner_filters,
+                    width=width,
+                    height=height,
+                    fps=cfg.native_window_capture_fps,
+                )
+            except Exception as exc:
+                log(
+                    "native_window_capture_start_failed "
+                    + f"reason={type(exc).__name__}: {exc}"
+                )
+                state.native_window_capture = None
 
     response = CONFIGURE_VIDEO_RESPONSE_STRUCT.pack(
         int(accepted),
@@ -735,9 +1016,56 @@ def handle_frame_ready(conn: socket.socket, payload: bytes, state: SessionState)
         reader_completed_ns,
     )
 
+    input_pix_fmt = "rgba"
+    if state.native_window_capture is not None:
+        native_frame = state.native_window_capture.latest_frame(max_age_ns=500_000_000)
+        if native_frame is not None:
+            expected_payload_bytes = state.row_pitch_bytes * state.height
+            if (
+                native_frame.width == state.width
+                and native_frame.height == state.height
+                and native_frame.row_bytes == state.row_pitch_bytes
+                and len(native_frame.payload) == expected_payload_bytes
+            ):
+                if not state.native_window_capture_override_seen:
+                    state.native_window_capture_override_seen = True
+                    state.debug_dump_count = 0
+                    state.debug_dump_last_spread_crc = None
+                    log("native_window_capture_debug_dump_reset reason=first_override")
+                frame_payload = native_frame.payload
+                payload_bytes = len(frame_payload)
+                input_pix_fmt = "bgra"
+                if sequence <= 5 or sequence % 120 == 0:
+                    log(
+                        "native_window_capture_override "
+                        + f"sequence={sequence} native_sequence={native_frame.sequence} "
+                        + f"payload_bytes={payload_bytes} capture_ns={native_frame.capture_ns}"
+                    )
+            elif sequence <= 5 or sequence % 120 == 0:
+                log(
+                    "native_window_capture_mismatch "
+                    + f"sequence={sequence} native_size={native_frame.width}x{native_frame.height} "
+                    + f"native_row_bytes={native_frame.row_bytes} native_payload={len(native_frame.payload)} "
+                    + f"expected_size={state.width}x{state.height} expected_row_bytes={state.row_pitch_bytes}"
+                )
+        elif sequence <= 5 or sequence % 120 == 0:
+            log(f"native_window_capture_stale sequence={sequence} fallback=ring_payload")
+
+    sample_rgb = bytearray()
+    for offset in range(0, min(len(frame_payload), 262144) - 3, 64):
+        sample_rgb.extend((frame_payload[offset], frame_payload[offset + 1], frame_payload[offset + 2]))
+    sample_crc = zlib.crc32(bytes(sample_rgb)) & 0xFFFFFFFF
+    spread_sample, spread_crc, sample_nonzero, sample_min, sample_max = payload_spread_sample(frame_payload)
+
+    previous_spread_crc = state.last_observed_spread_crc
+    previous_sample_nonzero = state.last_observed_sample_nonzero
+    state.last_observed_spread_crc = spread_crc
+    state.last_observed_sample_nonzero = sample_nonzero
+
     encode_elapsed_ms = -1.0
     encoded_fresh = False
     encoded: bytes | None = None
+    encode_reason = "cached"
     # Optional short-circuit path for AVP bring-up: stream a known-good static
     # HEVC frame so transport and decoder behavior can be isolated from SteamVR
     # texture capture and VideoToolbox variability.
@@ -762,11 +1090,24 @@ def handle_frame_ready(conn: socket.socket, payload: bytes, state: SessionState)
                     + f"sequence={sequence} color={color} reason={exc}"
                 )
         encoded = state.bootstrap_encoded_frame
+        encode_reason = "bootstrap"
     else:
         # Encoding every incoming frame at 4288x2048 is too slow on macOS 26.4
-        # with per-frame ffmpeg startup. Reuse the most recent encoded frame for
-        # most sequence numbers and refresh the encoded content periodically.
-        should_encode = (state.last_encoded_frame is None) or (sequence % 30 == 1)
+        # with per-frame ffmpeg startup. Re-encode adaptively on payload changes
+        # and periodically as a safeguard for stale cached content.
+        should_encode = False
+        if state.last_encoded_frame is None:
+            should_encode = True
+            encode_reason = "no_cached_frame"
+        elif previous_spread_crc is None or previous_sample_nonzero is None:
+            should_encode = True
+            encode_reason = "first_payload_sample"
+        elif spread_crc != previous_spread_crc or sample_nonzero != previous_sample_nonzero:
+            should_encode = True
+            encode_reason = "payload_changed"
+        elif state.last_fresh_encode_sequence is None or (sequence - state.last_fresh_encode_sequence) >= 45:
+            should_encode = True
+            encode_reason = "periodic_refresh"
         try:
             if should_encode:
                 encoded, encode_elapsed_ms = encode_frame_with_videotoolbox(
@@ -775,14 +1116,17 @@ def handle_frame_ready(conn: socket.socket, payload: bytes, state: SessionState)
                     state.height,
                     state.row_pitch_bytes,
                     state.codec,
+                    input_pix_fmt=input_pix_fmt,
                 )
                 state.last_encoded_frame = encoded
                 encoded_fresh = True
+                state.last_fresh_encode_sequence = sequence
             else:
                 encoded = state.last_encoded_frame
                 if encoded is None:
                     raise RuntimeError("missing cached encoded frame")
                 state.reused_frame_count += 1
+                encode_reason = "cached"
         except Exception as exc:
             if state.last_encoded_frame is None:
                 raise
@@ -790,6 +1134,7 @@ def handle_frame_ready(conn: socket.socket, payload: bytes, state: SessionState)
             if encoded is None:
                 raise RuntimeError("missing cached encoded frame after encode failure")
             state.reused_frame_count += 1
+            encode_reason = "encode_failed_reused_cached"
             log(
                 "frame_encode_failed "
                 + f"sequence={sequence} reason={exc} reuse_last_encoded_bytes={len(encoded)}"
@@ -799,13 +1144,20 @@ def handle_frame_ready(conn: socket.socket, payload: bytes, state: SessionState)
         raise RuntimeError("encoded payload unavailable")
 
     if encoded_fresh:
-        # Keep diagnostics cheap: sample the raw ring payload so we can
-        # distinguish static black frames from changing scene content.
-        sample = frame_payload[:262144:64]
-        sample_crc = zlib.crc32(sample) & 0xFFFFFFFF
+        maybe_dump_debug_frame(
+            state,
+            frame_payload,
+            sequence,
+            spread_crc,
+            sample_nonzero,
+            input_pix_fmt=input_pix_fmt,
+        )
         log(
             "fresh_encode "
-            + f"sequence={sequence} encoded_bytes={len(encoded)} sample_crc=0x{sample_crc:08x}"
+            + f"sequence={sequence} encoded_bytes={len(encoded)} sample_crc=0x{sample_crc:08x} "
+            + f"spread_crc=0x{spread_crc:08x} sample_nonzero={sample_nonzero} "
+            + f"sample_len={len(spread_sample)} "
+            + f"sample_min={sample_min} sample_max={sample_max} reason={encode_reason}"
         )
 
     nals = split_annexb_nals(encoded)
@@ -851,7 +1203,16 @@ def run_server(cfg: ServerConfig) -> int:
                     bootstrap_pattern_index=0,
                     last_encoded_frame=None,
                     reused_frame_count=0,
+                    last_fresh_encode_sequence=None,
+                    last_observed_spread_crc=None,
+                    last_observed_sample_nonzero=None,
+                    debug_dump_dir=cfg.debug_dump_dir,
+                    debug_dump_limit=cfg.debug_dump_limit,
+                    debug_dump_count=0,
+                    debug_dump_last_spread_crc=None,
                     codec=cfg.force_codec,
+                    native_window_capture=None,
+                    native_window_capture_override_seen=False,
                 )
                 try:
                     while True:
@@ -877,10 +1238,14 @@ def run_server(cfg: ServerConfig) -> int:
                         break
                 except KeyboardInterrupt:
                     close_ring(state.ring)
+                    if state.native_window_capture is not None:
+                        state.native_window_capture.stop()
                     raise
                 except Exception as exc:
                     log(f"connection closed {peer} reason={exc}")
                     close_ring(state.ring)
+                    if state.native_window_capture is not None:
+                        state.native_window_capture.stop()
                     continue
 
 
@@ -919,6 +1284,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="always send a static libx265 HEVC test pattern frame",
     )
+    parser.add_argument(
+        "--debug-dump-dir",
+        default="",
+        help="optional directory for dumping sampled raw source frames as PNG",
+    )
+    parser.add_argument(
+        "--debug-dump-limit",
+        type=int,
+        default=0,
+        help="maximum number of unique-sample source frame dumps (0 disables)",
+    )
+    parser.add_argument(
+        "--native-window-capture-title-contains",
+        default="",
+        help="comma-separated macOS window title filters for native ScreenCaptureKit fallback",
+    )
+    parser.add_argument(
+        "--native-window-capture-owner-contains",
+        default="",
+        help="comma-separated macOS window owner filters for native ScreenCaptureKit fallback",
+    )
+    parser.add_argument(
+        "--native-window-capture-fps",
+        type=int,
+        default=15,
+        help="target fps for the native ScreenCaptureKit fallback helper",
+    )
     return parser
 
 
@@ -933,6 +1325,19 @@ def main() -> int:
         ring_path=args.ring_path,
         force_codec=args.force_codec,
         force_test_pattern_hevc=args.force_test_pattern_hevc,
+        debug_dump_dir=args.debug_dump_dir,
+        debug_dump_limit=max(0, args.debug_dump_limit),
+        native_window_capture_title_filters=[
+            part.strip()
+            for part in args.native_window_capture_title_contains.split(",")
+            if part.strip()
+        ],
+        native_window_capture_owner_filters=[
+            part.strip()
+            for part in args.native_window_capture_owner_contains.split(",")
+            if part.strip()
+        ],
+        native_window_capture_fps=max(1, args.native_window_capture_fps),
     )
     try:
         return run_server(cfg)

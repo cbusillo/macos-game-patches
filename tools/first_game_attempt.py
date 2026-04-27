@@ -27,7 +27,31 @@ def build_parser() -> argparse.ArgumentParser:
         description="Attempt first in-headset game frame on AVP",
     )
     parser.add_argument("--steam-app-id", type=int, default=450390, help="Steam app id (default: The Lab)")
+    parser.add_argument(
+        "--steam-app-force-vr",
+        action="store_true",
+        help="append -vr when launching steam app",
+    )
     parser.add_argument("--capture-seconds", type=int, default=420, help="capture window for the attempt")
+    parser.add_argument(
+        "--steamvr-tool",
+        choices=[
+            "none",
+            "steamvr_monitor",
+            "steamvr_tutorial",
+            "steamvr_room_setup",
+            "steamvr_overlay_viewer",
+            "steamvr_steamtours",
+        ],
+        default="steamvr_monitor",
+        help="SteamVR tool app used to guarantee non-static source motion",
+    )
+    parser.add_argument(
+        "--steam-app-delay-seconds",
+        type=int,
+        default=40,
+        help="seconds to wait before launching Steam app after SteamVR bootstrap",
+    )
     parser.add_argument(
         "--manual-client-host",
         default="5130.client.local..alvr",
@@ -46,18 +70,12 @@ def main() -> int:
         print("ERROR: cleanup failed")
         return cleanup
 
-    restart = run([sys.executable, str(root / "tools/avp_alvr_control.py"), "restart"])
-    if restart != 0:
-        print("ERROR: failed to restart ALVR app on AVP")
-        return restart
-
     print("ACTION REQUIRED: Put on AVP, keep ALVR frontmost, tap Enter once if shown.")
 
     checkpoint_cmd = [
         sys.executable,
         str(root / "tools/live_avp_checkpoint.py"),
         "--sterile-native-steam",
-        "--no-restart-avp-app",
         "--capture-seconds",
         str(args.capture_seconds),
         "--direct-mode",
@@ -67,24 +85,26 @@ def main() -> int:
         "--steamvr-home",
         "off",
         "--steamvr-tool",
-        "none",
+        args.steamvr_tool,
         "--steam-app-id",
         str(args.steam_app_id),
-        "--steam-app-force-vr",
         "--steam-app-delay-seconds",
-        "12",
+        str(args.steam_app_delay_seconds),
         "--synthetic-fallback",
         "disable",
         "--host-idle-fallback",
         "disable",
+        "--minimize-crossover-windows",
+        "off",
         "--manual-client-host",
         args.manual_client_host,
         "--manual-client-ip",
         args.manual_client_ip,
     ]
+    if args.steam_app_force_vr:
+        checkpoint_cmd.append("--steam-app-force-vr")
     return run(checkpoint_cmd)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

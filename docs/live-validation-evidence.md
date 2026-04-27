@@ -455,3 +455,205 @@ Findings:
 - D3DMetal remains blocked on missing host frame signals plus static source.
 - Compared with prior matrix baseline (`20260218-231126`), blocker class is
   unchanged; no new pass signal was observed.
+
+## 2026-03-05 Native App-Window Override Proof
+
+Goal:
+
+- Prove a macOS-native ScreenCaptureKit app-window source can override the ring
+  payload inside `tools/vtbridge_daemon.py` while leaving the existing
+  VideoToolbox encode / AVP delivery path intact.
+
+Command:
+
+```bash
+python3 tools/live_avp_checkpoint.py \
+  --sterile-native-steam \
+  --graphics-backend d3dmetal \
+  --direct-mode off \
+  --display-redirect on \
+  --non-direct-source enable \
+  --mirror-view on \
+  --minimize-crossover-windows off \
+  --steamvr-home on \
+  --steamvr-tool steamvr_tutorial \
+  --stream-protocol tcp \
+  --codec hevc \
+  --foveated-encoding off \
+  --synthetic-fallback disable \
+  --host-idle-fallback disable \
+  --capture-seconds 60 \
+  --vtbridge-debug-dump-limit 12 \
+  --require-client-ready \
+  --require-client-video-present \
+  --forbid-synthetic-fallback \
+  --forbid-host-idle-fallback \
+  --require-real-decode \
+  --require-source-motion \
+  --require-host-frame-signals \
+  --forbid-static-source \
+  --forbid-known-synthetic-source \
+  --native-window-capture-title-contains "SteamVR Tutorial" \
+  --native-window-capture-owner-contains steamvr_tutorial.exe \
+  --native-window-capture-fps 10
+```
+
+Bundle:
+
+- `temp/vr_runs/20260305-231634-live-avp-checkpoint`
+
+Key daemon markers:
+
+- `logs/vtbridge-daemon.log:184`
+  - `native_window_capture_debug_dump_reset reason=first_override`
+- `logs/vtbridge-daemon.log:195`
+  - first repeated `native_window_capture_override ...`
+- `logs/vtbridge-daemon.log:174`
+  - first successful `capture_window_selected id=4867`
+    `owner=steamvr_tutorial.exe title=SteamVR Tutorial`
+
+Outcome highlights:
+
+- `config/outcome.json`
+  - `pass = true`
+  - `client_video_presenting = true`
+  - `client_decode_success = true`
+  - `source_quality_grade = "real_candidate"`
+  - `source_debug_nonflat_frame_count = 5`
+  - `source_debug_all_flat = false`
+
+Injected-phase artifacts:
+
+- strongest example:
+  - `logs/vtbridge-debug-frames/frame-000068-nonblack-crc704d01a6.png`
+- the injected phase also produced additional non-flat frames after debug-dump
+  reset, confirming the helper was no longer limited to the pre-override
+  synthetic-looking sequence.
+
+Conclusion:
+
+- The proof slice is complete.
+- ScreenCaptureKit app-window frames reached the existing VTBridge/VideoToolbox
+  path and were delivered to the AVP client without building a second media
+  pipeline.
+
+## 2026-03-06 First-Gate Confirmation
+
+### Tutorial Repeatability
+
+Bundles:
+
+- `temp/vr_runs/20260306-061815-live-avp-checkpoint`
+- `temp/vr_runs/20260306-062643-live-avp-checkpoint`
+
+Both bundles confirm the same tutorial gate signals:
+
+- selected `steamvr_tutorial.exe` / `SteamVR Tutorial` window
+- repeated `native_window_capture_override ...`
+- non-flat injected debug frames
+- `source_debug_all_flat = false`
+- `client_video_presenting = true`
+
+Strongest tutorial artifacts:
+
+- `20260306-061815`: `logs/vtbridge-debug-frames/frame-000076-nonblack-crc704d01a6.png`
+- `20260306-062643`: `logs/vtbridge-debug-frames/frame-000058-nonblack-crc704d01a6.png`
+
+Exact tutorial refs:
+
+- `20260306-061815`
+  - `logs/vtbridge-daemon.log:178`
+  - `logs/vtbridge-daemon.log:200`
+  - `config/outcome.json:19`
+  - `config/outcome.json:242`
+- `20260306-062643`
+  - `logs/vtbridge-daemon.log:175`
+  - `logs/vtbridge-daemon.log:197`
+  - `config/outcome.json:19`
+  - `config/outcome.json:277`
+
+### First AirCar Native Override Run
+
+Bundle:
+
+- `temp/vr_runs/20260306-064123-live-avp-checkpoint`
+
+Key AirCar markers:
+
+- selected window in daemon log:
+  - `logs/vtbridge-daemon.log:708`
+  - `owner=AirCar-Win64-Shipping.exe title=Aircar`
+- repeated override in daemon log:
+  - `logs/vtbridge-daemon.log:724`
+  - `logs/vtbridge-daemon.log:731`
+
+Outcome highlights:
+
+- `client_video_presenting = true`
+- `client_decode_success = true`
+- `source_quality_grade = "real_candidate"`
+- `source_debug_nonflat_frame_count = 4`
+- `source_debug_all_flat = false`
+- `pass = true`
+
+Strongest AirCar artifact:
+
+- `logs/vtbridge-debug-frames/frame-001133-nonblack-crcd3a2ad7f.png`
+
+Exact AirCar refs:
+
+- `logs/vtbridge-daemon.log:708`
+- `logs/vtbridge-daemon.log:724`
+- `config/outcome.json:19`
+- `config/outcome.json:494`
+- `config/outcome.json:500`
+
+Conclusion:
+
+- The first gate is complete.
+- Tutorial repeatability is proven.
+- The first AirCar native-window-capture run is green on the same artifact
+  standard.
+
+### AirCar Repeatability Confirmation
+
+Bundle:
+
+- `temp/vr_runs/20260306-130639-live-avp-checkpoint`
+- `temp/vr_runs/20260306-132336-live-avp-checkpoint`
+
+Key AirCar markers:
+
+- selected window in daemon log:
+  - `logs/vtbridge-daemon.log:582`
+  - `owner=AirCar-Win64-Shipping.exe title=Aircar`
+- repeated override in daemon log:
+  - `logs/vtbridge-daemon.log:599`
+  - later repeated override continues through the same injected phase
+- selected window in second repeat daemon log:
+  - `logs/vtbridge-daemon.log:527`
+  - `owner=AirCar-Win64-Shipping.exe title=Aircar`
+- repeated override in second repeat daemon log:
+  - `logs/vtbridge-daemon.log:545`
+  - later repeated override continues through the same injected phase
+
+Outcome highlights:
+
+- `client_video_presenting = true`
+- `client_decode_success = true`
+- `source_quality_grade = "real_candidate"`
+- `source_debug_nonflat_frame_count = 4` on `20260306-130639`
+- `source_debug_nonflat_frame_count = 11` on `20260306-132336`
+- `source_debug_all_flat = false`
+- `pass = true`
+
+Strongest AirCar repeat artifact:
+
+- `logs/vtbridge-debug-frames/frame-000799-nonblack-crcd1bde59c.png`
+- `logs/vtbridge-debug-frames/frame-000300-nonblack-crcd9051352.png`
+
+Conclusion:
+
+- AirCar repeatability is proven.
+- The native app-window fallback is now green on two AirCar bundles,
+  not just one first-game success.

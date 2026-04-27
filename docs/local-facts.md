@@ -1,6 +1,6 @@
 # Local Facts
 
-As of February 17, 2026.
+As of March 22, 2026.
 
 ## Primary Host
 
@@ -51,22 +51,69 @@ As of February 17, 2026.
 - App Container warning remains cosmetic under CrossOver:
   - `DismissableWarning_EnableAppContainers`
 
+## ClearXR on macOS Host
+
+- Current host-side ClearXR live validation can reach:
+  - session-management listener
+  - QR pairing / authorization
+  - `WAITING`
+  - `MediaStreamIsReady`
+- Current host-side ClearXR live validation does **not** provide a real media
+  backend on this Mac:
+  - `clearxr-streamer` falls back to the native macOS placeholder backend when
+    the vendored CloudXR runtime is unavailable.
+  - That fallback can validate pairing and control-plane flow, but real Vision
+    Pro media startup is not expected to succeed on this host.
+- Current observed post-pairing headset failure after QR authorization is:
+  - `The operation couldn't be completed. 0x800B1004`
+- Current vendor/runtime state in this repo:
+  - `temp/external/clearxr-server/vendor/` does not currently contain a usable
+    staged CloudXR runtime under `Server/releases/...` for the macOS-hosted
+    headless run.
+  - Windows-target runtime artifacts do exist under the Windows build tree, but
+    they are not a usable local media backend for this Mac-hosted validation.
+
 ## Optional Windows VM
 
 - Alias: `winders`
 - VM host node: `prox-main.shiny`
-- VMID: `201` (`qm list` shows `winders` as running)
+- VMID: `201`
+- Verified from this Mac on March 22, 2026:
+  - `ssh prox-main.shiny` works
+  - `qm status 201` initially reported `stopped`
+  - `qm start 201` succeeded
+  - `qm guest cmd 201 ping` succeeded after boot
 - DNS resolution: `winders.shiny -> 192.168.1.137`
-- Direct SSH from this Mac to `winders` currently times out.
-- SSH from `prox-main` to `winders` currently times out.
+- Direct SSH from this Mac to `gaming@winders` works.
+- Direct PowerShell execution over `gaming@winders` works.
+- SSH from `prox-main` to `winders` was previously observed timing out and is no
+  longer required for the preferred validation path.
 - QEMU guest agent path is verified working from `prox-main`:
   - `qm guest cmd 201 ping`
   - `qm guest cmd 201 get-host-name` -> `WINDERS`
   - `qm guest cmd 201 network-get-interfaces` includes `192.168.1.137`
   - `qm guest exec 201 cmd.exe /c echo QGA_OK` returns output successfully
-- Guest toolchain/repo checks via QGA are verified:
+- Guest toolchain/runtime checks are verified:
   - `C:\dev\ALVR` exists (`ALVR_REPO_OK`)
-  - `cargo` and `rustc` are present (`C:\ProgramData\chocolatey\bin\...`)
+  - `C:\dev\clearxr-server` now contains a minimal staged ClearXR Windows
+    bundle from this workspace, rooted at:
+    `C:\dev\clearxr-server\clearxr-streamer\target\x86_64-pc-windows-gnu\debug`
+  - That staged path is sufficient for headless ClearXR startup, but it is not
+    a full `clearxr-server` source checkout.
+  - `cargo` and `rustc` were previously observed present (`C:\ProgramData\chocolatey\bin\...`)
+- Current Windows ClearXR backend behavior from this workspace:
+  - `python3 tools/stage_clearxr_winders.py` refreshes the staged runnable
+    bundle on `gaming@winders`.
+  - A direct raw launch of `clearxr-streamer.exe --clearxr-headless` currently
+    fails with `failed to load ...\cloudxr.dll` / `os error 126` unless the
+    CloudXR release directory is added to `PATH` first.
+  - `python3 tools/smoke_clearxr_winders.py` prepends
+    `...\Server\releases\6.0.4` to `PATH`, then starts a real headless
+    backend successfully.
+  - Verified successful smoke outcome on March 22, 2026:
+    - `Using vendored CloudXR runtime from C:\dev\clearxr-server\...\debug`
+    - `Created CloudXR Service`
+    - session-management listener started on `192.168.1.137:55000`
 - Last-known details:
   - host: `winders`
   - IP: `192.168.1.137`

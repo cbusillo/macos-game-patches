@@ -97,6 +97,60 @@ Observed backend split remains:
 - `d3dmetal`: compositor reaches startup but shared-handle interop still fails
   (`GetSharedHandle ... 0x80004001`) and render thread watchdogs/crashes.
 
+## March 6, 2026 Update: Shared-Content Probe Narrows The D3DMetal Theory
+
+`tools/shared_content_probe.py` was rerun with sterile cleanup across both
+backends and all four sharing scenarios. Results are saved at:
+
+- `temp/probes/shared_content_probe-latest.json`
+
+What changed in our understanding:
+
+- `d3dmetal` is capable of sharing real cross-process content for:
+  - `shared`
+  - `shared_nthandle`
+- `d3dmetal` fails keyed-mutex scenarios with:
+  - `diagnosis="keyed_mutex_sync_failed"`
+- `dxvk` still fails at the API layer in every scenario with:
+  - `diagnosis="api_share_path_unavailable"`
+
+Implication:
+
+- The current D3DMetal true-VR blocker is more specific than
+  "no cross-process sharing." Plain shared textures can survive a cross-process
+  reopen and retain content.
+- The remaining likely problem is the exact SteamVR direct-mode contract:
+  keyed mutex behavior, handle flavor, or compositor routing expectations.
+
+## March 6, 2026 Update: Virtual-Display Redirect No Longer Drops Presents
+
+A routing hardening patch was applied in the adjacent ALVR repo:
+
+- `/Users/cbusillo/Developer/ALVR/alvr/server_openvr/cpp/alvr_server/VirtualDisplayRedirect.cpp`
+
+Changes:
+
+- `VirtualDisplayRedirect::Present()` now forwards into the HMD virtual-display
+  path instead of logging and returning.
+- `VirtualDisplayRedirect::WaitForPresent()` now forwards into the HMD
+  virtual-display path before its local vsync callback.
+
+Focused host-side validation bundle (no native-window fallback):
+
+- `temp/vr_runs/20260306-213743-live-avp-checkpoint`
+
+Key outcome signals from that bundle:
+
+- `source_quality_grade="real_candidate"`
+- `source_debug_nonflat_frame_count=6`
+- `source_debug_all_flat=false`
+- `host_virtual_display_present_seen=true`
+
+This was a `--host-only` diagnostic, so `pass=false` is expected and should not
+be read as a regression. The important result is that the non-direct
+virtual-display path produced non-flat host-side content without depending on
+the macOS native app-window fallback.
+
 ## Next Investigation Gate
 
 1. Keep strict harness gates enabled (`--forbid-synthetic-fallback`,
