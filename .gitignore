@@ -44,6 +44,7 @@ temp/
 *.dxvk-cache
 
 .code/
+*.override.*
 
 # Local-only notes (do not commit)
 .local.md

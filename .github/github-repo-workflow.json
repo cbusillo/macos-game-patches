@@ -1,13 +1,78 @@
 {
   "defaultBranch": "main",
+  "projectType": "macos-vr-research-tooling",
+  "docs": {
+    "overview": "README.md",
+    "facts": "docs/facts.md",
+    "localFacts": "docs/local-facts.md",
+    "rebuildPlan": "docs/rebuild-plan.md",
+    "steamvrSmoke": "docs/steamvr-smoke.md",
+    "directModeBlocker": "docs/direct-mode-blocker-dossier.md",
+    "liveValidationEvidence": "docs/live-validation-evidence.md",
+    "externalProjects": "docs/external-projects-map.md"
+  },
+  "qualityGate": {
+    "preflight": {
+      "cleanup": "python3 tools/vr_stack_cleanup.py"
+    },
+    "test": {
+      "hevcGate": "python3 tools/hevc_gate.py",
+      "steamvrNullSmoke": "python3 tools/steamvr_smoke.py --mode null",
+      "vtbridgeHandshake": "python3 tools/vtbridge_handshake_gate.py",
+      "vtbridgeRing": "python3 tools/vtbridge_ring_conformance.py"
+    },
+    "liveGate": {
+      "strictNonDirect": "python3 tools/live_avp_nondirect_prod.py",
+      "releaseGate": "python3 tools/live_avp_release_gate.py"
+    },
+    "docsRequiredWhen": [
+      "verified facts change",
+      "local hardware or network facts change",
+      "runtime smoke behavior changes",
+      "direct-mode blocker evidence changes",
+      "ALVR or SteamVR reference lock changes",
+      "live validation evidence changes",
+      "tooling command behavior changes"
+    ]
+  },
   "importantWorkflows": [],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
   "relatedRepos": [],
   "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "not_enabled",
+      "secretScanning": "not_enabled",
+      "dependabotAlerts": "available",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
   "cleanup": {
     "deleteMergedLocalBranches": true,
     "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "hardware/runtime assumptions change",
+      "live validation strategy changes"
+    ]
   }
 }

@@ -2,6 +2,9 @@
 
 This repository tracks reproducible steps for getting SteamVR + ALVR working on
 macOS hardware.
+Use `.github/github-repo-workflow.json` for non-secret repo workflow facts,
+validation commands, GitHub signal availability, docs routing, important
+workflows, and cleanup policy.
 
 ## Mandatory Startup Hygiene
 
