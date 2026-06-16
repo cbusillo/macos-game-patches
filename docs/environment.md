@@ -23,6 +23,20 @@ This repo targets reproducible VR experiments on Apple hardware.
 - ALVR submodule pinned by visionOS `main`:
   `e3fd448029c795b1b2d5835c84c6588bf01bae0d` (`v20.14.1-4-ge3fd4480`)
 
+## Source Workspace Layout
+
+Use sibling source clones under `~/Developer` for active ALVR and visionOS
+client work. Do not add those source trees as submodules of this repository.
+
+```text
+~/Developer/macos-game-patches/
+~/Developer/alvr-visionos/
+~/Developer/alvr/
+```
+
+See `docs/source-workspace.md` for the exact setup commands and current pinned
+commits.
+
 ## Current Assumption
 
 ALVR v21 performed better than v20 in prior local work, but the visionOS client

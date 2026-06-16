@@ -59,21 +59,67 @@ index d3d5948..0c32bfd 100644
                  }
                  //alvr_report_fatal_decoder_error("VideoToolbox decoder failed with status: \(status)")
 diff --git a/ALVRClient/WorldTracker.swift b/ALVRClient/WorldTracker.swift
-index 7992433..6426ba7 100644
+index 7992433..df77b73 100644
 --- a/ALVRClient/WorldTracker.swift
 +++ b/ALVRClient/WorldTracker.swift
-@@ -568,8 +568,8 @@ class WorldTracker {
+@@ -377,0 +378,43 @@ class WorldTracker {
++    static let psvrInputIds: [UInt64] = [
++        leftButtonX,
++        leftButtonXTouched,
++        leftButtonY,
++        leftButtonYTouched,
++        leftMenuClick,
++        leftMenuTouched,
++        leftSystemClick,
++        leftSystemTouched,
++        leftTriggerClick,
++        leftTriggerValue,
++        leftTriggerTouched,
++        leftTriggerSensorValue,
++        leftThumbstickY,
++        leftThumbstickX,
++        leftThumbstickClick,
++        leftThumbstickTouched,
++        leftSqueezeClick,
++        leftSqueezeValue,
++        leftSqueezeTouched,
++        leftSqueezeSensorValue,
++        rightButtonA,
++        rightButtonATouched,
++        rightButtonB,
++        rightButtonBTouched,
++        rightSystemClick,
++        rightSystemTouched,
++        rightMenuClick,
++        rightMenuTouched,
++        rightTriggerClick,
++        rightTriggerValue,
++        rightTriggerTouched,
++        rightTriggerSensorValue,
++        rightThumbstickY,
++        rightThumbstickX,
++        rightThumbstickClick,
++        rightThumbstickTouched,
++        rightSqueezeClick,
++        rightSqueezeValue,
++        rightSqueezeTouched,
++        rightSqueezeSensorValue,
++    ]
++
+@@ -568,8 +611,10 @@ class WorldTracker {
                  if let alvrSettings = Settings.getAlvrSettings() {
                      let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
                      if emulationMode == "PSVR2Sense" && detectedPsvr {
 -                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile)
 -                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile)
-+                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, nil, 0)
-+                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, nil, 0)
++                        WorldTracker.psvrInputIds.withUnsafeBufferPointer { inputIds in
++                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, inputIds.baseAddress, UInt64(inputIds.count))
++                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, inputIds.baseAddress, UInt64(inputIds.count))
++                        }
                      }
                  }
                  for stylus in GCStylus.styli {
-@@ -3005,8 +3005,7 @@ class WorldTracker {
+@@ -3005,8 +3050,7 @@ class WorldTracker {
              // Old API, currently in master/v20
              //alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)])
              

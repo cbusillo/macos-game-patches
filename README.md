@@ -23,6 +23,8 @@ bridge.
 
 Patch artifacts under `patches/` are intended for external upstream checkouts.
 Each patch directory includes its own apply notes and tested upstream commits.
+Use the sibling source layout in `docs/source-workspace.md` for active ALVR and
+visionOS client work.
 
 ## Starting New Work
 

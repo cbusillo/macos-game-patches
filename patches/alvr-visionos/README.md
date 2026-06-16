@@ -22,7 +22,7 @@ matching v21 commit:
 git -C ALVR fetch --tags origin master
 git -C ALVR checkout d9f2b19d2b98b9d70411439fef83300c84ed171d
 git -C ALVR submodule update --init --recursive
-git apply /path/to/macos-game-patches/patches/alvr-visionos/alvr-v21-client-core-abi.patch
+git apply --unidiff-zero ~/Developer/macos-game-patches/patches/alvr-visionos/alvr-v21-client-core-abi.patch
 ```
 
 Build check:
@@ -42,6 +42,8 @@ Status:
 
 - Builds the v21 Rust `alvr_client_core` and the visionOS simulator app.
 - Updates Swift call sites for the generated v21 C ABI.
+- Reports the full PSVR2 Sense input ID set when activating the PSVR2
+  interaction profile, preserving ALVR v21 automatic controller button mapping.
 - Does not prove pairing, tracking, video decode, device signing, or runtime
   streaming.
 - Temporarily drops the old non-upstream face expression path and passes no

@@ -17,6 +17,8 @@ be treated as first priority.
 
 - Scratch checkout:
   `/Users/cbusillo/Developer/_probe-alvr-v21-avp/alvr-visionos`
+- Current stable source workspace:
+  `/Users/cbusillo/Developer/alvr-visionos`
 - `alvr-org/alvr-visionos`: `301b9285073949033727baab2d556fe9e8620612`
 - `alvr-org/ALVR`: `d9f2b19d2b98b9d70411439fef83300c84ed171d`
 - ALVR version: `21.0.0-dev12`
@@ -77,6 +79,27 @@ Result:
 
 - `alvr_client_core v21.0.0-dev12` built successfully.
 - `ALVRClient/ALVRClientCore.xcframework` was generated successfully.
+
+The same source state has since been promoted from the disposable scratch path
+to the stable sibling workspace documented in `docs/source-workspace.md`.
+
+The visionOS simulator app was rebuilt after updating the patch to send the
+full PSVR2 Sense input ID set with `alvr_send_active_interaction_profile`:
+
+```bash
+xcodebuild -project ALVRClient.xcodeproj \
+  -scheme ALVRClient \
+  -configuration Debug \
+  -destination 'generic/platform=visionOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+Result:
+
+- Build succeeded.
+- The PSVR2 interaction profile call now matches ALVR v21's automatic button
+  mapping expectations instead of reporting an empty client input set.
 
 Device build with the project defaults failed at provisioning:
 
