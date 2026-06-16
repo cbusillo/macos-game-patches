@@ -31,6 +31,7 @@ jobs:
           globs: |
             README.md
             AGENTS.md
+            docs/*.md
             docs/**/*.md
             patches/**/*.md
 
