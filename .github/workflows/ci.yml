@@ -10,7 +10,6 @@ permissions:
   contents: read
   checks: write
   pull-requests: write
-  security-events: write
 
 jobs:
   repo-hygiene:
@@ -19,8 +18,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Validate repository metadata
         run: jq empty .github/github.json
@@ -41,8 +38,17 @@ jobs:
           fail_level: error
           reporter: github-check
 
-      - name: Secret scan tracked files
-        uses: gitleaks/gitleaks-action@v3
+      - name: Install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          checksum_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          curl -sSfLO "$url"
+          curl -sSfL "$checksum_url" | grep "  ${archive}$" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+
+      - name: Secret scan tracked files
+        run: gitleaks detect --source . --no-git --redact --verbose
