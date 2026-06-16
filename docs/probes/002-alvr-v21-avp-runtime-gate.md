@@ -304,31 +304,178 @@ bottle:
 ~/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/SteamVR/bin/win64/vrstartup.exe
 ```
 
+## CrossOver Windows Streamer Attempt
+
+The next runtime attempt used the matching ALVR v21 Windows streamer artifact
+inside the existing CrossOver `Steam` bottle.
+
+Sterile cleanup was run first, including native Steam helper cleanup and Wine /
+CrossOver process cleanup:
+
+```bash
+python3 tools/vr_stack_cleanup.py \
+  --include-wine-crossover \
+  --sterile-native-steam
+```
+
+Result:
+
+- `matched=0`
+- `terminated=0`
+- `remaining=0`
+
+The matching upstream nightly release was available from
+`alvr-org/ALVR-nightly`:
+
+```text
+v21.0.0-dev12+nightly.2026.06.16
+alvr_streamer_windows.zip
+sha256:79953b0c200dec3a1fe1e2438663d69aec0267d620420f6461644a104c93ceea
+```
+
+The Windows streamer was extracted into the CrossOver bottle at:
+
+```text
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16
+```
+
+Key files were present after extraction:
+
+```text
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\ALVR Dashboard.exe
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\driver.vrdrivermanifest
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\bin\win64\driver_alvr_server.dll
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\bin\win64\openvr_api.dll
+```
+
+The ALVR OpenVR driver was registered with the SteamVR runtime inside the same
+CrossOver bottle:
+
+```bash
+STEAMVR='C:\Program Files (x86)\Steam\steamapps\common\SteamVR'
+
+/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxstart \
+  --bottle Steam \
+  --no-gui \
+  "${STEAMVR}\bin\win64\vrpathreg.exe" \
+  adddriver 'C:\ALVR\v21.0.0-dev12-nightly.2026.06.16'
+```
+
+`vrpathreg show` then reported both the pre-existing iVRy external driver and
+the new ALVR driver:
+
+```text
+Runtime path = C:\Program Files (x86)\Steam\steamapps\common\SteamVR
+Config path = C:\Program Files (x86)\Steam\config
+Log path = C:\Program Files (x86)\Steam\logs
+External Drivers:
+  ivry : C:\Program Files (x86)\Steam\steamapps\common\iVRy
+  alvr_server : C:\ALVR\v21.0.0-dev12-nightly.2026.06.16
+```
+
+The Windows ALVR Dashboard launched in CrossOver and stayed alive. Its launch
+log contained D3DMetal `BeginEvent` / `EndEvent` unsupported API warnings, but
+no fatal startup error was observed.
+
+The first direct SteamVR launch did not reach `vrserver.exe`. Steam's
+`gameprocess_log.txt` showed `vrstartup.exe` exiting with `-1073741515`, and a
+Wine loader trace identified the missing runtime dependency as
+`vcruntime140.dll`. Copying SteamVR's own bundled VC runtime DLLs from
+`bin\vrwebhelper\win64` to `bin\win64` unblocked SteamVR startup for this
+local bottle:
+
+```text
+vcruntime140.dll
+vcruntime140_1.dll
+msvcp140.dll
+vccorlib140.dll
+```
+
+After the runtime DLL copy, CrossOver SteamVR launched far enough for
+`vrserver.exe` to load the ALVR server driver:
+
+```text
+Loaded server driver alvr_server (IServerTrackedDeviceProvider_004) from C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\bin\win64\driver_alvr_server.dll
+Active HMD set to alvr_server.1WMHH000X00000
+```
+
+`vrmonitor.txt` also reported:
+
+```text
+VR_Init successful
+CQVRController::CheckHmdDriverName: ActualTrackingSystemName: alvr_server (0)
+[Status Warning Added 1WMHH000X00000 Headset(0)] Searching...
+```
+
+The signed AVP client was launched while CrossOver SteamVR and the Windows ALVR
+Dashboard were running:
+
+```bash
+xcrun devicectl device process launch \
+  --device 4E8627DA-A354-5A74-93CF-61F3D17CE324 \
+  --terminate-existing \
+  --timeout 60 \
+  --console \
+  com.shinycomputers.probe.alvrclient
+```
+
+Result:
+
+- The app launched and stayed alive until the bounded `devicectl` console
+  timeout.
+- Console output again showed ALVR worker startup, tracking worker startup,
+  `initializeAr`, `Reset playspace`, and `Initialize ALVR`.
+- The Windows ALVR `session.json` remained at
+  `C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\session.json` with an empty
+  `client_connections` object.
+- No headset trust prompt, client entry, protocol check, stream start, encoder
+  start, or first decode evidence was observed during this run.
+
+This is a meaningful boundary improvement over the macOS dashboard-only
+attempt: the ALVR Windows OpenVR driver loads inside CrossOver SteamVR and
+SteamVR accepts it as the active HMD. The next boundary is not driver ABI load;
+it is getting the AVP client discovered by, trusted by, and connected to the
+Windows ALVR streamer session.
+
 ## Current Verdict
 
-`blocked` - the build/install/launch leg is alive: the patched v21 Rust client
-core builds, the physical Apple Vision Pro device build succeeds, the app
-installs, `devicectl` can launch it, and the v21 macOS dashboard builds and
-runs. The overall runtime probe remains blocked because no native macOS
-SteamVR/OpenVR runtime is registered to load the ALVR server driver; the only
-SteamVR runtime currently available is inside CrossOver, where the native macOS
-ALVR dashboard cannot directly load its driver.
+`blocked` - the build/install/launch leg is alive, and the CrossOver Windows
+streamer path now reaches an ALVR-loaded SteamVR state. The patched v21 Rust
+client core builds, the physical Apple Vision Pro device build succeeds, the app
+installs, `devicectl` can launch it, the v21 macOS dashboard builds and runs,
+and the matching v21 Windows ALVR server driver loads inside CrossOver SteamVR.
+The runtime probe remains blocked because the signed AVP client did not appear
+in the Windows ALVR streamer session, so pairing and first video decode have not
+started.
 
 ## Next Action
 
-Run the matching ALVR v21 Windows streamer inside the CrossOver Steam bottle, or
-create a native macOS server-driver launch path that does not require native
-SteamVR registration. Capture whether the signed AVP client pairs and reaches
-first video decode. Keep the signing assets above as the active probe signing
-configuration unless a more permanent bundle ID strategy is chosen.
+Keep using the matching ALVR v21 Windows streamer inside the CrossOver Steam
+bottle, but focus the next attempt on client discovery and trust:
 
-## Runtime Evidence To Capture After Signing Is Fixed
+- confirm the Windows ALVR dashboard API or UI can see the active streamer
+  session;
+- determine whether discovery packets from the AVP client reach the Windows
+  streamer process under CrossOver;
+- if discovery is blocked, test manual client address / host override paths or
+  firewall/network-interface constraints;
+- if the client appears as untrusted, trust it in the Windows streamer session
+  and rerun the AVP launch;
+- if client connection starts, capture the first encoder/compositor/decode
+  failure and only then decide whether the native macOS encoder shim is the
+  right next implementation target.
+
+Keep the signing assets above as the active probe signing configuration unless a
+more permanent bundle ID strategy is chosen.
+
+## Runtime Evidence To Capture Next
 
 - Successful `xcodebuild` device build log.
 - `devicectl` or Xcode install result.
 - ALVR nightly streamer release evidence for
   `v21.0.0-dev12+nightly.2026.06.16`.
-- ALVR Dashboard screenshot showing the AVP client before/after trust.
+- Windows ALVR Dashboard or API evidence showing the AVP client before/after
+  trust.
 - Device log filtered to `ALVRClient` during connection.
 - Streamer log covering discovery, protocol check, stream start, video decode,
   tracking, and first failure if any.
