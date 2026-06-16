@@ -7,14 +7,17 @@
     "repoMetadata": ".github/github.json",
     "ciWorkflow": ".github/workflows/ci.yml",
     "dependabot": ".github/dependabot.yml",
-    "actionlint": ".github/actionlint.yaml"
+    "actionlint": ".github/actionlint.yaml",
+    "environment": "docs/environment.md",
+    "probeLedger": "docs/probes/README.md",
+    "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md"
   },
   "qualityGate": {
     "json": {
       "metadata": "jq empty .github/github.json"
     },
     "lint": {
-      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md",
+      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md docs/**/*.md",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
     },
     "security": {
