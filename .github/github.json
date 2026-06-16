@@ -10,14 +10,15 @@
     "actionlint": ".github/actionlint.yaml",
     "environment": "docs/environment.md",
     "probeLedger": "docs/probes/README.md",
-    "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md"
+    "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
+    "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
   },
   "qualityGate": {
     "json": {
       "metadata": "jq empty .github/github.json"
     },
     "lint": {
-      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md docs/**/*.md",
+      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md docs/**/*.md patches/**/*.md",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
     },
     "security": {

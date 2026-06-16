@@ -87,7 +87,11 @@ Results:
 - A small scratch-only compatibility patch let the visionOS simulator app build
   successfully.
 
-Scratch-only Swift changes required for the build:
+The captured patch artifact is
+`patches/alvr-visionos/alvr-v21-client-core-abi.patch`; see
+`patches/alvr-visionos/README.md` for apply and build commands.
+
+Swift changes captured in the patch:
 
 - Rename codec constants in `ALVRClient/VideoHandler.swift` and
   `ALVRClient/EventHandler.swift` from `ALVR_CODEC_H264`, `ALVR_CODEC_HEVC`,

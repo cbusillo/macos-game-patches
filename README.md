@@ -19,6 +19,11 @@ bridge.
   evidence.
 - Add scripts only after a repeated command or check is worth automating.
 
+## Patch Artifacts
+
+Patch artifacts under `patches/` are intended for external upstream checkouts.
+Each patch directory includes its own apply notes and tested upstream commits.
+
 ## Starting New Work
 
 Start with the probe ledger:

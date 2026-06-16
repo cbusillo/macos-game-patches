@@ -1,0 +1,85 @@
+diff --git a/ALVRClient/EventHandler.swift b/ALVRClient/EventHandler.swift
+index 532aa45..c748193 100644
+--- a/ALVRClient/EventHandler.swift
++++ b/ALVRClient/EventHandler.swift
+@@ -190,7 +190,7 @@ class EventHandler: ObservableObject {
+                 refreshRates = [120, 100, 96, 90]
+             }
+ 
+-            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: false)
++            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), max_view_width: UInt32(renderWidth*2), max_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, preferred_encoding_gamma: 1.5, prefer_hdr: false)
+             alvr_initialize(/*capabilities=*/capabilities)
+             alvr_initialize_logging()
+             alvr_set_decoder_input_callback(nil, { data in return EventHandler.shared.handleNals(frameData: data) })
+@@ -489,7 +489,7 @@ class EventHandler: ObservableObject {
+         
+         let startedDecodeTime = CACurrentMediaTime()
+         
+-        if currentCodec == ALVR_CODEC_AV1.rawValue && !av1InstantiatedForReal {
++        if currentCodec == ALVR_CODEC_TYPE_AV1.rawValue && !av1InstantiatedForReal {
+             print("Creating AV1 codec for real now.")
+             let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: currentCodec)
+             if attemptVtDecompressionSession != nil && attemptVideoFormat != nil {
+diff --git a/ALVRClient/VideoHandler.swift b/ALVRClient/VideoHandler.swift
+index d3d5948..0c32bfd 100644
+--- a/ALVRClient/VideoHandler.swift
++++ b/ALVRClient/VideoHandler.swift
+@@ -126,12 +126,12 @@ struct VideoHandler {
+         var videoFormat:CMFormatDescription? = nil
+         var err:OSStatus = 0
+         
+-        if (codec == ALVR_CODEC_H264.rawValue) {
++        if (codec == ALVR_CODEC_TYPE_H264.rawValue) {
+             (err, videoFormat) = createH264VideoDecoderDesc(initialNals: initialNals)
+-        } else if (codec == ALVR_CODEC_HEVC.rawValue) {
++        } else if (codec == ALVR_CODEC_TYPE_HEVC.rawValue) {
+             (err, videoFormat) = createHEVCVideoDecoderDesc(initialNals: initialNals)
+         }
+-        else if codec == ALVR_CODEC_AV1.rawValue {
++        else if codec == ALVR_CODEC_TYPE_AV1.rawValue {
+             if initialNals.count == 0 {
+                 (err, videoFormat) = createFakeAV1VideoDecoderDesc()
+             }
+@@ -592,7 +592,7 @@ struct VideoHandler {
+     static func feedVideoIntoDecoder(decompressionSession: VTDecompressionSession, nals: UnsafeMutableBufferPointer<UInt8>, timestamp: UInt64, videoFormat: CMFormatDescription, codec: Int, callback: @escaping (_ imageBuffer: CVImageBuffer?) -> Void) {
+         var err:OSStatus = 0
+         guard let sampleBuffer =
+-            (codec == ALVR_CODEC_AV1.rawValue) ?
++            (codec == ALVR_CODEC_TYPE_AV1.rawValue) ?
+                 bufferToCMSampleBuffer(buffer: nals, videoFormat: videoFormat) // OBUs
+                 : annexBBufferToCMSampleBuffer(buffer: nals, videoFormat: videoFormat) // NALs
+         else {
+@@ -611,7 +611,7 @@ struct VideoHandler {
+                 EventHandler.shared.framesSinceLastIDR = 0
+                 EventHandler.shared.resetEncoding()
+                 
+-                if codec == ALVR_CODEC_AV1.rawValue {
++                if codec == ALVR_CODEC_TYPE_AV1.rawValue {
+                     //alvr_report_fatal_decoder_error("VideoToolbox decoder failed with status: \(status)")
+                 }
+                 //alvr_report_fatal_decoder_error("VideoToolbox decoder failed with status: \(status)")
+diff --git a/ALVRClient/WorldTracker.swift b/ALVRClient/WorldTracker.swift
+index 7992433..6426ba7 100644
+--- a/ALVRClient/WorldTracker.swift
++++ b/ALVRClient/WorldTracker.swift
+@@ -568,8 +568,8 @@ class WorldTracker {
+                 if let alvrSettings = Settings.getAlvrSettings() {
+                     let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
+                     if emulationMode == "PSVR2Sense" && detectedPsvr {
+-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile)
+-                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile)
++                            alvr_send_active_interaction_profile(WorldTracker.deviceIdLeftHand, WorldTracker.psvrInteractionProfile, nil, 0)
++                            alvr_send_active_interaction_profile(WorldTracker.deviceIdRightHand, WorldTracker.psvrInteractionProfile, nil, 0)
+                     }
+                 }
+                 for stylus in GCStylus.styli {
+@@ -3005,8 +3005,7 @@ class WorldTracker {
+             // Old API, currently in master/v20
+             //alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)])
+             
+-            // New API, not upstreamed
+-            alvr_send_tracking_and_face_data(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)], UnsafePointer(fbFaceExpressions))
++            alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], nil)
+ 
+             if self.needsRecenterTrigger {
+                 // TODO raycast to the nearest wall/TV

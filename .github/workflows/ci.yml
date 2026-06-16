@@ -32,6 +32,7 @@ jobs:
             README.md
             AGENTS.md
             docs/**/*.md
+            patches/**/*.md
 
       - name: Lint GitHub Actions workflows
         uses: reviewdog/action-actionlint@v1
