@@ -18,7 +18,7 @@
       "metadata": "jq empty .github/github.json"
     },
     "lint": {
-      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md docs/**/*.md patches/**/*.md",
+      "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
     },
     "security": {
