@@ -161,27 +161,75 @@ This command intentionally tested the main app bundle override only. The
 broadcast extension still needs its own probe bundle ID and matching development
 profile before a complete signed device build can be expected.
 
+Signing was unblocked by using the active Apple Developer team `MM5YXC7T6E`,
+unique probe bundle IDs, and a matching probe App Group:
+
+- Main app bundle ID: `com.shinycomputers.probe.alvrclient`
+- Broadcast extension bundle ID:
+  `com.shinycomputers.probe.alvrclient.broadcast`
+- App Group: `group.com.shinycomputers.probe.alvrclient`
+- Main app capabilities: App Groups and Low-Latency Streaming
+- Broadcast extension capabilities: App Groups
+
+The bundle IDs and capabilities were created through the App Store Connect API;
+Xcode then generated development provisioning profiles for both targets during
+the device build.
+
+Device build from the stable source workspace succeeded:
+
+```bash
+cd /Users/cbusillo/Developer/alvr-visionos
+xcodebuild build \
+  -project ALVRClient.xcodeproj \
+  -scheme ALVRClient \
+  -configuration Debug \
+  -destination 'platform=visionOS,id=00008112-001108C63A78A01E' \
+  -allowProvisioningUpdates
+```
+
+Result:
+
+- Build succeeded for physical `xros`.
+- Xcode signed with `Apple Development: Chris Busillo (87ZKY9MUC6)`.
+- Main app profile:
+  `iOS Team Provisioning Profile: com.shinycomputers.probe.alvrclient`.
+- Broadcast extension profile:
+  `iOS Team Provisioning Profile: com.shinycomputers.probe.alvrclient.broadcast`.
+- The build emitted a non-fatal warning that the broadcast extension
+  `CFBundleVersion` (`1`) does not match the containing app (`3`).
+
+Install and launch also succeeded:
+
+```bash
+xcrun devicectl device install app \
+  --device 4E8627DA-A354-5A74-93CF-61F3D17CE324 \
+  /Users/cbusillo/Library/Developer/Xcode/DerivedData/ALVRClient-auzsgqllglfixqbsyodkubmqbcnc/Build/Products/Debug-xros/ALVRClient.app
+
+xcrun devicectl device process launch \
+  --device 4E8627DA-A354-5A74-93CF-61F3D17CE324 \
+  --terminate-existing \
+  --timeout 20 \
+  com.shinycomputers.probe.alvrclient
+```
+
+Result:
+
+- App installed with bundle ID `com.shinycomputers.probe.alvrclient`.
+- `devicectl` launched the app and reported process identifier `1001`.
+
 ## Current Verdict
 
-`blocked` - the patched v21 Rust client core still builds, and Xcode sees the
-Apple Vision Pro, but the on-device gate is blocked by Apple signing/capability
-setup before a signed device app build, install, or runtime pairing can be
-tested. Device-SDK Swift compilation remains unproven because provisioning fails
-first.
+`partially alive` - the patched v21 Rust client core builds, the physical
+Apple Vision Pro device build succeeds, the app installs, and `devicectl` can
+launch it. Pairing with the matching ALVR v21 streamer and first video decode
+remain untested.
 
 ## Next Action
 
-Create or select development provisioning assets that support both targets and
-their entitlements:
-
-- Development team available in Xcode.
-- Main app bundle ID for the probe build.
-- Broadcast extension bundle ID for the probe build.
-- App Group registered for the same team and referenced by both entitlements.
-- Low-Latency Streaming capability enabled for the main app profile.
-
-Then rerun the device build with explicit signing overrides and capture the next
-failure or first install success.
+Run the matching ALVR v21 streamer, launch the AVP client, and capture pairing
+plus first video-decode evidence. Keep the signing assets above as the active
+probe signing configuration unless a more permanent bundle ID strategy is
+chosen.
 
 ## Runtime Evidence To Capture After Signing Is Fixed
 
