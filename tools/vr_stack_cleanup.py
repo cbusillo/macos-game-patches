@@ -36,6 +36,20 @@ WINE_CROSSOVER_PROCESS_NAMES = {
     "wineserver",
 }
 
+WINE_VR_COMMAND_PATTERNS = (
+    "C:\\ALVR\\",
+    "\\ALVR Dashboard.exe",
+    "\\ALVR Launcher.exe",
+    "\\alvr_dashboard.exe",
+    "\\alvr_launcher.exe",
+    "\\driver_alvr_server.dll",
+    "\\SteamVR\\bin\\win64\\vrserver.exe",
+    "\\SteamVR\\bin\\win64\\vrstartup.exe",
+    "\\SteamVR\\bin\\win64\\vrmonitor.exe",
+    "\\SteamVR\\bin\\win64\\vrcompositor.exe",
+    "\\SteamVR\\bin\\vrwebhelper\\win64\\vrwebhelper.exe",
+)
+
 NATIVE_STEAM_PATTERNS = (
     "Steam.app/Contents/MacOS",
     "Steam.AppBundle/Steam/Contents/MacOS",
@@ -94,13 +108,15 @@ def list_processes() -> tuple[list[ProcessMatch], str | None]:
 
 def command_matches(process: ProcessMatch, include_wine_crossover: bool, sterile_native_steam: bool) -> bool:
     name = process.name
+    lowered_command = process.command.lower()
     if name in PROCESS_NAMES:
+        return True
+    if any(pattern.lower() in lowered_command for pattern in WINE_VR_COMMAND_PATTERNS):
         return True
     if include_wine_crossover and name in WINE_CROSSOVER_PROCESS_NAMES:
         return True
     if sterile_native_steam:
-        lowered = process.command.lower()
-        return any(pattern.lower() in lowered for pattern in NATIVE_STEAM_PATTERNS)
+        return any(pattern.lower() in lowered_command for pattern in NATIVE_STEAM_PATTERNS)
     return False
 
 
