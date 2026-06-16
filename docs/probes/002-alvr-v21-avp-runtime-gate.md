@@ -217,20 +217,110 @@ Result:
 - App installed with bundle ID `com.shinycomputers.probe.alvrclient`.
 - `devicectl` launched the app and reported process identifier `1001`.
 
+## Streamer Runtime Attempt
+
+Before the live runtime attempt, the restored cleanup preflight was run from
+this repo:
+
+```bash
+python3 tools/vr_stack_cleanup.py
+```
+
+Result:
+
+- `matched=0`
+- `terminated=0`
+- `remaining=0`
+
+The standalone ALVR checkout was missing the `openvr` submodule on the first
+streamer build attempt. After initializing submodules, the macOS streamer build
+succeeded:
+
+```bash
+cd /Users/cbusillo/Developer/alvr
+git submodule update --init --recursive
+cargo xtask build-streamer --platform macos
+```
+
+Result:
+
+- `alvr_server_openvr v21.0.0-dev12` built for macOS.
+- `alvr_dashboard v21.0.0-dev12` built for macOS.
+- The streamer output was created at
+  `/Users/cbusillo/Developer/alvr/build/alvr_streamer_macos`.
+- The build emitted C++ warnings, but completed successfully.
+
+The macOS dashboard launched successfully:
+
+```bash
+/Users/cbusillo/Developer/alvr/build/alvr_streamer_macos/alvr_dashboard
+```
+
+Dashboard evidence:
+
+- The dashboard selected the Metal backend on `Apple M4 Max`.
+- The dashboard loaded the local ALVR session.
+- Existing trusted AVP client entries remained in
+  `~/Library/Application Support/alvr/session.json`.
+- No streamer server socket or client connection-state transition was observed.
+- `~/Library/Application Support/alvr/logs` was created, but no server log was
+  written during the dashboard-only run.
+
+The AVP client was launched again with console output attached:
+
+```bash
+xcrun devicectl device process launch \
+  --device 4E8627DA-A354-5A74-93CF-61F3D17CE324 \
+  --terminate-existing \
+  --timeout 30 \
+  --console \
+  com.shinycomputers.probe.alvrclient
+```
+
+Result:
+
+- The app launched and stayed alive until the bounded `devicectl` console
+  timeout.
+- Console output included ALVR worker startup, tracking worker startup,
+  `initializeAr`, `Reset playspace`, and `Initialize ALVR`.
+- The ALVR dashboard session still reported the trusted AVP client entries as
+  `Disconnected`.
+
+This established a sharper boundary: the patched v21 AVP client can launch, and
+the v21 macOS dashboard can build and run, but the dashboard alone does not
+start the streaming server. ALVR expects SteamVR/`vrserver` to load the ALVR
+OpenVR driver. On this machine, native macOS OpenVR files were not registered:
+
+```text
+~/.config/openvr/openvrpaths.vrpath: missing
+~/Library/Application Support/Steam/config/steamvr.vrsettings: missing
+```
+
+The only SteamVR runtime found during this probe was inside the CrossOver Steam
+bottle:
+
+```text
+~/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/SteamVR/bin/win64/vrserver.exe
+~/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/SteamVR/bin/win64/vrstartup.exe
+```
+
 ## Current Verdict
 
 `blocked` - the build/install/launch leg is alive: the patched v21 Rust client
 core builds, the physical Apple Vision Pro device build succeeds, the app
-installs, and `devicectl` can launch it. The overall runtime probe remains
-blocked until pairing with the matching ALVR v21 streamer and first video decode
-are tested.
+installs, `devicectl` can launch it, and the v21 macOS dashboard builds and
+runs. The overall runtime probe remains blocked because no native macOS
+SteamVR/OpenVR runtime is registered to load the ALVR server driver; the only
+SteamVR runtime currently available is inside CrossOver, where the native macOS
+ALVR dashboard cannot directly load its driver.
 
 ## Next Action
 
-Run the matching ALVR v21 streamer, launch the AVP client, and capture pairing
-plus first video-decode evidence. Keep the signing assets above as the active
-probe signing configuration unless a more permanent bundle ID strategy is
-chosen.
+Run the matching ALVR v21 Windows streamer inside the CrossOver Steam bottle, or
+create a native macOS server-driver launch path that does not require native
+SteamVR registration. Capture whether the signed AVP client pairs and reaches
+first video decode. Keep the signing assets above as the active probe signing
+configuration unless a more permanent bundle ID strategy is chosen.
 
 ## Runtime Evidence To Capture After Signing Is Fixed
 
