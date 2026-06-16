@@ -38,6 +38,9 @@ jobs:
           fail_level: error
           reporter: github-check
 
+      - name: Validate Python tools
+        run: python3 -m py_compile tools/vr_stack_cleanup.py
+
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: "8.30.1"
