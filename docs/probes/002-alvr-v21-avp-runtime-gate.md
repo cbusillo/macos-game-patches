@@ -437,6 +437,94 @@ SteamVR accepts it as the active HMD. The next boundary is not driver ABI load;
 it is getting the AVP client discovered by, trusted by, and connected to the
 Windows ALVR streamer session.
 
+## CrossOver Client Discovery Attempt
+
+A follow-up discovery probe found that the cleanup tool was not matching some
+Wine-hosted Windows VR processes because their macOS process names were
+truncated, for example `C:\ALVR\v21.0.0-` and `C:\Program Files`. The cleanup
+tool was updated to match relevant Wine-hosted ALVR and SteamVR command-line
+paths. After that update, the cleanup dry run caught stale `vrserver.exe`,
+`vrmonitor.exe`, and duplicate `ALVR Dashboard.exe` processes, and the real
+cleanup removed them before the next runtime attempt.
+
+The fresh CrossOver launch again reached the ALVR-loaded SteamVR state:
+
+```text
+C:\ALVR\v21.0.0-dev12-nightly.2026.06.16\ALVR Dashboard.exe
+C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrserver.exe -waitformonitor
+C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrmonitor.exe ...
+```
+
+ALVR's web server was reachable from macOS through the CrossOver Wine process:
+
+```text
+http://127.0.0.1:8082/api/version
+21.0.0-dev12+nightly.2026.06.16
+```
+
+Plain requests without the ALVR dashboard header were rejected with
+`missing X-ALVR header`, which matches ALVR v21's server API behavior. The live
+session before the AVP launch still had discovery enabled and an empty client
+list:
+
+```json
+{
+  "server_version": "21.0.0-dev12+nightly.2026.06.16",
+  "client_connections": {},
+  "connection": {
+    "client_discovery": {
+      "enabled": true,
+      "content": {
+        "auto_trust_clients": false
+      }
+    },
+    "stream_port": 9944,
+    "web_server_port": 8082
+  }
+}
+```
+
+Source review changed the discovery assumption for ALVR v21. The older wiki
+describes UDP discovery on port `9943`, but the active v21 source path uses
+mDNS/Bonjour service discovery:
+
+- ALVR server browses `_alvr._tcp.local.`, requires the `protocol` TXT key,
+  and uses `device_id` when present before falling back to the mDNS hostname.
+- The client listens for the server's TCP control connection on port `9943`.
+- The visionOS client uses `NWListener` to publish `_alvr._tcp` with service
+  name `ALVR Apple Vision Pro`.
+- The visionOS client source prints `mDNS listener is ready` and
+  `mDNS registration updated:` when publication succeeds.
+
+The AVP client was launched while `dns-sd` browsed for `_alvr._tcp` services:
+
+```bash
+dns-sd -B _alvr._tcp local
+
+xcrun devicectl device process launch \
+  --device 4E8627DA-A354-5A74-93CF-61F3D17CE324 \
+  --terminate-existing \
+  --timeout 60 \
+  --console \
+  com.shinycomputers.probe.alvrclient
+```
+
+Result:
+
+- The AVP app launched and again printed ALVR worker startup,
+  `initializeAr`, `Reset playspace`, and `Initialize ALVR`.
+- No `mDNS listener is ready`, `mDNS registration updated:`, or mDNS failure
+  message appeared in the bounded console output.
+- `dns-sd -B _alvr._tcp local` saw no ALVR service during the 60 second run.
+- The Windows ALVR `session.json` still had an empty `client_connections`
+  object after the AVP launch.
+- `lsof` showed the CrossOver ALVR server/driver listening on TCP `8082` and
+  mDNS `5353`, but no visible client-side TCP `9943` listener from the AVP.
+
+This shifts the live blocker again: the Windows streamer is alive and browsing
+for ALVR v21 clients, but the visionOS client is not visibly publishing the
+Bonjour service needed for discovery.
+
 ## Current Verdict
 
 `blocked` - the build/install/launch leg is alive, and the CrossOver Windows
@@ -446,21 +534,28 @@ installs, `devicectl` can launch it, the v21 macOS dashboard builds and runs,
 and the matching v21 Windows ALVR server driver loads inside CrossOver SteamVR.
 The runtime probe remains blocked because the signed AVP client did not appear
 in the Windows ALVR streamer session, so pairing and first video decode have not
-started.
+started. The most recent evidence points to the visionOS client discovery
+publisher rather than CrossOver's OpenVR driver load path: no `_alvr._tcp`
+Bonjour service was visible from macOS while the AVP app was running, and the
+app console did not print its expected mDNS listener readiness or registration
+messages.
 
 ## Next Action
 
 Keep using the matching ALVR v21 Windows streamer inside the CrossOver Steam
-bottle, but focus the next attempt on client discovery and trust:
+bottle, but focus the next attempt on the visionOS mDNS publisher:
 
-- confirm the Windows ALVR dashboard API or UI can see the active streamer
-  session;
-- determine whether discovery packets from the AVP client reach the Windows
-  streamer process under CrossOver;
-- if discovery is blocked, test manual client address / host override paths or
-  firewall/network-interface constraints;
-- if the client appears as untrusted, trust it in the Windows streamer session
-  and rerun the AVP launch;
+- add bounded logging around `handleMdnsBroadcasts()`, `NWListener.start`,
+  `stateUpdateHandler`, and `serviceRegistrationUpdateHandler` in the AVP
+  client;
+- confirm the signed app bundle includes `NSBonjourServices` for `_alvr._tcp`
+  and add `NSLocalNetworkUsageDescription` if visionOS requires the prompt to
+  publish Bonjour services;
+- relaunch the AVP client while browsing with `dns-sd -B _alvr._tcp local` and
+  record whether `ALVR Apple Vision Pro` appears;
+- once the service appears, confirm the Windows ALVR session records the client
+  as untrusted, trust it through the Windows streamer session, and rerun the
+  AVP launch;
 - if client connection starts, capture the first encoder/compositor/decode
   failure and only then decide whether the native macOS encoder shim is the
   right next implementation target.
@@ -474,8 +569,9 @@ more permanent bundle ID strategy is chosen.
 - `devicectl` or Xcode install result.
 - ALVR nightly streamer release evidence for
   `v21.0.0-dev12+nightly.2026.06.16`.
-- Windows ALVR Dashboard or API evidence showing the AVP client before/after
-  trust.
+- Bonjour discovery evidence for `_alvr._tcp` while the AVP client is running.
+- Windows ALVR Dashboard, API, or `session.json` evidence showing the AVP client
+  before/after trust.
 - Device log filtered to `ALVRClient` during connection.
 - Streamer log covering discovery, protocol check, stream start, video decode,
   tracking, and first failure if any.
