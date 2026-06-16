@@ -22,7 +22,8 @@
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
     },
     "security": {
-      "secretScan": "gitleaks detect --source . --no-git --redact --verbose"
+      "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
+      "gitleaksVersion": "8.30.1"
     },
     "docsRequiredWhen": [
       "new experiment plans are added",
