@@ -1,0 +1,78 @@
+{
+  "defaultBranch": "main",
+  "projectType": "macos-game-vr-research-baseline",
+  "docs": {
+    "overview": "README.md",
+    "agentGuidelines": "AGENTS.md",
+    "repoMetadata": ".github/github.json",
+    "ciWorkflow": ".github/workflows/ci.yml",
+    "dependabot": ".github/dependabot.yml",
+    "actionlint": ".github/actionlint.yaml",
+    "environment": "docs/environment.md",
+    "probeLedger": "docs/probes/README.md",
+    "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
+    "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
+  },
+  "qualityGate": {
+    "json": {
+      "metadata": "jq empty .github/github.json"
+    },
+    "lint": {
+      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md docs/**/*.md patches/**/*.md",
+      "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
+    },
+    "security": {
+      "secretScan": "gitleaks detect --source . --no-git --redact --verbose"
+    },
+    "docsRequiredWhen": [
+      "new experiment plans are added",
+      "validation gates change",
+      "primary commands change",
+      "hardware/runtime assumptions change",
+      "cleanup policy changes",
+      "GitHub workflow changes",
+      "dependency automation changes"
+    ]
+  },
+  "importantWorkflows": ["CI"],
+  "qaLabels": [],
+  "deployLabels": [],
+  "healthUrls": [],
+  "relatedRepos": [],
+  "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "not_enabled",
+      "secretScanning": "not_enabled",
+      "dependabotAlerts": "available",
+      "securityAdvisories": "available"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
+  "cleanup": {
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "hardware/runtime assumptions change",
+      "GitHub workflow changes",
+      "dependency automation changes"
+    ]
+  }
+}

@@ -1,37 +1,27 @@
 # AI Agent Guidelines
 
-This repository tracks reproducible steps for getting SteamVR + ALVR working on
-macOS hardware.
-Use `.github/github-repo-workflow.json` for non-secret repo workflow facts,
-validation commands, GitHub signal availability, docs routing, important
-workflows, and cleanup policy.
+Use `.github/github.json` for non-secret repo workflow facts, validation
+expectations, docs routing, and cleanup policy.
 
-## Mandatory Startup Hygiene
+## Branch Discipline
 
-Before any SteamVR, CrossOver, Wine, or ALVR test run, execute:
+- Do not work directly on `main` for implementation or cleanup changes.
+- Create a focused task branch before editing tracked files.
+- Push only task branches and open or update a PR when GitHub follow-through is
+  needed.
 
-```bash
-python3 tools/vr_stack_cleanup.py
-```
+## Experiment Hygiene
 
-Rules:
+- Start new work with a short plan under `docs/` before adding scripts.
+- Commit reproducible commands, cleanup steps, expected artifacts, and known
+  failure signatures with each experiment.
+- Keep tools narrowly scoped until a path has real evidence.
+- Update `.github/github.json` whenever validation commands, primary docs, or
+  cleanup expectations change.
 
-- Treat cleanup as required preflight, not optional.
-- If cleanup exits nonzero, do not continue with launch/testing until the stack
-  is clean.
-- Repeat cleanup between major test attempts when process state is uncertain.
-- For fully sterile live runs, include native Steam helper cleanup:
+## Validation
 
-```bash
-python3 tools/vr_stack_cleanup.py --sterile-native-steam
-```
-
-## Minimal Test Sequence
-
-```bash
-python3 tools/vr_stack_cleanup.py
-python3 tools/steamvr_smoke.py --mode null
-```
-
-Use this baseline before introducing ALVR, VTBridge, or headset-specific
-variables.
+There is currently no repo-wide executable validation gate. For documentation
+only changes, verify the changed Markdown and repository metadata are internally
+consistent. When new tooling is added, record the relevant validation command in
+`.github/github.json`.
