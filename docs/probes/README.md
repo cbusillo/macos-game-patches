@@ -14,3 +14,4 @@ Use this shape:
 ## Active Probes
 
 - [001 - ALVR v21 visionOS compatibility](001-alvr-v21-visionos-compatibility.md)
+- [002 - ALVR v21 AVP runtime gate](002-alvr-v21-avp-runtime-gate.md)
