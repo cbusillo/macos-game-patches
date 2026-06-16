@@ -41,3 +41,11 @@ Include:
 - first executable gate
 - evidence to collect
 - cleanup or rollback steps
+
+Before live SteamVR or ALVR runs, clear stale runtime state:
+
+```bash
+python3 tools/vr_stack_cleanup.py
+```
+
+For fully sterile CrossOver/Wine probes, add `--include-wine-crossover`.

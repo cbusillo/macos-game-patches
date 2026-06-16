@@ -20,11 +20,15 @@
     },
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
-      "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
+      "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py"
     },
     "security": {
       "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
       "gitleaksVersion": "8.30.1"
+    },
+    "runtimePreflight": {
+      "vrStackCleanup": "python3 tools/vr_stack_cleanup.py"
     },
     "docsRequiredWhen": [
       "new experiment plans are added",
