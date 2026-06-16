@@ -41,6 +41,10 @@ NATIVE_STEAM_PATTERNS = (
     "Steam.AppBundle/Steam/Contents/MacOS",
 )
 
+NATIVE_STEAM_LAUNCHCTL_LABELS = (
+    "com.valvesoftware.steam.ipctool",
+)
+
 
 @dataclass(frozen=True)
 class ProcessMatch:
@@ -55,6 +59,7 @@ class CleanupReport:
     terminated: list[ProcessMatch]
     remaining: list[ProcessMatch]
     ps_error: str | None = None
+    launchctl_actions: list[str] | None = None
 
 
 def list_processes() -> tuple[list[ProcessMatch], str | None]:
@@ -119,15 +124,49 @@ def signal_process(process: ProcessMatch, sig: signal.Signals) -> None:
         return
 
 
+def bootout_native_steam_services() -> list[str]:
+    actions: list[str] = []
+    uid = os.getuid()
+    domains = (f"gui/{uid}", f"user/{uid}")
+
+    for label in NATIVE_STEAM_LAUNCHCTL_LABELS:
+        for domain in domains:
+            service = f"{domain}/{label}"
+            result = subprocess.run(
+                ["launchctl", "bootout", service],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                actions.append(f"bootout {service}: ok")
+            else:
+                stderr = result.stderr.strip()
+                actions.append(f"bootout {service}: exit {result.returncode}: {stderr}")
+
+    return actions
+
+
 def cleanup(
     grace_seconds: float,
     include_wine_crossover: bool,
     sterile_native_steam: bool,
     dry_run: bool,
 ) -> CleanupReport:
+    launchctl_actions: list[str] | None = None
+    if sterile_native_steam and not dry_run:
+        launchctl_actions = bootout_native_steam_services()
+
     matched, ps_error = list_matching_processes(include_wine_crossover, sterile_native_steam)
     if ps_error is not None:
-        return CleanupReport(matched=[], terminated=[], remaining=[], ps_error=ps_error)
+        return CleanupReport(
+            matched=[],
+            terminated=[],
+            remaining=[],
+            ps_error=ps_error,
+            launchctl_actions=launchctl_actions,
+        )
     if dry_run:
         return CleanupReport(matched=matched, terminated=[], remaining=matched)
 
@@ -138,7 +177,13 @@ def cleanup(
 
     current_matches, ps_error = list_matching_processes(include_wine_crossover, sterile_native_steam)
     if ps_error is not None:
-        return CleanupReport(matched=matched, terminated=[], remaining=[], ps_error=ps_error)
+        return CleanupReport(
+            matched=matched,
+            terminated=[],
+            remaining=[],
+            ps_error=ps_error,
+            launchctl_actions=launchctl_actions,
+        )
     still_running = {process.pid: process for process in current_matches}
     for process in matched:
         current_process = still_running.get(process.pid)
@@ -152,12 +197,23 @@ def cleanup(
         if ps_error is not None or not remaining:
             break
     if ps_error is not None:
-        return CleanupReport(matched=matched, terminated=[], remaining=[], ps_error=ps_error)
+        return CleanupReport(
+            matched=matched,
+            terminated=[],
+            remaining=[],
+            ps_error=ps_error,
+            launchctl_actions=launchctl_actions,
+        )
 
     remaining_pids = {process.pid for process in remaining}
     terminated = [process for process in matched if process.pid not in remaining_pids]
 
-    return CleanupReport(matched=matched, terminated=terminated, remaining=remaining)
+    return CleanupReport(
+        matched=matched,
+        terminated=terminated,
+        remaining=remaining,
+        launchctl_actions=launchctl_actions,
+    )
 
 
 def print_text_report(report: CleanupReport) -> None:
@@ -166,6 +222,9 @@ def print_text_report(report: CleanupReport) -> None:
     print(f"remaining={len(report.remaining)}")
     if report.ps_error is not None:
         print(f"ps_error={report.ps_error}")
+    if report.launchctl_actions:
+        for action in report.launchctl_actions:
+            print(f"launchctl={action}")
     for process in report.remaining[:20]:
         print(f"- pid={process.pid} name={process.name} cmd={process.command}")
 
