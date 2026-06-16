@@ -9,6 +9,7 @@
     "dependabot": ".github/dependabot.yml",
     "actionlint": ".github/actionlint.yaml",
     "environment": "docs/environment.md",
+    "sourceWorkspace": "docs/source-workspace.md",
     "probeLedger": "docs/probes/README.md",
     "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
@@ -39,7 +40,22 @@
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
-  "relatedRepos": [],
+  "relatedRepos": [
+    {
+      "name": "alvr-visionos",
+      "repo": "alvr-org/alvr-visionos",
+      "localPath": "../alvr-visionos",
+      "baselineCommit": "301b9285073949033727baab2d556fe9e8620612",
+      "purpose": "Apple Vision Pro client source checkout for v21 compatibility probes"
+    },
+    {
+      "name": "ALVR",
+      "repo": "alvr-org/ALVR",
+      "localPath": "../alvr",
+      "baselineCommit": "d9f2b19d2b98b9d70411439fef83300c84ed171d",
+      "purpose": "Standalone streamer/server source checkout and v21 client-core reference"
+    }
+  ],
   "validatedThrough": [],
   "githubSignals": {
     "postMerge": {
