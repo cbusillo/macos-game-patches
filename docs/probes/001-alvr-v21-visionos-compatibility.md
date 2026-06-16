@@ -59,6 +59,53 @@ Results:
 - This proves the current upstream visionOS client is buildable locally, but it
   builds against ALVR `20.14.1`, not ALVR v21.
 
+## Controlled v21 Bump Evidence
+
+In the same scratch workspace, the `ALVR` submodule was moved to the ALVR commit
+that produced the current nightly:
+
+```bash
+git -C ALVR fetch --tags origin master
+git -C ALVR checkout d9f2b19d2b98b9d70411439fef83300c84ed171d
+git -C ALVR submodule update --init --recursive
+unset SDKROOT
+zsh build_and_repack.sh
+xcodebuild build \
+  -project ALVRClient.xcodeproj \
+  -scheme ALVRClient \
+  -configuration Debug \
+  -destination 'generic/platform=visionOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Results:
+
+- `ALVR/Cargo.toml` reported `version = "21.0.0-dev12"`.
+- Rust `alvr_client_core` and `ALVRClientCore.xcframework` built successfully
+  against ALVR commit `d9f2b19d2b98b9d70411439fef83300c84ed171d`.
+- The unmodified Swift app did not compile against the v21 generated C header.
+- A small scratch-only compatibility patch let the visionOS simulator app build
+  successfully.
+
+Scratch-only Swift changes required for the build:
+
+- Rename codec constants in `ALVRClient/VideoHandler.swift` and
+  `ALVRClient/EventHandler.swift` from `ALVR_CODEC_H264`, `ALVR_CODEC_HEVC`,
+  and `ALVR_CODEC_AV1` to `ALVR_CODEC_TYPE_H264`, `ALVR_CODEC_TYPE_HEVC`, and
+  `ALVR_CODEC_TYPE_AV1`.
+- Update `AlvrClientCapabilities` construction in
+  `ALVRClient/EventHandler.swift` for the v21 fields by adding `max_view_width`
+  and `max_view_height`, and removing `prefer_full_range`.
+- Update `alvr_send_active_interaction_profile` calls in
+  `ALVRClient/WorldTracker.swift` to pass the new input ID pointer and count
+  arguments.
+- Replace the non-upstream `alvr_send_tracking_and_face_data` call with the v21
+  `alvr_send_tracking(..., nil)` call in `ALVRClient/WorldTracker.swift`.
+
+The last item is compile-oriented only. It drops the old face expression payload
+and passes no combined eye gaze, so runtime tracking and face/eye behavior still
+need a real v21 mapping before this is considered product-quality client work.
+
 ## Procedure
 
 1. Clone or update `alvr-org/ALVR` and `alvr-org/alvr-visionos` into a local
@@ -79,13 +126,15 @@ Results:
 
 ## Verdict
 
-`blocked` - upstream `alvr-visionos/main` is buildable locally, but it currently
-pins a `v20.14.1` ALVR submodule. Current v21/nightly visionOS support is not
-present in the upstream pin and remains unresolved by open issue 165.
+`alive` - upstream `alvr-visionos/main` is buildable locally, but it currently
+pins a `v20.14.1` ALVR submodule. A controlled bump to the current v21 nightly
+ALVR commit builds after a small Swift ABI compatibility patch, which means v21
+support is probably close enough to pursue. Pairing, tracking, video decode, and
+face/eye behavior are still unproven.
 
 ## Next Action
 
-Attempt a controlled v21 submodule bump to the current ALVR nightly source
-commit and rebuild `alvr_client_core` plus the visionOS app. If the build fails,
-the next workstream is porting `alvr-visionos` to the current v21 client-core C
-ABI before CrossOver/D3DMetal bridge work can produce a useful end-to-end result.
+Preserve the scratch compatibility patch as the starting point for a real
+`alvr-visionos` v21 port, then run the client on-device against the matching
+`v21.0.0-dev12+nightly.2026.06.16` streamer. The next gate is reaching pairing
+and first video decode before investing in the CrossOver/D3DMetal frame bridge.

@@ -1,7 +1,13 @@
 # macOS Game And VR Patch Lab
 
-Workspace for reproducible experiments around running and patching games on
-macOS and visionOS.
+Workspace for reproducible experiments around getting PC VR and game rendering
+working well on Apple hardware.
+
+The near-term target is SteamVR through CrossOver/GPTK on macOS, paired with an
+ALVR visionOS client on Apple Vision Pro. D3DMetal performance is central to the
+plan; the first gate is proving that the AVP client can speak the same ALVR v21
+protocol as the streamer before investing in the CrossOver-to-native frame
+bridge.
 
 ## Working Style
 
@@ -15,10 +21,10 @@ macOS and visionOS.
 
 ## Starting New Work
 
-Create a focused plan under `docs/`, for example:
+Start with the probe ledger:
 
 ```text
-docs/<game-or-runtime>-plan.md
+docs/probes/README.md
 ```
 
 Include:
