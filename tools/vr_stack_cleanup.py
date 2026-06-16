@@ -95,14 +95,15 @@ def list_processes() -> tuple[list[ProcessMatch], str | None]:
         parts = line.split(None, 2)
         if len(parts) < 3:
             continue
-        pid_text, command_name, command = parts
+        pid_text, command_name, command_args = parts
         try:
             pid = int(pid_text)
         except ValueError:
             continue
         if pid == current_pid:
             continue
-        matches.append(ProcessMatch(pid=pid, name=os.path.basename(command_name), command=command.strip()))
+        command = f"{command_name} {command_args}".strip()
+        matches.append(ProcessMatch(pid=pid, name=os.path.basename(command_name), command=command))
     return matches, None
 
 
