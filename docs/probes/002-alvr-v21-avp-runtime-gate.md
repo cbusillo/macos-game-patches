@@ -219,10 +219,11 @@ Result:
 
 ## Current Verdict
 
-`partially alive` - the patched v21 Rust client core builds, the physical
-Apple Vision Pro device build succeeds, the app installs, and `devicectl` can
-launch it. Pairing with the matching ALVR v21 streamer and first video decode
-remain untested.
+`blocked` - the build/install/launch leg is alive: the patched v21 Rust client
+core builds, the physical Apple Vision Pro device build succeeds, the app
+installs, and `devicectl` can launch it. The overall runtime probe remains
+blocked until pairing with the matching ALVR v21 streamer and first video decode
+are tested.
 
 ## Next Action
 
