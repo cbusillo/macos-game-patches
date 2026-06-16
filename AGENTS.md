@@ -1,7 +1,7 @@
 # AI Agent Guidelines
 
-Use `.github/github-repo-workflow.json` for non-secret repo workflow facts,
-validation expectations, docs routing, and cleanup policy.
+Use `.github/github.json` for non-secret repo workflow facts, validation
+expectations, docs routing, and cleanup policy.
 
 ## Branch Discipline
 
@@ -16,12 +16,12 @@ validation expectations, docs routing, and cleanup policy.
 - Commit reproducible commands, cleanup steps, expected artifacts, and known
   failure signatures with each experiment.
 - Keep tools narrowly scoped until a path has real evidence.
-- Update `.github/github-repo-workflow.json` whenever validation commands,
-  primary docs, or cleanup expectations change.
+- Update `.github/github.json` whenever validation commands, primary docs, or
+  cleanup expectations change.
 
 ## Validation
 
 There is currently no repo-wide executable validation gate. For documentation
 only changes, verify the changed Markdown and repository metadata are internally
 consistent. When new tooling is added, record the relevant validation command in
-`.github/github-repo-workflow.json`.
+`.github/github.json`.

@@ -3,19 +3,34 @@
   "projectType": "macos-game-vr-research-baseline",
   "docs": {
     "overview": "README.md",
-    "agentGuidelines": "AGENTS.md"
+    "agentGuidelines": "AGENTS.md",
+    "repoMetadata": ".github/github.json",
+    "ciWorkflow": ".github/workflows/ci.yml",
+    "dependabot": ".github/dependabot.yml",
+    "actionlint": ".github/actionlint.yaml"
   },
   "qualityGate": {
-    "test": {},
+    "json": {
+      "metadata": "jq empty .github/github.json"
+    },
+    "lint": {
+      "markdown": "npx --yes markdownlint-cli2 README.md AGENTS.md",
+      "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml"
+    },
+    "security": {
+      "secretScan": "docker run --rm -v $PWD:/repo:ro -w /repo ghcr.io/gitleaks/gitleaks:v8.30.1 detect --source . --no-git --redact --verbose"
+    },
     "docsRequiredWhen": [
       "new experiment plans are added",
       "validation gates change",
       "primary commands change",
       "hardware/runtime assumptions change",
-      "cleanup policy changes"
+      "cleanup policy changes",
+      "GitHub workflow changes",
+      "dependency automation changes"
     ]
   },
-  "importantWorkflows": [],
+  "importantWorkflows": ["CI"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
@@ -51,7 +66,9 @@
       "important workflows change",
       "repo relationship changes",
       "cleanup policy changes",
-      "hardware/runtime assumptions change"
+      "hardware/runtime assumptions change",
+      "GitHub workflow changes",
+      "dependency automation changes"
     ]
   }
 }
