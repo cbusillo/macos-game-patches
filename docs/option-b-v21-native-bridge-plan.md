@@ -1012,6 +1012,19 @@ geometry target is to apply the equivalent horizontal correction through view
 parameters, projection/bounds handling, or crop/packing geometry so center
 alignment is preserved without losing edge coverage.
 
+Follow-up packing diagnostic: the native bridge-side
+`ALVR_BRIDGE_RIGHT_EYE_SHIFT_X_PX=-256` trial did not visibly move the AVP
+alignment, so the correction was tested at the shim packing boundary instead.
+`tools/openvr_submit_shim.cpp` now has an opt-in
+`ALVR_SHIM_INNER_CROP_PX` diagnostic. With `ALVR_SHIM_INNER_CROP_PX=256`, the
+shim crops the inner/nose-side 256 pixels from the paired eye strips, publishing
+`2048x720` side-by-side frames from `1280x720` source eyes. A fresh AVP static
+grid run on June 18, 2026 showed the center boxes closer/fused, proving the
+side-by-side packing geometry can influence the visible alignment. Treat this
+as evidence for the coordinate model, not as the final production geometry: the
+durable fix still needs projection/ViewParams or real OpenVR projection data so
+center alignment and full edge coverage can coexist.
+
 This crosses the main Option B transport milestone: CrossOver D3D11 OpenVR
 `Submit` frames can flow through the app-local shim, Wine-visible shared memory,
 the native macOS ALVR bridge, VideoToolbox encode, and the AVP client.
