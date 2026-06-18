@@ -28,13 +28,13 @@ result.
 
 ## Local Build Evidence
 
-Scratch workspace: `/Users/cbusillo/Developer/_probe-alvr-v21-avp/alvr-visionos`
+Scratch workspace: `~/Developer/_probe-alvr-v21-avp/alvr-visionos`
 
 Commands run:
 
 ```bash
 git clone --recurse-submodules https://github.com/alvr-org/alvr-visionos.git \
-  /Users/cbusillo/Developer/_probe-alvr-v21-avp/alvr-visionos
+  ~/Developer/_probe-alvr-v21-avp/alvr-visionos
 rustup target add aarch64-apple-ios
 xcodebuild -downloadComponent MetalToolchain
 unset SDKROOT
