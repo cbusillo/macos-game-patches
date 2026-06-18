@@ -29,6 +29,7 @@ constexpr size_t kScreenshotsSlots = 7;
 constexpr size_t kLegacyInput005Slots = 25;
 constexpr const char* kFnTablePrefix = "FnTable:";
 constexpr const char* kLegacySystem019 = "IVRSystem_019";
+constexpr const char* kLegacyCompositor022 = "IVRCompositor_022";
 constexpr const char* kLegacyChaperone003 = "IVRChaperone_003";
 constexpr const char* kLegacyChaperoneSetup005 = "IVRChaperoneSetup_005";
 constexpr const char* kLegacyOverlay018 = "IVROverlay_018";
@@ -48,7 +49,9 @@ bool is_legacy_system019_interface(const char* version) {
 }
 
 bool is_compositor_interface(const char* version) {
-    return version && std::strcmp(version, vr::IVRCompositor_Version) == 0;
+    return version
+        && (std::strcmp(version, vr::IVRCompositor_Version) == 0
+            || std::strcmp(version, kLegacyCompositor022) == 0);
 }
 
 bool is_chaperone_interface(const char* version) {
