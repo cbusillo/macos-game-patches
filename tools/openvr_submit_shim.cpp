@@ -28,6 +28,8 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -50,6 +52,7 @@ constexpr size_t kCompositor027Slots = 51;
 constexpr size_t kLegacyCompositor022Slots = 43;
 constexpr size_t kMaxCompositorSlots = kCompositor027Slots;
 constexpr const char* kLegacyCompositor022 = "IVRCompositor_022";
+constexpr uint32_t kMinPackedEyeWidth = 16;
 constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 5'000'000'000ULL;
 constexpr uint64_t kBridgeHeartbeatFutureToleranceNs = 250'000'000ULL;
 
@@ -158,6 +161,30 @@ std::string env_string(const char* name) {
         return {};
     }
     return buffer;
+}
+
+uint32_t env_u32(const char* name, uint32_t default_value) {
+    std::string value = env_string(name);
+    if (value.empty()) {
+        return default_value;
+    }
+
+    const char* raw = value.c_str();
+    while (*raw && std::isspace(static_cast<unsigned char>(*raw))) {
+        ++raw;
+    }
+    if (*raw == '-') {
+        log_line("ignoring invalid %s=%s", name, value.c_str());
+        return default_value;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+    if (value.empty() || (end && *end) || parsed > UINT32_MAX) {
+        log_line("ignoring invalid %s=%s", name, value.c_str());
+        return default_value;
+    }
+    return static_cast<uint32_t>(parsed);
 }
 
 std::string sibling_real_openvr_path() {
@@ -293,6 +320,13 @@ bool wait_for_bridge_ready(AlvrSharedMemory* shm, int timeout_ms) {
 
 class SharedMemorySubmitWriter {
 public:
+    SharedMemorySubmitWriter()
+        : m_inner_crop_px(env_u32("ALVR_SHIM_INNER_CROP_PX", 0)) {
+        if (m_inner_crop_px != 0) {
+            log_line("using inner-eye packing crop=%u px", m_inner_crop_px);
+        }
+    }
+
     ~SharedMemorySubmitWriter() { close(); }
 
     void capture_submit(
@@ -666,8 +700,13 @@ private:
             return;
         }
 
-        uint32_t eye_width = std::min({ m_left.width, m_right.width, static_cast<uint32_t>(ALVR_MAX_WIDTH / 2) });
+        uint32_t source_eye_width = std::min({ m_left.width, m_right.width, static_cast<uint32_t>(ALVR_MAX_WIDTH / 2) });
         uint32_t height = std::min({ m_left.height, m_right.height, static_cast<uint32_t>(ALVR_MAX_HEIGHT) });
+        uint32_t inner_crop_px = 0;
+        if (source_eye_width > kMinPackedEyeWidth) {
+            inner_crop_px = std::min(m_inner_crop_px, source_eye_width - kMinPackedEyeWidth);
+        }
+        uint32_t eye_width = source_eye_width - inner_crop_px;
         uint32_t output_width = eye_width * 2;
         if (output_width == 0 || height == 0) {
             return;
@@ -693,7 +732,9 @@ private:
         uint32_t eye_bytes = eye_width * ALVR_BYTES_PER_PIXEL;
         for (uint32_t y = 0; y < height; ++y) {
             const uint8_t* left = m_left.bgra.data() + static_cast<size_t>(y) * m_left.width * ALVR_BYTES_PER_PIXEL;
-            const uint8_t* right = m_right.bgra.data() + static_cast<size_t>(y) * m_right.width * ALVR_BYTES_PER_PIXEL;
+            const uint8_t* right =
+                m_right.bgra.data()
+                + (static_cast<size_t>(y) * m_right.width + inner_crop_px) * ALVR_BYTES_PER_PIXEL;
             uint8_t* dst = dst_base + static_cast<size_t>(y) * dst_pitch;
             std::memcpy(dst, left, eye_bytes);
             std::memcpy(dst + eye_bytes, right, eye_bytes);
@@ -725,10 +766,12 @@ private:
         ++m_frames_published;
         if (m_frames_published == 1 || m_frames_published % 90 == 0) {
             log_line(
-                "published Submit pair frame=%llu output=%ux%u left=%ux%u right=%ux%u timing_us real_submit=%u capture=%u copy_resource=%u map_wait=%u copy_pixels=%u pair_copy=%u",
+                "published Submit pair frame=%llu output=%ux%u source_eye_width=%u inner_crop=%u left=%ux%u right=%ux%u timing_us real_submit=%u capture=%u copy_resource=%u map_wait=%u copy_pixels=%u pair_copy=%u",
                 static_cast<unsigned long long>(m_frames_published - 1),
                 output_width,
                 height,
+                source_eye_width,
+                inner_crop_px,
                 m_left.width,
                 m_left.height,
                 m_right.width,
@@ -754,6 +797,7 @@ private:
     bool m_logged_missing_shm = false;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
+    uint32_t m_inner_crop_px = 0;
     uint64_t m_submit_counter = 0;
     uint64_t m_frames_published = 0;
     uint64_t m_source_stats_seen[2] = {};
