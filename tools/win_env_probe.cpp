@@ -3,9 +3,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
+
+constexpr const char* kHostUsersGlob = "Z:\\Users\\*";
+constexpr const char* kCrossOverSteamBottleSuffix =
+    "\\Library\\Application Support\\CrossOver\\Bottles\\Steam\\drive_c";
+constexpr const char* kSteamVrDllSuffix =
+    "\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\vrclient_x64.dll";
 
 void print_env(const char* name) {
     char value[4096] = {};
@@ -27,19 +34,46 @@ void check_path(const std::string& path) {
     );
 }
 
-void maybe_add_host_steamvr_path(std::vector<std::string>* paths) {
+std::string trim_trailing_slashes(std::string path) {
+    while (!path.empty() && (path.back() == '\\' || path.back() == '/')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+void maybe_add_env_steamvr_path(std::vector<std::string>* paths) {
     char drive_c[4096] = {};
     DWORD len = GetEnvironmentVariableA("ALVR_CROSSOVER_STEAM_DRIVE_C", drive_c, sizeof(drive_c));
     if (len == 0 || len >= sizeof(drive_c)) {
-        std::printf("ALVR_CROSSOVER_STEAM_DRIVE_C=<unset; skipping host mirror SteamVR path>\n");
         return;
     }
 
-    std::string base = drive_c;
-    while (!base.empty() && (base.back() == '\\' || base.back() == '/')) {
-        base.pop_back();
+    paths->push_back(trim_trailing_slashes(drive_c) + kSteamVrDllSuffix);
+}
+
+void add_host_steamvr_paths(std::vector<std::string>* paths) {
+    WIN32_FIND_DATAA find_data = {};
+    HANDLE find = FindFirstFileA(kHostUsersGlob, &find_data);
+    if (find == INVALID_HANDLE_VALUE) {
+        std::printf("host_users_glob[%s]=unavailable error=%lu\n", kHostUsersGlob, GetLastError());
+        return;
     }
-    paths->push_back(base + "\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\vrclient_x64.dll");
+
+    do {
+        if ((find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            continue;
+        }
+        if (std::strcmp(find_data.cFileName, ".") == 0 || std::strcmp(find_data.cFileName, "..") == 0) {
+            continue;
+        }
+
+        std::string drive_c = "Z:\\Users\\";
+        drive_c += find_data.cFileName;
+        drive_c += kCrossOverSteamBottleSuffix;
+        paths->push_back(drive_c + kSteamVrDllSuffix);
+    } while (FindNextFileA(find, &find_data));
+
+    FindClose(find);
 }
 
 int main() {
@@ -55,7 +89,8 @@ int main() {
         "C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\vrclient_x64.dll",
         "C:\\users\\crossover\\AppData\\Local\\openvr\\openvrpaths.vrpath",
     };
-    maybe_add_host_steamvr_path(&paths);
+    maybe_add_env_steamvr_path(&paths);
+    add_host_steamvr_paths(&paths);
 
     for (const auto& path : paths) {
         check_path(path);
