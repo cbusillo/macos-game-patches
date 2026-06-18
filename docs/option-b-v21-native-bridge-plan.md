@@ -995,9 +995,22 @@ staging texture instead of allocating a staging texture every frame, so probe
 timing and texture-format coverage are less misleading.
 
 Live follow-up: `--static-pattern --mono --right-shift-x -256` was still too
-busy and hard to interpret on-device. The earlier moving grid/ruler method is
-currently the clearest calibration instrument and remains the source of the
-rough `-256px` horizontal offset estimate.
+busy and hard to interpret on-device. A later static alignment-grid mode made
+the calibration usable: baseline `--alignment-grid --mono` showed each eye's
+own image centered, but the binocular view placed the center box around `-2`
+and `+2` major grid marks. Re-running mono with `--right-shift-x -256` fused the
+image into a perfectly aligned 2D target in 3D space. Re-running stereo with the
+same `--right-shift-x -256` kept the center aligned while showing distinct left
+and right labels.
+
+This proves the rough sign and magnitude of the horizontal correction. It also
+proves the current content-space shift is only a diagnostic: alignment is good
+near the center, but the image disappears near one edge because the shifted
+right-eye content runs out inside the fixed per-eye texture. Do not bake
+`--right-shift-x -256` into the transport path as the final fix. The next
+geometry target is to apply the equivalent horizontal correction through view
+parameters, projection/bounds handling, or crop/packing geometry so center
+alignment is preserved without losing edge coverage.
 
 This crosses the main Option B transport milestone: CrossOver D3D11 OpenVR
 `Submit` frames can flow through the app-local shim, Wine-visible shared memory,
