@@ -46,6 +46,7 @@ struct Options {
     bool query_properties = true;
     bool submit_msaa = false;
     bool static_pattern = false;
+    bool alignment_grid = false;
     EyePatternMode eye_mode = EyePatternMode::Stereo;
     int right_shift_x = 0;
     int right_shift_y = 0;
@@ -130,6 +131,9 @@ Options parse_args(int argc, char** argv) {
             options.submit_msaa = true;
         } else if (std::strcmp(arg, "--static-pattern") == 0) {
             options.static_pattern = true;
+        } else if (std::strcmp(arg, "--alignment-grid") == 0) {
+            options.alignment_grid = true;
+            options.static_pattern = true;
         } else if (std::strcmp(arg, "--mono") == 0) {
             options.eye_mode = EyePatternMode::Mono;
         } else if (std::strcmp(arg, "--left-only") == 0) {
@@ -152,7 +156,7 @@ Options parse_args(int argc, char** argv) {
             std::printf(
                 "usage: openvr_app_loop_probe.exe [--width N] [--height N] [--frames N] "
                 "[--fps N] [--msaa 1|2|4|8] [--submit-msaa] [--bounds] [--rgba] "
-                "[--static-pattern] [--mono] [--left-only] [--right-only] [--right-shift-x N] "
+                "[--static-pattern] [--alignment-grid] [--mono] [--left-only] [--right-only] [--right-shift-x N] "
                 "[--right-shift-y N] [--no-properties]\n"
             );
             std::exit(0);
@@ -405,6 +409,7 @@ struct PatternFillContext {
     int shift_y;
     bool rgba;
     bool static_pattern;
+    bool alignment_grid;
 };
 
 struct SolidFillContext {
@@ -428,12 +433,234 @@ void write_pixel(uint8_t* pixel, uint8_t b, uint8_t g, uint8_t r, bool rgba) {
     }
 }
 
+void write_gray(uint8_t* pixel, uint8_t value, bool rgba) {
+    write_pixel(pixel, value, value, value, rgba);
+}
+
+void draw_rect(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int left,
+    int top,
+    int width,
+    int height,
+    uint8_t value,
+    bool rgba
+) {
+    int right = std::min<int>(static_cast<int>(desc.Width), left + width);
+    int bottom = std::min<int>(static_cast<int>(desc.Height), top + height);
+    left = std::max(0, left);
+    top = std::max(0, top);
+
+    for (int y = top; y < bottom; ++y) {
+        auto* row = static_cast<uint8_t*>(mapped->pData) + static_cast<size_t>(y) * mapped->RowPitch;
+        for (int x = left; x < right; ++x) {
+            write_gray(row + x * 4, value, rgba);
+        }
+    }
+}
+
+void draw_segment_digit(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int digit,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    static const uint8_t kSegments[10] = {
+        0b0111111,
+        0b0000110,
+        0b1011011,
+        0b1001111,
+        0b1100110,
+        0b1101101,
+        0b1111101,
+        0b0000111,
+        0b1111111,
+        0b1101111,
+    };
+    if (digit < 0 || digit > 9) {
+        return;
+    }
+
+    int t = std::max(1, scale);
+    int w = 4 * scale;
+    int h = 7 * scale;
+    uint8_t segments = kSegments[digit];
+    if (segments & (1 << 0)) draw_rect(mapped, desc, x + t, y, w, t, value, rgba);
+    if (segments & (1 << 1)) draw_rect(mapped, desc, x + w, y + t, t, h / 2 - t, value, rgba);
+    if (segments & (1 << 2)) draw_rect(mapped, desc, x + w, y + h / 2 + t, t, h / 2 - t, value, rgba);
+    if (segments & (1 << 3)) draw_rect(mapped, desc, x + t, y + h, w, t, value, rgba);
+    if (segments & (1 << 4)) draw_rect(mapped, desc, x, y + h / 2 + t, t, h / 2 - t, value, rgba);
+    if (segments & (1 << 5)) draw_rect(mapped, desc, x, y + t, t, h / 2 - t, value, rgba);
+    if (segments & (1 << 6)) draw_rect(mapped, desc, x + t, y + h / 2, w, t, value, rgba);
+}
+
+void draw_plus_or_minus(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    bool plus,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    int t = std::max(1, scale);
+    int h = 7 * scale;
+    draw_rect(mapped, desc, x, y + h / 2, 4 * scale + t, t, value, rgba);
+    if (plus) {
+        draw_rect(mapped, desc, x + 2 * scale, y + 2 * scale, t, 3 * scale, value, rgba);
+    }
+}
+
+void draw_signed_number(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int value,
+    int scale,
+    uint8_t color,
+    bool rgba
+) {
+    bool plus = value >= 0;
+    int magnitude = std::abs(value);
+    draw_plus_or_minus(mapped, desc, x, y, plus, scale, color, rgba);
+    x += 6 * scale;
+    if (magnitude >= 10) {
+        draw_segment_digit(mapped, desc, x, y, (magnitude / 10) % 10, scale, color, rgba);
+        x += 6 * scale;
+    }
+    draw_segment_digit(mapped, desc, x, y, magnitude % 10, scale, color, rgba);
+}
+
+void draw_letter_l(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    draw_rect(mapped, desc, x, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x, y + 6 * scale, 5 * scale, scale, value, rgba);
+}
+
+void draw_letter_r(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    draw_rect(mapped, desc, x, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x, y, 4 * scale, scale, value, rgba);
+    draw_rect(mapped, desc, x, y + 3 * scale, 4 * scale, scale, value, rgba);
+    draw_rect(mapped, desc, x + 4 * scale, y + scale, scale, 2 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 2 * scale, y + 4 * scale, scale, scale, value, rgba);
+    draw_rect(mapped, desc, x + 3 * scale, y + 5 * scale, scale, scale, value, rgba);
+    draw_rect(mapped, desc, x + 4 * scale, y + 6 * scale, scale, scale, value, rgba);
+}
+
+void fill_alignment_grid_mapped(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    PatternFillContext* fill
+) {
+    const UINT width = desc.Width;
+    const UINT height = desc.Height;
+    const int center_x = static_cast<int>(width / 2);
+    const int center_y = static_cast<int>(height / 2);
+    const int major = 128;
+    const int minor = 32;
+    const int label_scale = 4;
+
+    for (UINT y = 0; y < height; ++y) {
+        auto* row = static_cast<uint8_t*>(mapped->pData) + static_cast<size_t>(y) * mapped->RowPitch;
+        for (UINT x = 0; x < width; ++x) {
+            int sx = static_cast<int>(x) - fill->shift_x;
+            int sy = static_cast<int>(y) - fill->shift_y;
+            bool in_bounds = sx >= 0 && sy >= 0 && sx < static_cast<int>(width) && sy < static_cast<int>(height);
+            uint8_t value = 24;
+            if (!in_bounds) {
+                value = 0;
+            } else if (std::abs(sx - center_x) <= 3 || std::abs(sy - center_y) <= 3) {
+                value = 245;
+            } else if (std::abs(sx - center_x) <= 40 && std::abs(sy - center_y) <= 40) {
+                value = 92;
+            } else if ((sx - center_x) % major == 0 || (sy - center_y) % major == 0) {
+                value = 150;
+            } else if ((sx - center_x) % minor == 0 || (sy - center_y) % minor == 0) {
+                value = 72;
+            }
+            write_gray(row + x * 4, value, fill->rgba);
+        }
+    }
+
+    for (int grid_x = center_x % major; grid_x < static_cast<int>(width); grid_x += major) {
+        int block = (grid_x - center_x) / major;
+        if (block != 0) {
+            draw_signed_number(
+                mapped,
+                desc,
+                grid_x + fill->shift_x - 22,
+                center_y + fill->shift_y + 14,
+                block,
+                label_scale,
+                235,
+                fill->rgba
+            );
+        }
+    }
+
+    for (int grid_y = center_y % major; grid_y < static_cast<int>(height); grid_y += major) {
+        int block = (grid_y - center_y) / major;
+        if (block != 0) {
+            draw_signed_number(
+                mapped,
+                desc,
+                center_x + fill->shift_x + 14,
+                grid_y + fill->shift_y - 14,
+                block,
+                label_scale,
+                235,
+                fill->rgba
+            );
+        }
+    }
+
+    int shifted_center_x = center_x + fill->shift_x;
+    int shifted_center_y = center_y + fill->shift_y;
+    draw_rect(mapped, desc, shifted_center_x - 36, shifted_center_y - 36, 72, 4, 255, fill->rgba);
+    draw_rect(mapped, desc, shifted_center_x - 36, shifted_center_y + 32, 72, 4, 255, fill->rgba);
+    draw_rect(mapped, desc, shifted_center_x - 36, shifted_center_y - 36, 4, 72, 255, fill->rgba);
+    draw_rect(mapped, desc, shifted_center_x + 32, shifted_center_y - 36, 4, 72, 255, fill->rgba);
+
+    if (fill->eye == vr::Eye_Left) {
+        draw_letter_l(mapped, desc, 28, 24, 8, 220, fill->rgba);
+    } else {
+        draw_letter_r(mapped, desc, 28, 24, 8, 220, fill->rgba);
+    }
+}
+
 void fill_pattern_mapped(
     D3D11_MAPPED_SUBRESOURCE* mapped,
     const D3D11_TEXTURE2D_DESC& desc,
     void* context_ptr
 ) {
     auto* fill = static_cast<PatternFillContext*>(context_ptr);
+    if (fill->alignment_grid) {
+        fill_alignment_grid_mapped(mapped, desc, fill);
+        return;
+    }
+
     const UINT width = desc.Width;
     const UINT height = desc.Height;
     const int frame = fill->static_pattern ? 0 : fill->frame;
@@ -531,7 +758,8 @@ bool fill_eye_pattern(
     int frame,
     int shift_x,
     int shift_y,
-    bool static_pattern
+    bool static_pattern,
+    bool alignment_grid
 ) {
     D3D11_TEXTURE2D_DESC desc = {};
     texture->GetDesc(&desc);
@@ -547,6 +775,7 @@ bool fill_eye_pattern(
         shift_y,
         desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
         static_pattern,
+        alignment_grid,
     };
     return writer->copy_to(context, texture, fill_pattern_mapped, &fill);
 }
@@ -646,7 +875,7 @@ int main(int argc, char** argv) {
 
     query_system(system, &options);
     std::printf(
-        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d eye_mode=%s right_shift=%d,%d\n",
+        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d alignment_grid=%d eye_mode=%s right_shift=%d,%d\n",
         options.width,
         options.height,
         options.frames,
@@ -656,6 +885,7 @@ int main(int argc, char** argv) {
         options.submit_msaa ? 1 : 0,
         options.use_bounds ? 1 : 0,
         options.static_pattern ? 1 : 0,
+        options.alignment_grid ? 1 : 0,
         eye_mode_name(options.eye_mode),
         options.right_shift_x,
         options.right_shift_y
@@ -742,7 +972,8 @@ int main(int argc, char** argv) {
                 frame,
                 0,
                 0,
-                options.static_pattern
+                options.static_pattern,
+                options.alignment_grid
             );
             if (options.eye_mode == EyePatternMode::LeftOnly) {
                 fill_solid_bgra(context.Get(), &texture_writer, right.Get(), 0, 0, 0);
@@ -756,7 +987,8 @@ int main(int argc, char** argv) {
                     frame,
                     options.right_shift_x,
                     options.right_shift_y,
-                    options.static_pattern
+                    options.static_pattern,
+                    options.alignment_grid
                 );
             } else {
                 fill_eye_pattern(
@@ -767,7 +999,8 @@ int main(int argc, char** argv) {
                     frame,
                     options.right_shift_x,
                     options.right_shift_y,
-                    options.static_pattern
+                    options.static_pattern,
+                    options.alignment_grid
                 );
             }
         }
