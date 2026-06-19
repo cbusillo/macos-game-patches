@@ -23,6 +23,7 @@
 #include "shared/alvr_shm_protocol.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -32,6 +33,7 @@
 #include <cctype>
 #include <cstring>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -121,6 +123,34 @@ struct TextureCrop {
 struct CropResult {
     TextureCrop crop;
     bool used_fallback = false;
+};
+
+struct SubmitDiagnostic {
+    uint64_t sequence = 0;
+    vr::EVREye eye = vr::Eye_Left;
+    vr::EVRSubmitFlags flags = vr::Submit_Default;
+    vr::EVRCompositorError real_result = vr::VRCompositorError_None;
+    const vr::Texture_t* texture = nullptr;
+    const vr::VRTextureBounds_t* bounds = nullptr;
+};
+
+struct SubmitSignature {
+    uint32_t flags = 0;
+    int real_result = 0;
+    int texture_type = -999;
+    uint32_t color_space = 0;
+    uint32_t format = UINT32_MAX;
+    uint32_t samples = 0;
+    uint32_t array_size = 0;
+    uint32_t mip_levels = 0;
+};
+
+enum class RejectionKind : size_t {
+    UnsupportedTextureType = 0,
+    NotD3D11Texture2D,
+    UnsupportedShape,
+    UnsupportedFormat,
+    Count,
 };
 
 HMODULE g_this_module = nullptr;
@@ -285,6 +315,143 @@ uint32_t elapsed_us(std::chrono::steady_clock::time_point start, std::chrono::st
     return static_cast<uint32_t>(std::min<uint64_t>(micros, UINT32_MAX));
 }
 
+const char* texture_type_name(vr::ETextureType type) {
+    switch (type) {
+    case vr::TextureType_DirectX:
+        return "DirectX";
+    case vr::TextureType_OpenGL:
+        return "OpenGL";
+    case vr::TextureType_Vulkan:
+        return "Vulkan";
+    case vr::TextureType_IOSurface:
+        return "IOSurface";
+    case vr::TextureType_DirectX12:
+        return "DirectX12";
+    case vr::TextureType_DXGISharedHandle:
+        return "DXGISharedHandle";
+    case vr::TextureType_Metal:
+        return "Metal";
+    case vr::TextureType_Invalid:
+        return "Invalid";
+    default:
+        return "Unknown";
+    }
+}
+
+std::string submit_flags_string(vr::EVRSubmitFlags flags) {
+    if (flags == vr::Submit_Default) {
+        return "Submit_Default";
+    }
+
+    struct FlagName {
+        vr::EVRSubmitFlags flag;
+        const char* name;
+    };
+    const FlagName known_flags[] = {
+        { vr::Submit_LensDistortionAlreadyApplied, "LensDistortionAlreadyApplied" },
+        { vr::Submit_GlRenderBuffer, "GlRenderBuffer" },
+        { vr::Submit_Reserved, "Reserved" },
+        { vr::Submit_TextureWithPose, "TextureWithPose" },
+        { vr::Submit_TextureWithDepth, "TextureWithDepth" },
+    };
+
+    uint32_t raw = static_cast<uint32_t>(flags);
+    uint32_t remaining = raw;
+    std::ostringstream stream;
+    bool first = true;
+    for (const FlagName& item : known_flags) {
+        uint32_t bit = static_cast<uint32_t>(item.flag);
+        if ((raw & bit) == 0) {
+            continue;
+        }
+        if (!first) {
+            stream << '|';
+        }
+        stream << item.name;
+        first = false;
+        remaining &= ~bit;
+    }
+    if (remaining != 0 || first) {
+        if (!first) {
+            stream << '|';
+        }
+        stream << "unknown:0x" << std::hex << remaining;
+    }
+    return stream.str();
+}
+
+void log_submit_diagnostic(
+    const SubmitDiagnostic& diagnostic,
+    const char* phase,
+    const D3D11_TEXTURE2D_DESC* desc = nullptr,
+    HRESULT hr = S_OK
+) {
+    const char* type_name = "none";
+    int type_value = -999;
+    void* handle = nullptr;
+    uint32_t color_space = 0;
+    if (diagnostic.texture) {
+        type_name = texture_type_name(diagnostic.texture->eType);
+        type_value = static_cast<int>(diagnostic.texture->eType);
+        handle = diagnostic.texture->handle;
+        color_space = static_cast<uint32_t>(diagnostic.texture->eColorSpace);
+    }
+
+    if (desc) {
+        log_line(
+            "Submit diagnostic seq=%llu phase=%s eye=%d flags=0x%x(%s) real_result=%d texture=%p type=%s(%d) color_space=%u handle=%p desc=%ux%u format=%u samples=%u array=%u mips=%u bind=0x%x usage=%u misc=0x%x bounds=%s raw=[%.4f %.4f %.4f %.4f] hr=0x%08lx",
+            static_cast<unsigned long long>(diagnostic.sequence),
+            phase,
+            diagnostic.eye,
+            static_cast<uint32_t>(diagnostic.flags),
+            submit_flags_string(diagnostic.flags).c_str(),
+            diagnostic.real_result,
+            diagnostic.texture,
+            type_name,
+            type_value,
+            color_space,
+            handle,
+            desc->Width,
+            desc->Height,
+            desc->Format,
+            desc->SampleDesc.Count,
+            desc->ArraySize,
+            desc->MipLevels,
+            desc->BindFlags,
+            desc->Usage,
+            desc->MiscFlags,
+            diagnostic.bounds ? "provided" : "default",
+            diagnostic.bounds ? diagnostic.bounds->uMin : 0.0f,
+            diagnostic.bounds ? diagnostic.bounds->vMin : 0.0f,
+            diagnostic.bounds ? diagnostic.bounds->uMax : 1.0f,
+            diagnostic.bounds ? diagnostic.bounds->vMax : 1.0f,
+            static_cast<unsigned long>(hr)
+        );
+        return;
+    }
+
+    log_line(
+        "Submit diagnostic seq=%llu phase=%s eye=%d flags=0x%x(%s) real_result=%d texture=%p type=%s(%d) color_space=%u handle=%p bounds=%s raw=[%.4f %.4f %.4f %.4f] hr=0x%08lx",
+        static_cast<unsigned long long>(diagnostic.sequence),
+        phase,
+        diagnostic.eye,
+        static_cast<uint32_t>(diagnostic.flags),
+        submit_flags_string(diagnostic.flags).c_str(),
+        diagnostic.real_result,
+        diagnostic.texture,
+        type_name,
+        type_value,
+        color_space,
+        handle,
+        diagnostic.bounds ? "provided" : "default",
+        diagnostic.bounds ? diagnostic.bounds->uMin : 0.0f,
+        diagnostic.bounds ? diagnostic.bounds->vMin : 0.0f,
+        diagnostic.bounds ? diagnostic.bounds->uMax : 1.0f,
+        diagnostic.bounds ? diagnostic.bounds->vMax : 1.0f,
+        static_cast<unsigned long>(hr)
+    );
+}
+
 uint64_t unix_time_ns() {
     FILETIME file_time = {};
     GetSystemTimeAsFileTime(&file_time);
@@ -343,10 +510,27 @@ public:
         vr::EVREye eye,
         const vr::Texture_t* texture,
         const vr::VRTextureBounds_t* bounds,
+        vr::EVRSubmitFlags flags,
+        vr::EVRCompositorError real_result,
         uint32_t real_submit_us
     ) {
+        SubmitDiagnostic diagnostic;
+        diagnostic.sequence = m_submit_diagnostic_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+        diagnostic.eye = eye;
+        diagnostic.flags = flags;
+        diagnostic.real_result = real_result;
+        diagnostic.texture = texture;
+        diagnostic.bounds = bounds;
+
         if (!texture || texture->eType != vr::TextureType_DirectX || !texture->handle) {
+            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedTextureType)) {
+                log_submit_diagnostic(diagnostic, "unsupported-texture-type");
+            }
             return;
+        }
+
+        if (should_log_submit_metadata(diagnostic)) {
+            log_submit_diagnostic(diagnostic, "submit");
         }
 
         ComPtr<ID3D11Texture2D> submitted;
@@ -355,12 +539,14 @@ public:
             reinterpret_cast<void**>(submitted.GetAddressOf())
         );
         if (FAILED(hr) || !submitted) {
-            log_line("Submit texture is not ID3D11Texture2D hr=0x%08lx", static_cast<unsigned long>(hr));
+            if (should_log_rejection(diagnostic, RejectionKind::NotD3D11Texture2D)) {
+                log_submit_diagnostic(diagnostic, "not-id3d11texture2d", nullptr, hr);
+            }
             return;
         }
 
         EyeFrame frame;
-        if (!read_eye_texture(submitted.Get(), eye, bounds, &frame)) {
+        if (!read_eye_texture(submitted.Get(), diagnostic, &frame)) {
             return;
         }
 
@@ -381,36 +567,37 @@ public:
 private:
     bool read_eye_texture(
         ID3D11Texture2D* texture,
-        vr::EVREye eye,
-        const vr::VRTextureBounds_t* bounds,
+        const SubmitDiagnostic& diagnostic,
         EyeFrame* frame
     ) {
         auto capture_start = std::chrono::steady_clock::now();
         D3D11_TEXTURE2D_DESC desc = {};
         texture->GetDesc(&desc);
-        ++m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0];
+        vr::EVREye eye = diagnostic.eye;
+        const vr::VRTextureBounds_t* bounds = diagnostic.bounds;
+        size_t eye_index = eye == vr::Eye_Right ? 1 : 0;
+        uint64_t texture_logs_seen = m_submit_texture_logs_seen[eye_index].fetch_add(1, std::memory_order_relaxed) + 1;
+
+        if (should_log_submit_desc(diagnostic, desc)) {
+            log_submit_diagnostic(diagnostic, "d3d11-desc", &desc);
+        }
 
         if (desc.SampleDesc.Count != 1 || desc.ArraySize != 1 || desc.MipLevels < 1) {
-            log_line(
-                "unsupported Submit texture eye=%d shape=%ux%u samples=%u array=%u mips=%u",
-                eye,
-                desc.Width,
-                desc.Height,
-                desc.SampleDesc.Count,
-                desc.ArraySize,
-                desc.MipLevels
-            );
+            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedShape)) {
+                log_submit_diagnostic(diagnostic, "unsupported-shape", &desc);
+            }
             return false;
         }
         if (!is_bgra_format(desc.Format) && !is_rgba_format(desc.Format)) {
-            log_line("unsupported Submit texture eye=%d format=%u size=%ux%u", eye, desc.Format, desc.Width, desc.Height);
+            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedFormat)) {
+                log_submit_diagnostic(diagnostic, "unsupported-format", &desc);
+            }
             return false;
         }
 
         CropResult crop_result = texture_crop(desc, eye, bounds);
         TextureCrop crop = crop_result.crop;
-        if (m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0] <= 8
-            || m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0] % 180 == 0) {
+        if (texture_logs_seen <= 8 || texture_logs_seen % 180 == 0) {
             log_line(
                 "Submit crop eye=%d texture=%p size=%ux%u format=%u bounds=%s raw=[%.4f %.4f %.4f %.4f] crop=%u,%u %ux%u fallback=%u",
                 eye,
@@ -483,7 +670,7 @@ private:
 
             HRESULT hr = device->CreateTexture2D(&cache.desc, nullptr, &cache.texture);
             if (FAILED(hr)) {
-                log_line("CreateTexture2D staging failed eye=%d hr=0x%08lx", eye, static_cast<unsigned long>(hr));
+                log_submit_diagnostic(diagnostic, "staging-create-failed", &desc, hr);
                 cache = StagingCache {};
                 return false;
             }
@@ -498,7 +685,7 @@ private:
         HRESULT hr = cache.context->Map(cache.texture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
         auto map_done = std::chrono::steady_clock::now();
         if (FAILED(hr)) {
-            log_line("Map staging failed eye=%d hr=0x%08lx", eye, static_cast<unsigned long>(hr));
+            log_submit_diagnostic(diagnostic, "staging-map-failed", &desc, hr);
             return false;
         }
 
@@ -516,6 +703,65 @@ private:
         log_frame_stats(eye, *frame);
         cache.context->Unmap(cache.texture.Get(), 0);
         return true;
+    }
+
+    bool should_log_submit_metadata(const SubmitDiagnostic& diagnostic) {
+        SubmitSignature signature;
+        signature.flags = static_cast<uint32_t>(diagnostic.flags);
+        signature.real_result = static_cast<int>(diagnostic.real_result);
+        if (diagnostic.texture) {
+            signature.texture_type = static_cast<int>(diagnostic.texture->eType);
+            signature.color_space = static_cast<uint32_t>(diagnostic.texture->eColorSpace);
+        }
+        std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
+        return should_log_signature(diagnostic.sequence, m_submit_metadata_signature, m_submit_metadata_count, signature);
+    }
+
+    bool should_log_submit_desc(const SubmitDiagnostic& diagnostic, const D3D11_TEXTURE2D_DESC& desc) {
+        SubmitSignature signature;
+        signature.flags = static_cast<uint32_t>(diagnostic.flags);
+        signature.real_result = static_cast<int>(diagnostic.real_result);
+        if (diagnostic.texture) {
+            signature.texture_type = static_cast<int>(diagnostic.texture->eType);
+            signature.color_space = static_cast<uint32_t>(diagnostic.texture->eColorSpace);
+        }
+        signature.format = static_cast<uint32_t>(desc.Format);
+        signature.samples = desc.SampleDesc.Count;
+        signature.array_size = desc.ArraySize;
+        signature.mip_levels = desc.MipLevels;
+        std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
+        return should_log_signature(diagnostic.sequence, m_submit_desc_signature, m_submit_desc_count, signature);
+    }
+
+    bool same_signature(const SubmitSignature& left, const SubmitSignature& right) {
+        return left.flags == right.flags && left.real_result == right.real_result
+            && left.texture_type == right.texture_type && left.color_space == right.color_space
+            && left.format == right.format && left.samples == right.samples
+            && left.array_size == right.array_size && left.mip_levels == right.mip_levels;
+    }
+
+    bool should_log_signature(
+        uint64_t sequence,
+        SubmitSignature& last_signature,
+        uint64_t& signature_count,
+        const SubmitSignature& signature
+    ) {
+        bool changed = !same_signature(last_signature, signature);
+        if (changed) {
+            last_signature = signature;
+            signature_count = 0;
+        }
+        ++signature_count;
+        return sequence <= 12 || changed || signature_count <= 8 || signature_count % 240 == 0;
+    }
+
+    bool should_log_rejection(const SubmitDiagnostic& diagnostic, RejectionKind kind) {
+        size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
+        size_t kind_index = static_cast<size_t>(kind);
+        uint64_t count = m_rejection_logs[eye_index][kind_index]
+            .fetch_add(1, std::memory_order_relaxed)
+            + 1;
+        return count <= 8 || count % 120 == 0;
     }
 
     CropResult texture_crop(const D3D11_TEXTURE2D_DESC& desc, vr::EVREye eye, const vr::VRTextureBounds_t* bounds) {
@@ -612,12 +858,12 @@ private:
         }
 
         size_t eye_index = eye == vr::Eye_Right ? 1 : 0;
-        ++m_source_stats_seen[eye_index];
-        if (m_source_stats_seen[eye_index] <= 5 || m_source_stats_seen[eye_index] % 120 == 0) {
+        uint64_t stats_seen = m_source_stats_seen[eye_index].fetch_add(1, std::memory_order_relaxed) + 1;
+        if (stats_seen <= 5 || stats_seen % 120 == 0) {
             log_line(
                 "source frame stats eye=%d seen=%llu size=%ux%u nonzero_pixels=%llu max_color=%u max_alpha=%u",
                 eye,
-                static_cast<unsigned long long>(m_source_stats_seen[eye_index]),
+                static_cast<unsigned long long>(stats_seen),
                 frame.width,
                 frame.height,
                 static_cast<unsigned long long>(nonzero),
@@ -829,6 +1075,7 @@ private:
     }
 
     std::mutex m_mutex;
+    std::mutex m_diagnostic_mutex;
     HANDLE m_file = INVALID_HANDLE_VALUE;
     HANDLE m_mapping = nullptr;
     AlvrSharedMemory* m_shm = nullptr;
@@ -838,9 +1085,15 @@ private:
     uint32_t m_height = 0;
     uint32_t m_inner_crop_px = 0;
     uint64_t m_submit_counter = 0;
+    std::atomic<uint64_t> m_submit_diagnostic_counter { 0 };
     uint64_t m_frames_published = 0;
-    uint64_t m_source_stats_seen[2] = {};
-    uint64_t m_submit_texture_logs_seen[2] = {};
+    std::atomic<uint64_t> m_source_stats_seen[2] = {};
+    std::atomic<uint64_t> m_submit_texture_logs_seen[2] = {};
+    std::atomic<uint64_t> m_rejection_logs[2][static_cast<size_t>(RejectionKind::Count)] = {};
+    SubmitSignature m_submit_metadata_signature;
+    uint64_t m_submit_metadata_count = 0;
+    SubmitSignature m_submit_desc_signature;
+    uint64_t m_submit_desc_count = 0;
     EyeFrame m_left;
     EyeFrame m_right;
     StagingCache m_left_staging;
@@ -871,7 +1124,7 @@ vr::EVRCompositorError __thiscall hooked_cpp_submit(
     auto submit_start = std::chrono::steady_clock::now();
     vr::EVRCompositorError result = real_submit(self, eye, texture, bounds, flags);
     auto submit_done = std::chrono::steady_clock::now();
-    g_writer.capture_submit(eye, texture, bounds, elapsed_us(submit_start, submit_done));
+    g_writer.capture_submit(eye, texture, bounds, flags, result, elapsed_us(submit_start, submit_done));
     return result;
 }
 
@@ -888,7 +1141,7 @@ vr::EVRCompositorError OPENVR_FNTABLE_CALLTYPE hooked_c_submit(
     auto submit_start = std::chrono::steady_clock::now();
     vr::EVRCompositorError result = g_real_c_submit(eye, texture, bounds, flags);
     auto submit_done = std::chrono::steady_clock::now();
-    g_writer.capture_submit(eye, texture, bounds, elapsed_us(submit_start, submit_done));
+    g_writer.capture_submit(eye, texture, bounds, flags, result, elapsed_us(submit_start, submit_done));
     return result;
 }
 
