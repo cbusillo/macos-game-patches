@@ -635,15 +635,16 @@ VR_RuntimePath
 VR_ShutdownInternal
 ```
 
-It wraps exactly `IVRCompositor_027` and `FnTable:IVRCompositor_027`. Unknown
-compositor versions pass through untouched. DirectX `Texture_t` submissions are
-forwarded to the real OpenVR `Submit`, then captured synchronously before the
-hook returns so reused app textures cannot race the readback. The shim copies
-BGRA/RGBA D3D11 textures to staging memory, pairs left and right eyes into one
-side-by-side BGRA frame, and publishes that frame into the same
-`/tmp/alvr_frame_buffer.shm` ring already proven by the D3D11 writer probe.
-Capture failure is fail-open: the real OpenVR `Submit` return value is
-preserved.
+It wraps the current `IVRCompositor_027` / `FnTable:IVRCompositor_027` surface
+plus the legacy `013`, `014`, `016`, and `022` compositor tables observed in
+older Unity-era OpenVR apps. Unknown compositor versions pass through untouched.
+DirectX `Texture_t` submissions are forwarded to the real OpenVR `Submit`, then
+captured synchronously before the hook returns so reused app textures cannot
+race the readback. The shim copies BGRA/RGBA D3D11 textures to staging memory,
+pairs left and right eyes into one side-by-side BGRA frame, and publishes that
+frame into the same `/tmp/alvr_frame_buffer.shm` ring already proven by the
+D3D11 writer probe. Capture failure is fail-open: the real OpenVR `Submit`
+return value is preserved.
 
 Safe staging rules:
 
@@ -661,8 +662,8 @@ Smoke ladder:
 
 1. DLL loads and forwards `VR_InitInternal` / `VR_GetGenericInterface` without
    breaking app startup.
-2. `VR_GetGenericInterface(IVRCompositor_027)` or the matching FnTable request is
-   logged and wrapped.
+2. A supported `IVRCompositor_*` or matching FnTable request is logged and
+   wrapped.
 3. `Submit` logs/captures texture type, format, and size.
 4. The shim publishes paired left/right BGRA frames into the bridge ring.
 5. The AVP displays content from a real OpenVR submitter.
@@ -1072,6 +1073,55 @@ VideoToolbox encode, Metal, or IOSurface work until a real app shows sustained
 allocation jitter or conversion regressions. The next practical targets are
 real-app SteamVR/OpenVR integration, texture-format/MSAA coverage, and stereo
 geometry/ViewParams rather than native pixel conversion.
+
+Real-app integration split on June 19, 2026:
+
+```text
+Target A: The Lab's Robot Repair scene app-local shim against its real OpenVR DLL
+Result: loaded the shim and requested IVRCompositor_013, but no Submit frames
+
+Target B: SteamVR Tutorial app-local shim against SteamVR's real OpenVR runtime
+Result: runtime started, then stopped before Submit with no active HMD/runtime
+
+Target C: SteamVR Tutorial app-local shim against tools/fake_openvr_real.cpp
+Result: real Unity app renderer produced paired DirectX Submit frames
+```
+
+Representative target C evidence:
+
+```text
+VR_GetGenericInterface IVRCompositor_022 -> ...
+wrapped C++ IVRCompositor object=... slots=43 real_submit=...
+wrapped C IVRCompositor table=... slots=43 real_submit=...
+Submit crop eye=0 format=27 (R8G8B8A8_TYPELESS) bounds=[0.0000 0.0000 0.5000 1.0000]
+Submit crop eye=1 format=27 (R8G8B8A8_TYPELESS) bounds=[0.5000 0.0000 1.0000 1.0000]
+published Submit pair frame=0 output=2560x720 source_eye_width=1280
+read shared-memory frame 0
+sending HEVC decoder config (79 bytes)
+read shared-memory frame 1680
+```
+
+Interpretation: this is the first durable proof that a real SteamVR/OpenVR Unity
+application can render D3D11 frames through the app-local shim into the
+Wine-visible shared-memory ring and native macOS bridge when the fake runtime
+provides the missing HMD/lifecycle surface. The app requested the older
+`IVRCompositor_022` ABI and submitted `DXGI_FORMAT_R8G8B8A8_TYPELESS` textures,
+so the useful next target is broadening real-app compatibility rather than
+assuming only the current `027` table and UNORM formats. The result does not yet
+prove the real SteamVR runtime path is healthy: when the same app is pointed at
+SteamVR's real runtime, it still stops before `Submit` without a live HMD
+session. Keep the fake runtime as the real-app graphics harness, and treat real
+SteamVR runtime work as a separate HMD/lifecycle problem.
+
+Next direction:
+
+1. Keep SteamVR Tutorial as the primary repeatable real-app graphics probe.
+2. Add first-frame/first-rejection logging for raw Submit flags, texture type,
+   texture format, sample count, array size, and real Submit return code.
+3. Use that logging to decide whether the next implementation gap is bounds,
+   MSAA resolve, texture format conversion, or app lifecycle.
+4. Escalate to Robot Repair only after the Tutorial run is repeatable for a few
+   minutes with stable pair counts, timings, and visible AVP output.
 
 Known first-prototype limits:
 
