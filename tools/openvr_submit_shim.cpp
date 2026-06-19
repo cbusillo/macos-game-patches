@@ -173,14 +173,14 @@ uint32_t env_u32(const char* name, uint32_t default_value) {
     while (*raw && std::isspace(static_cast<unsigned char>(*raw))) {
         ++raw;
     }
-    if (*raw == '-') {
+    if (!std::isdigit(static_cast<unsigned char>(*raw))) {
         log_line("ignoring invalid %s=%s", name, value.c_str());
         return default_value;
     }
 
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
-    if (value.empty() || (end && *end) || parsed > UINT32_MAX) {
+    unsigned long long parsed = std::strtoull(raw, &end, 10);
+    if ((end && *end) || parsed > UINT32_MAX) {
         log_line("ignoring invalid %s=%s", name, value.c_str());
         return default_value;
     }
