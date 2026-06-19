@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <thread>
 
 namespace {
@@ -47,6 +48,8 @@ struct Options {
     bool submit_msaa = false;
     bool static_pattern = false;
     bool alignment_grid = false;
+    bool stereo_scene = false;
+    float scene_ipd_scale = 1.0f;
     EyePatternMode eye_mode = EyePatternMode::Stereo;
     int right_shift_x = 0;
     int right_shift_y = 0;
@@ -79,6 +82,16 @@ bool parse_shift_int(const char* text, int* out) {
         return false;
     }
     *out = static_cast<int>(value);
+    return true;
+}
+
+bool parse_float_range(const char* text, float min_value, float max_value, float* out) {
+    char* end = nullptr;
+    float value = std::strtof(text, &end);
+    if (!text[0] || (end && *end) || !std::isfinite(value) || value < min_value || value > max_value) {
+        return false;
+    }
+    *out = value;
     return true;
 }
 
@@ -134,6 +147,14 @@ Options parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--alignment-grid") == 0) {
             options.alignment_grid = true;
             options.static_pattern = true;
+        } else if (std::strcmp(arg, "--stereo-scene") == 0) {
+            options.stereo_scene = true;
+            options.static_pattern = true;
+        } else if (std::strcmp(arg, "--scene-ipd-scale") == 0) {
+            if (!parse_float_range(next(), 0.0f, 2.0f, &options.scene_ipd_scale)) {
+                std::fprintf(stderr, "invalid --scene-ipd-scale; expected 0.0..2.0\n");
+                std::exit(2);
+            }
         } else if (std::strcmp(arg, "--mono") == 0) {
             options.eye_mode = EyePatternMode::Mono;
         } else if (std::strcmp(arg, "--left-only") == 0) {
@@ -156,7 +177,8 @@ Options parse_args(int argc, char** argv) {
             std::printf(
                 "usage: openvr_app_loop_probe.exe [--width N] [--height N] [--frames N] "
                 "[--fps N] [--msaa 1|2|4|8] [--submit-msaa] [--bounds] [--rgba] "
-                "[--static-pattern] [--alignment-grid] [--mono] [--left-only] [--right-only] [--right-shift-x N] "
+                "[--static-pattern] [--alignment-grid] [--stereo-scene] [--scene-ipd-scale N] "
+                "[--mono] [--left-only] [--right-only] [--right-shift-x N] "
                 "[--right-shift-y N] [--no-properties]\n"
             );
             std::exit(0);
@@ -164,6 +186,14 @@ Options parse_args(int argc, char** argv) {
             std::fprintf(stderr, "unknown argument: %s\n", arg);
             std::exit(2);
         }
+    }
+    if (options.stereo_scene && (options.right_shift_x != 0 || options.right_shift_y != 0)) {
+        std::fprintf(stderr, "--stereo-scene cannot be combined with --right-shift-x or --right-shift-y\n");
+        std::exit(2);
+    }
+    if (options.stereo_scene && options.alignment_grid) {
+        std::fprintf(stderr, "--stereo-scene cannot be combined with --alignment-grid\n");
+        std::exit(2);
     }
     return options;
 }
@@ -410,6 +440,8 @@ struct PatternFillContext {
     bool rgba;
     bool static_pattern;
     bool alignment_grid;
+    bool stereo_scene;
+    float scene_ipd_scale;
 };
 
 struct SolidFillContext {
@@ -569,6 +601,182 @@ void draw_letter_r(
     draw_rect(mapped, desc, x + 4 * scale, y + 6 * scale, scale, scale, value, rgba);
 }
 
+void draw_letter_n(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    draw_rect(mapped, desc, x, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 4 * scale, y, scale, 7 * scale, value, rgba);
+    for (int i = 0; i < 5; ++i) {
+        draw_rect(mapped, desc, x + (i + 1) * scale, y + (i + 1) * scale, scale, scale, value, rgba);
+    }
+}
+
+void draw_letter_m(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    draw_rect(mapped, desc, x, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 6 * scale, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 2 * scale, y + scale, scale, 2 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 4 * scale, y + scale, scale, 2 * scale, value, rgba);
+    draw_rect(mapped, desc, x + 3 * scale, y + 3 * scale, scale, scale, value, rgba);
+}
+
+void draw_letter_f(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    draw_rect(mapped, desc, x, y, scale, 7 * scale, value, rgba);
+    draw_rect(mapped, desc, x, y, 5 * scale, scale, value, rgba);
+    draw_rect(mapped, desc, x, y + 3 * scale, 4 * scale, scale, value, rgba);
+}
+
+void draw_colored_rect(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    int left,
+    int top,
+    int width,
+    int height,
+    uint8_t b,
+    uint8_t g,
+    uint8_t r,
+    bool rgba
+) {
+    int right = std::min<int>(static_cast<int>(desc.Width), left + width);
+    int bottom = std::min<int>(static_cast<int>(desc.Height), top + height);
+    left = std::max(0, left);
+    top = std::max(0, top);
+
+    for (int y = top; y < bottom; ++y) {
+        auto* row = static_cast<uint8_t*>(mapped->pData) + static_cast<size_t>(y) * mapped->RowPitch;
+        for (int x = left; x < right; ++x) {
+            write_pixel(row + x * 4, b, g, r, rgba);
+        }
+    }
+}
+
+void draw_depth_label(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    char label,
+    int x,
+    int y,
+    int scale,
+    uint8_t value,
+    bool rgba
+) {
+    switch (label) {
+    case 'N':
+        draw_letter_n(mapped, desc, x, y, scale, value, rgba);
+        break;
+    case 'M':
+        draw_letter_m(mapped, desc, x, y, scale, value, rgba);
+        break;
+    case 'F':
+        draw_letter_f(mapped, desc, x, y, scale, value, rgba);
+        break;
+    default:
+        break;
+    }
+}
+
+struct SceneObject {
+    float world_x;
+    float world_y;
+    float depth;
+    float size;
+    uint8_t b;
+    uint8_t g;
+    uint8_t r;
+    char label;
+};
+
+void draw_scene_object(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    const SceneObject& object,
+    float eye_offset,
+    bool rgba
+) {
+    const float focal = static_cast<float>(desc.Width) * 0.64f;
+    const float center_x = static_cast<float>(desc.Width) * 0.5f;
+    const float center_y = static_cast<float>(desc.Height) * 0.48f;
+    int x = static_cast<int>(std::lround(center_x + (object.world_x - eye_offset) * focal / object.depth));
+    int y = static_cast<int>(std::lround(center_y - object.world_y * focal / object.depth));
+    int half = std::max(10, static_cast<int>(std::lround(object.size * focal / object.depth)));
+
+    draw_colored_rect(mapped, desc, x - half, y - half, half * 2, half * 2, object.b, object.g, object.r, rgba);
+    draw_colored_rect(mapped, desc, x - half, y - half, half * 2, 3, 250, 250, 250, rgba);
+    draw_colored_rect(mapped, desc, x - half, y + half - 3, half * 2, 3, 250, 250, 250, rgba);
+    draw_colored_rect(mapped, desc, x - half, y - half, 3, half * 2, 250, 250, 250, rgba);
+    draw_colored_rect(mapped, desc, x + half - 3, y - half, 3, half * 2, 250, 250, 250, rgba);
+    draw_depth_label(mapped, desc, object.label, x - half / 2, y - half / 2, std::max(3, half / 10), 255, rgba);
+}
+
+void fill_stereo_scene_mapped(
+    D3D11_MAPPED_SUBRESOURCE* mapped,
+    const D3D11_TEXTURE2D_DESC& desc,
+    PatternFillContext* fill
+) {
+    const UINT width = desc.Width;
+    const UINT height = desc.Height;
+    const int horizon = static_cast<int>(height * 0.52f);
+
+    for (UINT y = 0; y < height; ++y) {
+        auto* row = static_cast<uint8_t*>(mapped->pData) + static_cast<size_t>(y) * mapped->RowPitch;
+        for (UINT x = 0; x < width; ++x) {
+            uint8_t shade = y < static_cast<UINT>(horizon) ? 34 : static_cast<uint8_t>(24 + std::min<UINT>(80, (y - horizon) / 3));
+            uint8_t b = static_cast<uint8_t>(shade + (fill->eye == vr::Eye_Right ? 10 : 0));
+            uint8_t g = shade;
+            uint8_t r = static_cast<uint8_t>(shade + (fill->eye == vr::Eye_Left ? 10 : 0));
+            write_pixel(row + x * 4, b, g, r, fill->rgba);
+        }
+    }
+
+    draw_colored_rect(mapped, desc, 0, horizon - 2, static_cast<int>(width), 4, 150, 150, 150, fill->rgba);
+    for (int y = horizon + 34; y < static_cast<int>(height); y += 44) {
+        draw_colored_rect(mapped, desc, 0, y, static_cast<int>(width), 2, 70, 70, 70, fill->rgba);
+    }
+    for (int x = static_cast<int>(width / 2) % 96; x < static_cast<int>(width); x += 96) {
+        draw_colored_rect(mapped, desc, x, horizon, 2, static_cast<int>(height) - horizon, 62, 62, 62, fill->rgba);
+    }
+
+    float eye_offset = (fill->eye == vr::Eye_Left ? -0.032f : 0.032f) * fill->scene_ipd_scale;
+    SceneObject objects[] = {
+        { -0.20f, -0.08f, 0.85f, 0.075f, 50, 80, 230, 'N' },
+        { 0.18f, 0.02f, 1.55f, 0.105f, 55, 200, 80, 'M' },
+        { 0.00f, 0.12f, 2.85f, 0.150f, 220, 150, 50, 'F' },
+    };
+    for (const auto& object : objects) {
+        draw_scene_object(mapped, desc, object, eye_offset, fill->rgba);
+    }
+
+    draw_colored_rect(mapped, desc, static_cast<int>(width / 2) - 3, 0, 6, static_cast<int>(height), 120, 120, 120, fill->rgba);
+    draw_colored_rect(mapped, desc, 0, static_cast<int>(height / 2) - 3, static_cast<int>(width), 6, 120, 120, 120, fill->rgba);
+    if (fill->eye == vr::Eye_Left) {
+        draw_letter_l(mapped, desc, 28, 24, 8, 230, fill->rgba);
+    } else {
+        draw_letter_r(mapped, desc, 28, 24, 8, 230, fill->rgba);
+    }
+}
+
 void fill_alignment_grid_mapped(
     D3D11_MAPPED_SUBRESOURCE* mapped,
     const D3D11_TEXTURE2D_DESC& desc,
@@ -656,6 +864,10 @@ void fill_pattern_mapped(
     void* context_ptr
 ) {
     auto* fill = static_cast<PatternFillContext*>(context_ptr);
+    if (fill->stereo_scene) {
+        fill_stereo_scene_mapped(mapped, desc, fill);
+        return;
+    }
     if (fill->alignment_grid) {
         fill_alignment_grid_mapped(mapped, desc, fill);
         return;
@@ -759,7 +971,9 @@ bool fill_eye_pattern(
     int shift_x,
     int shift_y,
     bool static_pattern,
-    bool alignment_grid
+    bool alignment_grid,
+    bool stereo_scene,
+    float scene_ipd_scale
 ) {
     D3D11_TEXTURE2D_DESC desc = {};
     texture->GetDesc(&desc);
@@ -776,6 +990,8 @@ bool fill_eye_pattern(
         desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
         static_pattern,
         alignment_grid,
+        stereo_scene,
+        scene_ipd_scale,
     };
     return writer->copy_to(context, texture, fill_pattern_mapped, &fill);
 }
@@ -875,7 +1091,7 @@ int main(int argc, char** argv) {
 
     query_system(system, &options);
     std::printf(
-        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d alignment_grid=%d eye_mode=%s right_shift=%d,%d\n",
+        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d alignment_grid=%d stereo_scene=%d scene_ipd_scale=%.2f eye_mode=%s right_shift=%d,%d\n",
         options.width,
         options.height,
         options.frames,
@@ -886,6 +1102,8 @@ int main(int argc, char** argv) {
         options.use_bounds ? 1 : 0,
         options.static_pattern ? 1 : 0,
         options.alignment_grid ? 1 : 0,
+        options.stereo_scene ? 1 : 0,
+        static_cast<double>(options.scene_ipd_scale),
         eye_mode_name(options.eye_mode),
         options.right_shift_x,
         options.right_shift_y
@@ -973,7 +1191,9 @@ int main(int argc, char** argv) {
                 0,
                 0,
                 options.static_pattern,
-                options.alignment_grid
+                options.alignment_grid,
+                options.stereo_scene,
+                options.scene_ipd_scale
             );
             if (options.eye_mode == EyePatternMode::LeftOnly) {
                 fill_solid_bgra(context.Get(), &texture_writer, right.Get(), 0, 0, 0);
@@ -988,7 +1208,9 @@ int main(int argc, char** argv) {
                     options.right_shift_x,
                     options.right_shift_y,
                     options.static_pattern,
-                    options.alignment_grid
+                    options.alignment_grid,
+                    options.stereo_scene,
+                    options.scene_ipd_scale
                 );
             } else {
                 fill_eye_pattern(
@@ -1000,7 +1222,9 @@ int main(int argc, char** argv) {
                     options.right_shift_x,
                     options.right_shift_y,
                     options.static_pattern,
-                    options.alignment_grid
+                    options.alignment_grid,
+                    options.stereo_scene,
+                    options.scene_ipd_scale
                 );
             }
         }
