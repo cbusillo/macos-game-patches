@@ -1050,25 +1050,28 @@ which is far too slow for a comfort-ready VR path and also makes visual alignmen
 judgment noisy. The next milestone is therefore native bridge pixel-path
 performance, before more stereo-comfort tuning.
 
-Preferred first spike: replace the scalar loop with Accelerate/vImage
-BGRA-to-NV12 conversion and feed the encoder through a pooled `CVPixelBuffer`
-path. The current `shiguredo_video_toolbox` wrapper already exposes `Nv12` and
-`encode_pixel_buffer`, while a direct `kCVPixelFormatType_32BGRA` VideoToolbox
-path would require extending or bypassing the wrapper. Treat direct BGRA encode
-as the second feasibility probe if the vImage/NV12 path is still too slow or too
-jittery. Defer Metal/IOSurface conversion until CPU BGRA-to-NV12 is measured and
-shown insufficient. After conversion is in the low single-digit milliseconds,
-rerun the same SteamVR Tutorial smoke and then return to stereo geometry, eye
-alignment, bounds/crop handling, and real-app texture formats.
-
-Next-turn validation target for the vImage/NV12 spike:
+Follow-up timing smoke on June 19, 2026 showed the current
+`macos-v21-native-bridge` implementation in `alvr/macos_bridge/src/bgra.rs`
+uses Accelerate/vImage BGRA-to-NV12 and feeds VideoToolbox through NV12
+`CVPixelBuffer`s. A bounded local shared-memory writer smoke at `2560x720` met
+the target by a wide margin, and a longer app-local OpenVR submit smoke through
+the fake runtime, app-local shim, Wine-visible shared memory, native bridge,
+VideoToolbox, and AVP stream path preserved that result:
 
 ```text
-bgra_to_nv12 p50: < 4 ms at 2560x720
-bgra_to_nv12 p99: < 8 ms at 2560x720
-AVP display: still alive with no obvious channel swap
-bridge drops: no systematic drops at the smoke-test frame rate
+real_submit:               p50 ~0.49 ms, p99 ~0.61 ms
+producer_capture:          p50 ~3.3 ms, p99 ~8.5 ms
+map_wait:                  p50 ~1.5 ms, p99 ~5.6 ms
+pair_copy:                 p50 ~0.15 ms, p99 ~1.6 ms
+bgra_to_nv12:              p50 ~0.14 ms, p99 ~0.83 ms
 ```
+
+Interpretation: the previous native scalar color-conversion blocker was not
+present in this measured path. Do not prioritize `CVPixelBufferPool`, direct BGRA
+VideoToolbox encode, Metal, or IOSurface work until a real app shows sustained
+allocation jitter or conversion regressions. The next practical targets are
+real-app SteamVR/OpenVR integration, texture-format/MSAA coverage, and stereo
+geometry/ViewParams rather than native pixel conversion.
 
 Known first-prototype limits:
 
