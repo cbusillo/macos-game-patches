@@ -45,12 +45,18 @@ using Microsoft::WRL::ComPtr;
 #endif
 
 constexpr size_t kCompositorSubmitSlot = 5;
-// IVRCompositor_027 exposes 51 methods in this OpenVR header; the legacy
-// IVRCompositor_022 table used by Unity 2019 has 43 slots. Copy only the
-// requested interface surface so legacy callers do not read past their table.
+// IVRCompositor_027 exposes 51 methods in this OpenVR header; older Unity-era
+// interfaces expose smaller tables. Copy only the requested interface surface so
+// legacy callers do not read past their table.
 constexpr size_t kCompositor027Slots = 51;
+constexpr size_t kLegacyCompositor013Slots = 27;
+constexpr size_t kLegacyCompositor014Slots = 29;
+constexpr size_t kLegacyCompositor016Slots = 35;
 constexpr size_t kLegacyCompositor022Slots = 43;
 constexpr size_t kMaxCompositorSlots = kCompositor027Slots;
+constexpr const char* kLegacyCompositor013 = "IVRCompositor_013";
+constexpr const char* kLegacyCompositor014 = "IVRCompositor_014";
+constexpr const char* kLegacyCompositor016 = "IVRCompositor_016";
 constexpr const char* kLegacyCompositor022 = "IVRCompositor_022";
 constexpr uint32_t kMinPackedEyeWidth = 16;
 constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 5'000'000'000ULL;
@@ -80,6 +86,9 @@ struct FlatCompositorTable {
 };
 
 static_assert(kCompositorSubmitSlot < kLegacyCompositor022Slots, "Submit slot must fit legacy IVRCompositor vtable");
+static_assert(kCompositorSubmitSlot < kLegacyCompositor016Slots, "Submit slot must fit legacy IVRCompositor vtable");
+static_assert(kCompositorSubmitSlot < kLegacyCompositor014Slots, "Submit slot must fit legacy IVRCompositor vtable");
+static_assert(kCompositorSubmitSlot < kLegacyCompositor013Slots, "Submit slot must fit legacy IVRCompositor vtable");
 static_assert(kCompositorSubmitSlot < kCompositor027Slots, "Submit slot must fit current IVRCompositor vtable");
 
 struct EyeFrame {
@@ -246,7 +255,8 @@ std::string wine_shared_memory_path() {
 }
 
 bool is_bgra_format(DXGI_FORMAT format) {
-    return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    return format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        || format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
 }
 
 bool is_rgba_format(DXGI_FORMAT format) {
@@ -378,6 +388,7 @@ private:
         auto capture_start = std::chrono::steady_clock::now();
         D3D11_TEXTURE2D_DESC desc = {};
         texture->GetDesc(&desc);
+        ++m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0];
 
         if (desc.SampleDesc.Count != 1 || desc.ArraySize != 1 || desc.MipLevels < 1) {
             log_line(
@@ -398,6 +409,27 @@ private:
 
         CropResult crop_result = texture_crop(desc, eye, bounds);
         TextureCrop crop = crop_result.crop;
+        if (m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0] <= 8
+            || m_submit_texture_logs_seen[eye == vr::Eye_Right ? 1 : 0] % 180 == 0) {
+            log_line(
+                "Submit crop eye=%d texture=%p size=%ux%u format=%u bounds=%s raw=[%.4f %.4f %.4f %.4f] crop=%u,%u %ux%u fallback=%u",
+                eye,
+                texture,
+                desc.Width,
+                desc.Height,
+                desc.Format,
+                bounds ? "provided" : "default",
+                bounds ? bounds->uMin : 0.0f,
+                bounds ? bounds->vMin : 0.0f,
+                bounds ? bounds->uMax : 1.0f,
+                bounds ? bounds->vMax : 1.0f,
+                crop.x,
+                crop.y,
+                crop.width,
+                crop.height,
+                crop_result.used_fallback ? 1 : 0
+            );
+        }
         if (crop.width == 0 || crop.height == 0) {
             log_line(
                 "unsupported Submit texture eye=%d invalid bounds size=%ux%u bounds=%s raw=[%.4f %.4f %.4f %.4f]",
@@ -640,12 +672,19 @@ private:
         m_shm = static_cast<AlvrSharedMemory*>(ptr);
         m_frame_data = static_cast<uint8_t*>(ptr) + alvr_shm_frame_offset(0);
         if (!wait_for_bridge_ready(m_shm, 0)) {
+            uint64_t now = unix_time_ns();
+            uint64_t heartbeat_ns = m_shm->bridge_heartbeat_ns;
+            uint64_t heartbeat_age_ns = heartbeat_ns <= now ? now - heartbeat_ns : heartbeat_ns - now;
             log_line(
-                "bridge shared memory is not ready magic=0x%08x version=%u initialized=%u shutdown=%u",
+                "bridge shared memory is not ready magic=0x%08x version=%u initialized=%u shutdown=%u session=%llu heartbeat=%llu now=%llu heartbeat_delta_ns=%llu",
                 m_shm->magic,
                 m_shm->version,
                 m_shm->initialized,
-                m_shm->shutdown
+                m_shm->shutdown,
+                static_cast<unsigned long long>(m_shm->bridge_session_id),
+                static_cast<unsigned long long>(heartbeat_ns),
+                static_cast<unsigned long long>(now),
+                static_cast<unsigned long long>(heartbeat_age_ns)
             );
             close();
             return false;
@@ -801,6 +840,7 @@ private:
     uint64_t m_submit_counter = 0;
     uint64_t m_frames_published = 0;
     uint64_t m_source_stats_seen[2] = {};
+    uint64_t m_submit_texture_logs_seen[2] = {};
     EyeFrame m_left;
     EyeFrame m_right;
     StagingCache m_left_staging;
@@ -864,11 +904,23 @@ bool is_compositor_interface(const char* version) {
     const char* compositor_version = compositor_version_name(version);
     return compositor_version
         && (std::strcmp(compositor_version, vr::IVRCompositor_Version) == 0
+            || std::strcmp(compositor_version, kLegacyCompositor013) == 0
+            || std::strcmp(compositor_version, kLegacyCompositor014) == 0
+            || std::strcmp(compositor_version, kLegacyCompositor016) == 0
             || std::strcmp(compositor_version, kLegacyCompositor022) == 0);
 }
 
 size_t compositor_slot_count(const char* version) {
     const char* compositor_version = compositor_version_name(version);
+    if (compositor_version && std::strcmp(compositor_version, kLegacyCompositor013) == 0) {
+        return kLegacyCompositor013Slots;
+    }
+    if (compositor_version && std::strcmp(compositor_version, kLegacyCompositor014) == 0) {
+        return kLegacyCompositor014Slots;
+    }
+    if (compositor_version && std::strcmp(compositor_version, kLegacyCompositor016) == 0) {
+        return kLegacyCompositor016Slots;
+    }
     if (compositor_version && std::strcmp(compositor_version, kLegacyCompositor022) == 0) {
         return kLegacyCompositor022Slots;
     }

@@ -48,6 +48,10 @@ WINE_VR_COMMAND_PATTERNS = (
     "\\SteamVR\\bin\\win64\\vrmonitor.exe",
     "\\SteamVR\\bin\\win64\\vrcompositor.exe",
     "\\SteamVR\\bin\\vrwebhelper\\win64\\vrwebhelper.exe",
+    "\\steamapps\\common\\The Lab\\RobotRepair\\bin\\win64\\vr.exe",
+    "\\The Lab\\RobotRepair\\bin\\win64\\vr.exe",
+    "\\RobotRepair\\bin\\win64\\vr.exe",
+    "\\steamapps\\common\\Freedom Locomotion VR\\",
 )
 
 NATIVE_STEAM_PATTERNS = (
@@ -63,6 +67,7 @@ NATIVE_STEAM_LAUNCHCTL_LABELS = (
 @dataclass(frozen=True)
 class ProcessMatch:
     pid: int
+    ppid: int
     name: str
     command: str
 
@@ -76,9 +81,35 @@ class CleanupReport:
     launchctl_actions: list[str] | None = None
 
 
+def ancestor_pids(pid: int) -> set[int]:
+    ancestors: set[int] = {pid}
+    current = pid
+    while current > 1:
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(current)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            break
+        parent_text = result.stdout.strip()
+        if not parent_text:
+            break
+        try:
+            parent = int(parent_text)
+        except ValueError:
+            break
+        if parent <= 1 or parent in ancestors:
+            break
+        ancestors.add(parent)
+        current = parent
+    return ancestors
+
+
 def list_processes() -> tuple[list[ProcessMatch], str | None]:
     result = subprocess.run(
-        ["ps", "-axo", "pid=,comm=,args="],
+        ["ps", "-axo", "pid=,ppid=,comm=,args="],
         check=False,
         capture_output=True,
         text=True,
@@ -86,24 +117,25 @@ def list_processes() -> tuple[list[ProcessMatch], str | None]:
     if result.returncode != 0:
         return [], result.stderr.strip() or "ps failed"
 
-    current_pid = os.getpid()
+    ignored_pids = ancestor_pids(os.getpid())
     matches: list[ProcessMatch] = []
     for raw_line in result.stdout.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        parts = line.split(None, 2)
-        if len(parts) < 3:
+        parts = line.split(None, 3)
+        if len(parts) < 4:
             continue
-        pid_text, command_name, command_args = parts
+        pid_text, ppid_text, command_name, command_args = parts
         try:
             pid = int(pid_text)
+            ppid = int(ppid_text)
         except ValueError:
             continue
-        if pid == current_pid:
+        if pid in ignored_pids:
             continue
         command = f"{command_name} {command_args}".strip()
-        matches.append(ProcessMatch(pid=pid, name=os.path.basename(command_name), command=command))
+        matches.append(ProcessMatch(pid=pid, ppid=ppid, name=os.path.basename(command_name), command=command))
     return matches, None
 
 
