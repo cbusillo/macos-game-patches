@@ -67,8 +67,8 @@ constexpr const char* kLegacyApplications005 = "IVRApplications_005";
 constexpr const char* kLegacySettings001 = "IVRSettings_001";
 constexpr const char* kLegacyInput005 = "IVRInput_005";
 constexpr double kFakeRefreshHz = 90.0;
-constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 2'000'000'000ULL;
-constexpr uint64_t kBridgeHeartbeatFutureToleranceNs = 100'000'000ULL;
+constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 5'000'000'000ULL;
+constexpr uint64_t kBridgeHeartbeatFutureToleranceNs = 250'000'000ULL;
 
 struct LegacyCompositorFrameTiming {
     uint32_t m_nSize;
