@@ -601,6 +601,7 @@ Fake-runtime build command:
 x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -static-libgcc \
   -static-libstdc++ -shared tools/fake_openvr_real.cpp \
   -I$HOME/Developer/alvr/openvr/headers \
+  -I$HOME/Developer/alvr/alvr/server_openvr/cpp \
   -o $PROBE_OUT/fake_openvr_real.dll
 ```
 
