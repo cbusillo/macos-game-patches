@@ -4,6 +4,7 @@
 //   x86_64-w64-mingw32-g++ -O2 -std=c++17 -static -static-libgcc \
 //     -static-libstdc++ -shared tools/fake_openvr_real.cpp \
 //     -I$HOME/Developer/alvr/openvr/headers \
+//     -I$HOME/Developer/alvr/alvr/server_openvr/cpp \
 //     -o $PROBE_OUT/fake_openvr_real.dll
 
 #define WIN32_LEAN_AND_MEAN
@@ -11,12 +12,17 @@
 
 #include <openvr.h>
 
+#include "shared/alvr_shm_protocol.h"
+
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -61,6 +67,8 @@ constexpr const char* kLegacyApplications005 = "IVRApplications_005";
 constexpr const char* kLegacySettings001 = "IVRSettings_001";
 constexpr const char* kLegacyInput005 = "IVRInput_005";
 constexpr double kFakeRefreshHz = 90.0;
+constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 2'000'000'000ULL;
+constexpr uint64_t kBridgeHeartbeatFutureToleranceNs = 100'000'000ULL;
 
 struct LegacyCompositorFrameTiming {
     uint32_t m_nSize;
@@ -164,6 +172,151 @@ uint32_t env_u32(const char* name, uint32_t fallback) {
         return fallback;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+struct SharedViewConfig {
+    float fov[2][4] = {};
+    float eye_x_m[2] = {};
+};
+
+std::string wine_shared_memory_path() {
+    std::string path = "Z:" ALVR_SHM_PATH;
+    for (char& ch : path) {
+        if (ch == '/') {
+            ch = '\\';
+        }
+    }
+    return path;
+}
+
+bool valid_fov_angle(float value) {
+    return std::isfinite(value) && std::fabs(value) > 0.001f
+        && std::fabs(value) < 1.5707963f;
+}
+
+bool valid_shared_view_config(const SharedViewConfig& config) {
+    if (!(config.eye_x_m[0] < config.eye_x_m[1])) {
+        return false;
+    }
+    for (int eye = 0; eye < 2; ++eye) {
+        if (!std::isfinite(config.eye_x_m[eye]) || std::fabs(config.eye_x_m[eye]) > 0.2f) {
+            return false;
+        }
+        for (int index = 0; index < 4; ++index) {
+            if (!valid_fov_angle(config.fov[eye][index])) {
+                return false;
+            }
+        }
+        if (!(config.fov[eye][0] < 0.0f && config.fov[eye][1] > 0.0f
+                && config.fov[eye][2] > 0.0f && config.fov[eye][3] < 0.0f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint64_t unix_time_ns() {
+    FILETIME file_time;
+    GetSystemTimePreciseAsFileTime(&file_time);
+    ULARGE_INTEGER value;
+    value.LowPart = file_time.dwLowDateTime;
+    value.HighPart = file_time.dwHighDateTime;
+    return (value.QuadPart - 116444736000000000ULL) * 100ULL;
+}
+
+bool bridge_heartbeat_live(const AlvrSharedMemory* shm) {
+    if (!shm || shm->bridge_session_id == 0 || shm->bridge_heartbeat_ns == 0) {
+        return false;
+    }
+
+    uint64_t now = unix_time_ns();
+    uint64_t heartbeat = shm->bridge_heartbeat_ns;
+    return (heartbeat <= now && now - heartbeat <= kMaxBridgeHeartbeatAgeNs)
+        || (heartbeat > now && heartbeat - now <= kBridgeHeartbeatFutureToleranceNs);
+}
+
+bool read_shared_view_config(SharedViewConfig* config) {
+    if (!config) {
+        return false;
+    }
+
+    std::string path = wine_shared_memory_path();
+    HANDLE file = CreateFileA(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) {
+        CloseHandle(file);
+        return false;
+    }
+
+    void* ptr = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(AlvrSharedMemory));
+    if (!ptr) {
+        CloseHandle(mapping);
+        CloseHandle(file);
+        return false;
+    }
+
+    auto* shm = static_cast<const AlvrSharedMemory*>(ptr);
+    bool ok = shm->magic == ALVR_SHM_MAGIC && shm->version == ALVR_SHM_VERSION
+        && shm->initialized != 0 && shm->shutdown == 0 && shm->view_config_set != 0
+        && bridge_heartbeat_live(shm);
+    if (ok) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        for (int eye = 0; eye < 2; ++eye) {
+            for (int index = 0; index < 4; ++index) {
+                config->fov[eye][index] = shm->view_fov[eye][index];
+            }
+            config->eye_x_m[eye] = shm->view_eye_x_m[eye];
+        }
+        ok = valid_shared_view_config(*config);
+    }
+
+    UnmapViewOfFile(ptr);
+    CloseHandle(mapping);
+    CloseHandle(file);
+    return ok;
+}
+
+bool shared_eye_raw(vr::EVREye eye, float* left, float* right, float* top, float* bottom) {
+    SharedViewConfig config;
+    if (!read_shared_view_config(&config)) {
+        return false;
+    }
+
+    int eye_index = eye == vr::Eye_Right ? 1 : 0;
+    if (left) {
+        *left = std::tan(config.fov[eye_index][0]);
+    }
+    if (right) {
+        *right = std::tan(config.fov[eye_index][1]);
+    }
+    if (top) {
+        *top = std::tan(config.fov[eye_index][3]);
+    }
+    if (bottom) {
+        *bottom = std::tan(config.fov[eye_index][2]);
+    }
+    return true;
+}
+
+bool shared_eye_x(vr::EVREye eye, float* eye_x_m) {
+    SharedViewConfig config;
+    if (!eye_x_m || !read_shared_view_config(&config)) {
+        return false;
+    }
+    *eye_x_m = config.eye_x_m[eye == vr::Eye_Right ? 1 : 0];
+    return true;
 }
 
 bool is_system_interface(const char* version) {
@@ -523,6 +676,33 @@ void __stdcall fake_c_get_recommended_render_target_size(uint32_t* width, uint32
     fake_get_recommended_render_target_size(nullptr, width, height);
 }
 
+void normalize_clip_planes(float* near_z, float* far_z) {
+    if (*near_z <= 0.0f) {
+        *near_z = 0.01f;
+    }
+    if (*far_z <= *near_z) {
+        *far_z = *near_z + 1000.0f;
+    }
+}
+
+vr::HmdMatrix44_t projection_matrix_from_raw(
+    float left, float right, float top, float bottom, float near_z, float far_z
+) {
+    normalize_clip_planes(&near_z, &far_z);
+
+    vr::HmdMatrix44_t m = {};
+    float inv_width = 1.0f / (right - left);
+    float inv_height = 1.0f / (bottom - top);
+    m.m[0][0] = 2.0f * inv_width;
+    m.m[0][2] = (right + left) * inv_width;
+    m.m[1][1] = 2.0f * inv_height;
+    m.m[1][2] = (bottom + top) * inv_height;
+    m.m[2][2] = far_z / (near_z - far_z);
+    m.m[2][3] = (far_z * near_z) / (near_z - far_z);
+    m.m[3][2] = -1.0f;
+    return m;
+}
+
 vr::HmdMatrix44_t fake_projection_matrix(float near_z, float far_z) {
     if (near_z <= 0.0f) {
         near_z = 0.01f;
@@ -540,16 +720,28 @@ vr::HmdMatrix44_t fake_projection_matrix(float near_z, float far_z) {
     return m;
 }
 
-vr::HmdMatrix44_t __thiscall fake_get_projection_matrix(void*, vr::EVREye, float near_z, float far_z) {
-    log_call("IVRSystem::GetProjectionMatrix");
+vr::HmdMatrix44_t fake_projection_matrix(vr::EVREye eye, float near_z, float far_z) {
+    float left = 0.0f;
+    float right = 0.0f;
+    float top = 0.0f;
+    float bottom = 0.0f;
+    if (shared_eye_raw(eye, &left, &right, &top, &bottom)) {
+        log_eye_call("IVRSystem::GetProjectionMatrix using shared view", eye);
+        return projection_matrix_from_raw(left, right, top, bottom, near_z, far_z);
+    }
     return fake_projection_matrix(near_z, far_z);
+}
+
+vr::HmdMatrix44_t __thiscall fake_get_projection_matrix(void*, vr::EVREye eye, float near_z, float far_z) {
+    log_eye_call("IVRSystem::GetProjectionMatrix", eye);
+    return fake_projection_matrix(eye, near_z, far_z);
 }
 
 vr::HmdMatrix44_t __thiscall fake_legacy_get_projection_matrix(
     void*, vr::EVREye eye, float near_z, float far_z, int32_t
 ) {
     log_eye_call("IVRSystem_011::GetProjectionMatrix", eye);
-    return fake_projection_matrix(near_z, far_z);
+    return fake_projection_matrix(eye, near_z, far_z);
 }
 
 vr::HmdMatrix44_t* __thiscall fake_cpp_legacy_get_projection_matrix(
@@ -557,17 +749,17 @@ vr::HmdMatrix44_t* __thiscall fake_cpp_legacy_get_projection_matrix(
 ) {
     log_eye_call("IVRSystem_011::GetProjectionMatrix", eye);
     if (output) {
-        *output = fake_projection_matrix(near_z, far_z);
+        *output = fake_projection_matrix(eye, near_z, far_z);
     }
     return output;
 }
 
 vr::HmdMatrix44_t* __thiscall fake_cpp_get_projection_matrix(
-    void*, vr::HmdMatrix44_t* output, vr::EVREye, float near_z, float far_z
+    void*, vr::HmdMatrix44_t* output, vr::EVREye eye, float near_z, float far_z
 ) {
-    log_call("IVRSystem::GetProjectionMatrix");
+    log_eye_call("IVRSystem::GetProjectionMatrix", eye);
     if (output) {
-        *output = fake_projection_matrix(near_z, far_z);
+        *output = fake_projection_matrix(eye, near_z, far_z);
     }
     return output;
 }
@@ -581,9 +773,13 @@ vr::HmdMatrix44_t __stdcall fake_c_legacy_get_projection_matrix(vr::EVREye eye, 
 }
 
 void __thiscall fake_get_projection_raw(
-    void*, vr::EVREye, float* left, float* right, float* top, float* bottom
+    void*, vr::EVREye eye, float* left, float* right, float* top, float* bottom
 ) {
-    log_call("IVRSystem::GetProjectionRaw");
+    log_eye_call("IVRSystem::GetProjectionRaw", eye);
+    if (shared_eye_raw(eye, left, right, top, bottom)) {
+        log_eye_call("IVRSystem::GetProjectionRaw using shared view", eye);
+        return;
+    }
     if (left) {
         *left = -1.0f;
     }
@@ -661,7 +857,11 @@ vr::DistortionCoordinates_t __stdcall fake_c_legacy_compute_distortion(vr::EVREy
 
 vr::HmdMatrix34_t __thiscall fake_get_eye_to_head_transform(void*, vr::EVREye eye) {
     log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
-    vr::HmdMatrix34_t result = identity34(eye == vr::Eye_Left ? -0.032f : 0.032f);
+    float eye_x_m = eye == vr::Eye_Left ? -0.032f : 0.032f;
+    if (shared_eye_x(eye, &eye_x_m)) {
+        log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
+    }
+    vr::HmdMatrix34_t result = identity34(eye_x_m);
     log_call("IVRSystem::GetEyeToHeadTransform return");
     return result;
 }
@@ -669,7 +869,11 @@ vr::HmdMatrix34_t __thiscall fake_get_eye_to_head_transform(void*, vr::EVREye ey
 vr::HmdMatrix34_t* __thiscall fake_cpp_get_eye_to_head_transform(void*, vr::HmdMatrix34_t* output, vr::EVREye eye) {
     log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
     if (output) {
-        *output = identity34(eye == vr::Eye_Left ? -0.032f : 0.032f);
+        float eye_x_m = eye == vr::Eye_Left ? -0.032f : 0.032f;
+        if (shared_eye_x(eye, &eye_x_m)) {
+            log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
+        }
+        *output = identity34(eye_x_m);
     }
     log_call("IVRSystem::GetEyeToHeadTransform return");
     return output;
