@@ -139,10 +139,26 @@ struct SubmitSignature {
     int real_result = 0;
     int texture_type = -999;
     uint32_t color_space = 0;
+    uintptr_t handle = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
     uint32_t format = UINT32_MAX;
     uint32_t samples = 0;
     uint32_t array_size = 0;
     uint32_t mip_levels = 0;
+    uint32_t bind_flags = 0;
+    uint32_t usage = 0;
+    uint32_t misc_flags = 0;
+    bool has_bounds = false;
+    float u_min = 0.0f;
+    float v_min = 0.0f;
+    float u_max = 1.0f;
+    float v_max = 1.0f;
+};
+
+struct RejectionSignature {
+    SubmitSignature submit;
+    long hr = S_OK;
 };
 
 enum class RejectionKind : size_t {
@@ -539,7 +555,7 @@ public:
             reinterpret_cast<void**>(submitted.GetAddressOf())
         );
         if (FAILED(hr) || !submitted) {
-            if (should_log_rejection(diagnostic, RejectionKind::NotD3D11Texture2D)) {
+            if (should_log_rejection(diagnostic, RejectionKind::NotD3D11Texture2D, nullptr, hr)) {
                 log_submit_diagnostic(diagnostic, "not-id3d11texture2d", nullptr, hr);
             }
             return;
@@ -583,13 +599,13 @@ private:
         }
 
         if (desc.SampleDesc.Count != 1 || desc.ArraySize != 1 || desc.MipLevels < 1) {
-            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedShape)) {
+            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedShape, &desc)) {
                 log_submit_diagnostic(diagnostic, "unsupported-shape", &desc);
             }
             return false;
         }
         if (!is_bgra_format(desc.Format) && !is_rgba_format(desc.Format)) {
-            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedFormat)) {
+            if (should_log_rejection(diagnostic, RejectionKind::UnsupportedFormat, &desc)) {
                 log_submit_diagnostic(diagnostic, "unsupported-format", &desc);
             }
             return false;
@@ -706,38 +722,63 @@ private:
     }
 
     bool should_log_submit_metadata(const SubmitDiagnostic& diagnostic) {
-        SubmitSignature signature;
-        signature.flags = static_cast<uint32_t>(diagnostic.flags);
-        signature.real_result = static_cast<int>(diagnostic.real_result);
-        if (diagnostic.texture) {
-            signature.texture_type = static_cast<int>(diagnostic.texture->eType);
-            signature.color_space = static_cast<uint32_t>(diagnostic.texture->eColorSpace);
-        }
+        SubmitSignature signature = submit_signature(diagnostic);
         std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
         return should_log_signature(diagnostic.sequence, m_submit_metadata_signature, m_submit_metadata_count, signature);
     }
 
     bool should_log_submit_desc(const SubmitDiagnostic& diagnostic, const D3D11_TEXTURE2D_DESC& desc) {
+        SubmitSignature signature = submit_signature(diagnostic, &desc);
+        std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
+        return should_log_signature(diagnostic.sequence, m_submit_desc_signature, m_submit_desc_count, signature);
+    }
+
+    SubmitSignature submit_signature(
+        const SubmitDiagnostic& diagnostic,
+        const D3D11_TEXTURE2D_DESC* desc = nullptr,
+        bool include_handle = true
+    ) {
         SubmitSignature signature;
         signature.flags = static_cast<uint32_t>(diagnostic.flags);
         signature.real_result = static_cast<int>(diagnostic.real_result);
         if (diagnostic.texture) {
             signature.texture_type = static_cast<int>(diagnostic.texture->eType);
             signature.color_space = static_cast<uint32_t>(diagnostic.texture->eColorSpace);
+            if (include_handle) {
+                signature.handle = reinterpret_cast<uintptr_t>(diagnostic.texture->handle);
+            }
         }
-        signature.format = static_cast<uint32_t>(desc.Format);
-        signature.samples = desc.SampleDesc.Count;
-        signature.array_size = desc.ArraySize;
-        signature.mip_levels = desc.MipLevels;
-        std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
-        return should_log_signature(diagnostic.sequence, m_submit_desc_signature, m_submit_desc_count, signature);
+        if (diagnostic.bounds) {
+            signature.has_bounds = true;
+            signature.u_min = diagnostic.bounds->uMin;
+            signature.v_min = diagnostic.bounds->vMin;
+            signature.u_max = diagnostic.bounds->uMax;
+            signature.v_max = diagnostic.bounds->vMax;
+        }
+        if (desc) {
+            signature.width = desc->Width;
+            signature.height = desc->Height;
+            signature.format = static_cast<uint32_t>(desc->Format);
+            signature.samples = desc->SampleDesc.Count;
+            signature.array_size = desc->ArraySize;
+            signature.mip_levels = desc->MipLevels;
+            signature.bind_flags = desc->BindFlags;
+            signature.usage = desc->Usage;
+            signature.misc_flags = desc->MiscFlags;
+        }
+        return signature;
     }
 
     bool same_signature(const SubmitSignature& left, const SubmitSignature& right) {
         return left.flags == right.flags && left.real_result == right.real_result
             && left.texture_type == right.texture_type && left.color_space == right.color_space
+            && left.handle == right.handle && left.width == right.width && left.height == right.height
             && left.format == right.format && left.samples == right.samples
-            && left.array_size == right.array_size && left.mip_levels == right.mip_levels;
+            && left.array_size == right.array_size && left.mip_levels == right.mip_levels
+            && left.bind_flags == right.bind_flags && left.usage == right.usage
+            && left.misc_flags == right.misc_flags && left.has_bounds == right.has_bounds
+            && left.u_min == right.u_min && left.v_min == right.v_min
+            && left.u_max == right.u_max && left.v_max == right.v_max;
     }
 
     bool should_log_signature(
@@ -755,13 +796,32 @@ private:
         return sequence <= 12 || changed || signature_count <= 8 || signature_count % 240 == 0;
     }
 
-    bool should_log_rejection(const SubmitDiagnostic& diagnostic, RejectionKind kind) {
+    bool should_log_rejection(
+        const SubmitDiagnostic& diagnostic,
+        RejectionKind kind,
+        const D3D11_TEXTURE2D_DESC* desc = nullptr,
+        HRESULT hr = S_OK
+    ) {
+        RejectionSignature signature;
+        signature.submit = submit_signature(diagnostic, desc, false);
+        signature.hr = static_cast<long>(hr);
+
         size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
         size_t kind_index = static_cast<size_t>(kind);
-        uint64_t count = m_rejection_logs[eye_index][kind_index]
-            .fetch_add(1, std::memory_order_relaxed)
-            + 1;
-        return count <= 8 || count % 120 == 0;
+        std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
+        RejectionSignature& last_signature = m_rejection_signatures[eye_index][kind_index];
+        uint64_t& count = m_rejection_counts[eye_index][kind_index];
+        bool changed = !same_rejection_signature(last_signature, signature);
+        if (changed) {
+            last_signature = signature;
+            count = 0;
+        }
+        ++count;
+        return changed || count <= 8 || count % 120 == 0;
+    }
+
+    bool same_rejection_signature(const RejectionSignature& left, const RejectionSignature& right) {
+        return left.hr == right.hr && same_signature(left.submit, right.submit);
     }
 
     CropResult texture_crop(const D3D11_TEXTURE2D_DESC& desc, vr::EVREye eye, const vr::VRTextureBounds_t* bounds) {
@@ -1089,11 +1149,12 @@ private:
     uint64_t m_frames_published = 0;
     std::atomic<uint64_t> m_source_stats_seen[2] = {};
     std::atomic<uint64_t> m_submit_texture_logs_seen[2] = {};
-    std::atomic<uint64_t> m_rejection_logs[2][static_cast<size_t>(RejectionKind::Count)] = {};
     SubmitSignature m_submit_metadata_signature;
     uint64_t m_submit_metadata_count = 0;
     SubmitSignature m_submit_desc_signature;
     uint64_t m_submit_desc_count = 0;
+    RejectionSignature m_rejection_signatures[2][static_cast<size_t>(RejectionKind::Count)] = {};
+    uint64_t m_rejection_counts[2][static_cast<size_t>(RejectionKind::Count)] = {};
     EyeFrame m_left;
     EyeFrame m_right;
     StagingCache m_left_staging;
