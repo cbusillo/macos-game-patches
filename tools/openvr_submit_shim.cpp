@@ -723,14 +723,26 @@ private:
 
     bool should_log_submit_metadata(const SubmitDiagnostic& diagnostic) {
         SubmitSignature signature = submit_signature(diagnostic);
+        size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
         std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
-        return should_log_signature(diagnostic.sequence, m_submit_metadata_signature, m_submit_metadata_count, signature);
+        return should_log_signature(
+            diagnostic.sequence,
+            m_submit_metadata_signatures[eye_index],
+            m_submit_metadata_counts[eye_index],
+            signature
+        );
     }
 
     bool should_log_submit_desc(const SubmitDiagnostic& diagnostic, const D3D11_TEXTURE2D_DESC& desc) {
         SubmitSignature signature = submit_signature(diagnostic, &desc);
+        size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
         std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
-        return should_log_signature(diagnostic.sequence, m_submit_desc_signature, m_submit_desc_count, signature);
+        return should_log_signature(
+            diagnostic.sequence,
+            m_submit_desc_signatures[eye_index],
+            m_submit_desc_counts[eye_index],
+            signature
+        );
     }
 
     SubmitSignature submit_signature(
@@ -1149,10 +1161,10 @@ private:
     uint64_t m_frames_published = 0;
     std::atomic<uint64_t> m_source_stats_seen[2] = {};
     std::atomic<uint64_t> m_submit_texture_logs_seen[2] = {};
-    SubmitSignature m_submit_metadata_signature;
-    uint64_t m_submit_metadata_count = 0;
-    SubmitSignature m_submit_desc_signature;
-    uint64_t m_submit_desc_count = 0;
+    SubmitSignature m_submit_metadata_signatures[2];
+    uint64_t m_submit_metadata_counts[2] = {};
+    SubmitSignature m_submit_desc_signatures[2];
+    uint64_t m_submit_desc_counts[2] = {};
     RejectionSignature m_rejection_signatures[2][static_cast<size_t>(RejectionKind::Count)] = {};
     uint64_t m_rejection_counts[2][static_cast<size_t>(RejectionKind::Count)] = {};
     EyeFrame m_left;
