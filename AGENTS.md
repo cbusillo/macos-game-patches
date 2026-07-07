@@ -1,5 +1,10 @@
 # AI Agent Guidelines
 
+> CodeQL scanning is intentionally disabled while this repository is in an
+> experimental, not-yet-working state. When the repo returns to a working,
+> scannable baseline, re-enable the CodeQL workflow and required branch checks
+> for `Analyze (actions)`, `Analyze (c-cpp)`, and `Analyze (python)`.
+
 Use `.github/github.json` for non-secret repo workflow facts, validation
 expectations, docs routing, and cleanup policy.
 
