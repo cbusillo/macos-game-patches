@@ -42,7 +42,7 @@
       "dependency automation changes"
     ]
   },
-  "importantWorkflows": ["CI", "CodeQL"],
+  "importantWorkflows": ["CI", "CodeQL", "Dependabot Updates"],
   "requiredStatusChecks": ["Repo Hygiene"],
   "qaLabels": [],
   "deployLabels": [],
