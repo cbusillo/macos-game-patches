@@ -44,7 +44,8 @@
       "dependency automation changes"
     ]
   },
-  "importantWorkflows": ["CI"],
+  "importantWorkflows": ["CI", "CodeQL", "Dependabot Updates"],
+  "requiredStatusChecks": ["Repo Hygiene"],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [],
@@ -71,8 +72,8 @@
       "checkSecurityAndQuality": true
     },
     "capabilities": {
-      "codeScanning": "not_enabled",
-      "secretScanning": "not_enabled",
+      "codeScanning": "available",
+      "secretScanning": "available",
       "dependabotAlerts": "available",
       "securityAdvisories": "available"
     },
