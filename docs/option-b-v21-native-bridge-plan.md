@@ -1,5 +1,13 @@
 # Option B: ALVR v21 Native Bridge Plan
 
+> Historical note: this document records the Option B/shared-memory viability
+> workstream and probe evidence. The active durable plan has moved to GitHub
+> issue #36, "Plan: GPU-resident Mac ALVR bridge". Issue #38 is complete;
+> issue #39 owns the native encode-surface contract, issue #40 owns CrossOver
+> texture handoff, and issue #41 owns AVP validation. Treat synthetic grids, CPU
+> BGRA shared memory, and hand-rendered diagnostics here as evidence-gathering
+> tools only, not the current product architecture or next milestone.
+
 ## Decision
 
 Option A is locally blocked. CrossOver can run enough SteamVR and ALVR to reach
@@ -1122,6 +1130,99 @@ Next direction:
    MSAA resolve, texture format conversion, or app lifecycle.
 4. Escalate to Robot Repair only after the Tutorial run is repeatable for a few
    minutes with stable pair counts, timings, and visible AVP output.
+
+June 20, 2026 follow-up validation:
+
+- The native bridge shared-memory black screen was traced to the vImage
+  `kvImage_ARGBToYpCbCrMatrix_ITU_R_601_4` FFI binding in the sibling ALVR
+  checkout. The macOS SDK declares the matrix symbol as a pointer constant; the
+  bridge had modeled it as an inline float array and passed the symbol address
+  into vImage conversion. After changing the binding to pass the matrix pointer
+  directly, local BGRA-to-NV12 luma readback tests passed and AVP visual checks
+  showed both built-in synthetic and native shared-memory writer patterns.
+- `tools/openvr_submit_shim.cpp` now excludes per-frame submitted texture handles
+  from the submit metadata and D3D11 descriptor dedupe signatures. The diagnostic
+  log still prints `handle=%p`, but normal D3D11 swapchain handle rotation no
+  longer defeats the intended rate limit.
+- Rebuilt and staged the app-local shim, fake runtime, and
+  `openvr_app_loop_probe.exe` into the CrossOver `Steam` bottle. The patched
+  shared-memory bridge plus CrossOver app-loop producer displayed visible AVP
+  content again. Alignment remains off/uncomfortable, so transport is green but
+  stereo geometry/ViewParams are still open.
+- During the run, an unrelated UE4 installer/uninstaller window was present and
+  had to be closed. Treat future real-app graphics probes as requiring sterile
+  CrossOver cleanup first; overlapping Wine processes have previously produced
+  misleading mixed images.
+- SteamVR Tutorial was then rerun against the fake OpenVR runtime with the
+  patched native bridge and refreshed app-local shim DLLs staged both beside the
+  executable and in the Unity plugin directory. The shim captured real Tutorial
+  D3D11 `Submit` frames with `DXGI_FORMAT_R8G8B8A8_TYPELESS`, bounds split
+  `[0.0, 0.5]` / `[0.5, 1.0]`, published paired `2560x720` BGRA frames, and the
+  bridge read and encoded them. AVP output was visible. This keeps Tutorial as a
+  real-app graphics harness, not the final target: it proves the fake-runtime +
+  app-local shim path can carry a real Unity/OpenVR submitter, while the missing
+  comfortable 3D surface remains a stereo geometry/ViewParams problem to solve
+  before expecting real games to feel correct.
+- A follow-up geometry diagnostic changed the native bridge to prefer
+  shared-memory producer view params for encoded shared-memory frames, so the
+  AVP send path matches the simplified FOV/eye-X view shape exposed to the fake
+  OpenVR runtime. A second run bootstrapped the same AVP local FOV and eye-X
+  values before launching `openvr_app_loop_probe.exe`, and the fake runtime then
+  printed non-fallback raw projection at startup. Neither pass improved the
+  app-loop stereo separation; the visual result was still off by roughly six
+  small blocks. Interpretation: startup projection and simple shared FOV/eye-X
+  precedence are not sufficient. The next geometry work should inspect full
+  eye-to-head pose/orientation, content packing/crop geometry, or scene scale,
+  rather than repeating the same bootstrap projection diagnostic.
+- `openvr_app_loop_probe.exe` now has a labeled `--shift-sweep` mono alignment
+  diagnostic for measuring right-eye horizontal content offset through the same
+  fake-runtime, shim, shared-memory, and native bridge path. The sweep auto-runs
+  long enough when `--frames` is omitted, rejects MSAA sweeps because the shifted
+  diagnostic fill path is non-MSAA, logs each `right_shift_x`, and draws the
+  active shift value in the headset. A labeled sweep from `-320` to `0` in
+  32-pixel steps showed best alignment at `right_shift_x=-160`; a fixed
+  `--right-shift-x -160` confirmation pass looked good on AVP. Treat `-160 px`
+  at the current `1280x720` per-eye target as the measured diagnostic correction.
+  Next step: convert that content-space measurement into the real geometry fix,
+  likely by testing right-eye packing/crop/projection placement, rather than
+  baking a debug content shift into app frames.
+- Shim-side `ALVR_SHIM_INNER_CROP_PX=160` was then tested with unshifted mono
+  alignment-grid content. The AVP view aligned, which confirms the measured
+  correction can be applied at the packing layer instead of shifting app
+  content. The first pass included probe `--bounds`, so the shim applied
+  submitted bounds first (`crop=160,0 960x720`) and then the inner crop,
+  publishing `1600x720`; the headset also showed a weird wireframe/background
+  artifact. A sterile no-bounds rerun published the cleaner expected shape,
+  `2240x720` from `1280x720` source eyes with `inner_crop=160`. Treat the
+  bounded pass as evidence that packing can correct alignment but that bounds
+  interaction needs separate handling; do not judge production visual quality
+  from the bounded diagnostic artifact.
+- Controlled 3D scene testing then replaced Tutorial as the active visual
+  driver. Tutorial was useful only as a one-time transfer check for real Unity
+  `Submit` frames; it remained misaligned and is not the right geometry tuning
+  target. The app-loop `--stereo-scene` probe showed real depth with
+  `scene_ipd_scale=0.5`, but remained slightly misaligned at `inner_crop=160`.
+  Labeled 3D passes showed `inner_crop=192` was better than `160`, and
+  `inner_crop=224` aligned the center line while the boxes still felt odd at
+  `scene_ipd_scale=0.5`. Reducing to `scene_ipd_scale=0.25` with
+  `inner_crop=224` felt better. Important limit: this probe renders a canned
+  stereo scene and does not use live HMD pose to re-render as the head moves, so
+  the content is effectively head-locked. It can tune stereo packing/depth
+  direction, but it cannot validate final world-locked VR comfort. Next geometry
+  work should make the 3D probe pose-aware or use a true world-locked OpenVR app
+  before treating real-game comfort as proven.
+- The active follow-up is now documented in
+  `docs/probes/003-real-openvr-world-locked-geometry.md`: return to real or
+  near-real Windows/OpenVR world-locked 3D content, starting with Freedom
+  Locomotion VR and using `ALVR_SHIM_INNER_CROP_PX=224` as the current packing
+  hypothesis. SteamVR Tutorial should stay parked unless there is a concrete way
+  to progress through its 2D intro into a real 3D scene.
+- Before more CrossOver visual interpretation, capture a known-good real Windows
+  baseline using `docs/probes/004-windows-reference-vr-baseline.md`. The baseline
+  should identify the target app's first reliable world-locked 3D scene, any
+  required startup/menu/controller steps, and any non-invasive OpenVR render
+  facts available from the Windows runtime. Use that reference to decide what
+  CrossOver/AVP output should look like before asking for more headset checks.
 
 Known first-prototype limits:
 
