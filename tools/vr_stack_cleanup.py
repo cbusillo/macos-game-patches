@@ -38,20 +38,50 @@ WINE_CROSSOVER_PROCESS_NAMES = {
 
 WINE_VR_COMMAND_PATTERNS = (
     "C:\\ALVR\\",
+    "C:\\Program Files\\Bonjour\\mDNSResponder.exe",
+    "\\Bonjour\\mDNSResponder.exe",
     "\\ALVR Dashboard.exe",
     "\\ALVR Launcher.exe",
     "\\alvr_dashboard.exe",
     "\\alvr_launcher.exe",
+    "\\CrashReportClient.exe",
+    "\\UnityCrashHandler64.exe",
+    "\\alvr-probes\\openvr_app_loop_probe.exe",
+    "\\alvr-probes\\d3d11_shm_writer_probe.exe",
+    "\\alvr-probes\\steamvr_tutorial.exe",
     "\\driver_alvr_server.dll",
     "\\SteamVR\\bin\\win64\\vrserver.exe",
     "\\SteamVR\\bin\\win64\\vrstartup.exe",
     "\\SteamVR\\bin\\win64\\vrmonitor.exe",
     "\\SteamVR\\bin\\win64\\vrcompositor.exe",
     "\\SteamVR\\bin\\vrwebhelper\\win64\\vrwebhelper.exe",
+    "\\steamapps\\common\\Freedom Locomotion VR\\FreedomLocomotion.exe",
+    "\\steamapps\\common\\Freedom Locomotion VR\\FreedomLocomotion\\Binaries\\Win64\\FreedomLocomotion-Win64-Shipping.exe",
     "\\steamapps\\common\\The Lab\\RobotRepair\\bin\\win64\\vr.exe",
     "\\The Lab\\RobotRepair\\bin\\win64\\vr.exe",
     "\\RobotRepair\\bin\\win64\\vr.exe",
     "\\steamapps\\common\\Freedom Locomotion VR\\",
+)
+
+WINDOWS_EXECUTABLE_SUFFIXES = tuple(
+    pattern.lower()
+    for pattern in WINE_VR_COMMAND_PATTERNS
+    if pattern.lower().endswith(".exe")
+)
+
+WINDOWS_EXECUTABLE_NAMES = {
+    os.path.basename(pattern.replace("\\", "/")).lower()
+    for pattern in WINDOWS_EXECUTABLE_SUFFIXES
+}
+
+WINE_CROSSOVER_COMMAND_CONTEXTS = (
+    "c:\\",
+    "z:\\",
+    "\\\\",
+    "drive_c\\",
+    ".cxoffice",
+    "crossover",
+    "wine",
 )
 
 NATIVE_STEAM_PATTERNS = (
@@ -142,9 +172,33 @@ def list_processes() -> tuple[list[ProcessMatch], str | None]:
 def command_matches(process: ProcessMatch, include_wine_crossover: bool, sterile_native_steam: bool) -> bool:
     name = process.name
     lowered_command = process.command.lower()
+    normalized_command = lowered_command.replace("/", "\\")
     if name in PROCESS_NAMES:
         return True
-    if any(pattern.lower() in lowered_command for pattern in WINE_VR_COMMAND_PATTERNS):
+    command_starts_with_windows_path = (
+        process.command.startswith("C:\\")
+        or process.command.startswith("\\\\")
+    )
+    wine_process_with_windows_arg_path = name in WINE_CROSSOVER_PROCESS_NAMES and (
+        " c:\\" in lowered_command
+        or " \\\\" in lowered_command
+    )
+    wine_process_with_known_windows_executable = name in WINE_CROSSOVER_PROCESS_NAMES and any(
+        lowered_command.endswith(executable) or f"{executable} " in lowered_command
+        for executable in WINDOWS_EXECUTABLE_SUFFIXES
+    )
+    direct_windows_helper = (
+        name.lower() in WINDOWS_EXECUTABLE_NAMES
+        and any(context in normalized_command for context in WINE_CROSSOVER_COMMAND_CONTEXTS)
+    )
+    if (
+        command_starts_with_windows_path
+        or wine_process_with_windows_arg_path
+        or wine_process_with_known_windows_executable
+        or direct_windows_helper
+    ) and any(
+        pattern.lower() in normalized_command for pattern in WINE_VR_COMMAND_PATTERNS
+    ):
         return True
     if include_wine_crossover and name in WINE_CROSSOVER_PROCESS_NAMES:
         return True

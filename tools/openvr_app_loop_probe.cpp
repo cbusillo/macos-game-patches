@@ -53,6 +53,13 @@ struct Options {
     EyePatternMode eye_mode = EyePatternMode::Stereo;
     int right_shift_x = 0;
     int right_shift_y = 0;
+    bool shift_sweep = false;
+    int sweep_start_x = -512;
+    int sweep_end_x = 512;
+    int sweep_step_x = 128;
+    int sweep_hold_frames = 120;
+    bool show_label = false;
+    int label_value = 0;
 };
 
 bool parse_uint(const char* text, UINT* out) {
@@ -85,6 +92,10 @@ bool parse_shift_int(const char* text, int* out) {
     return true;
 }
 
+bool parse_nonzero_shift_int(const char* text, int* out) {
+    return parse_shift_int(text, out) && *out != 0;
+}
+
 bool parse_float_range(const char* text, float min_value, float max_value, float* out) {
     char* end = nullptr;
     float value = std::strtof(text, &end);
@@ -101,6 +112,7 @@ bool is_supported_sample_count(UINT sample_count) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
+    bool frames_explicit = false;
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         auto next = [&]() -> const char* {
@@ -126,6 +138,7 @@ Options parse_args(int argc, char** argv) {
                 std::fprintf(stderr, "invalid --frames\n");
                 std::exit(2);
             }
+            frames_explicit = true;
         } else if (std::strcmp(arg, "--fps") == 0) {
             if (!parse_int(next(), &options.fps)) {
                 std::fprintf(stderr, "invalid --fps\n");
@@ -171,6 +184,36 @@ Options parse_args(int argc, char** argv) {
                 std::fprintf(stderr, "invalid --right-shift-y; expected -1024..1024\n");
                 std::exit(2);
             }
+        } else if (std::strcmp(arg, "--shift-sweep") == 0) {
+            options.shift_sweep = true;
+            options.alignment_grid = true;
+            options.static_pattern = true;
+        } else if (std::strcmp(arg, "--sweep-start-x") == 0) {
+            if (!parse_shift_int(next(), &options.sweep_start_x)) {
+                std::fprintf(stderr, "invalid --sweep-start-x; expected -1024..1024\n");
+                std::exit(2);
+            }
+        } else if (std::strcmp(arg, "--sweep-end-x") == 0) {
+            if (!parse_shift_int(next(), &options.sweep_end_x)) {
+                std::fprintf(stderr, "invalid --sweep-end-x; expected -1024..1024\n");
+                std::exit(2);
+            }
+        } else if (std::strcmp(arg, "--sweep-step-x") == 0) {
+            if (!parse_nonzero_shift_int(next(), &options.sweep_step_x)) {
+                std::fprintf(stderr, "invalid --sweep-step-x; expected nonzero -1024..1024\n");
+                std::exit(2);
+            }
+        } else if (std::strcmp(arg, "--sweep-hold-frames") == 0) {
+            if (!parse_int(next(), &options.sweep_hold_frames)) {
+                std::fprintf(stderr, "invalid --sweep-hold-frames\n");
+                std::exit(2);
+            }
+        } else if (std::strcmp(arg, "--label-value") == 0) {
+            if (!parse_shift_int(next(), &options.label_value)) {
+                std::fprintf(stderr, "invalid --label-value; expected -1024..1024\n");
+                std::exit(2);
+            }
+            options.show_label = true;
         } else if (std::strcmp(arg, "--no-properties") == 0) {
             options.query_properties = false;
         } else if (std::strcmp(arg, "--help") == 0) {
@@ -179,7 +222,9 @@ Options parse_args(int argc, char** argv) {
                 "[--fps N] [--msaa 1|2|4|8] [--submit-msaa] [--bounds] [--rgba] "
                 "[--static-pattern] [--alignment-grid] [--stereo-scene] [--scene-ipd-scale N] "
                 "[--mono] [--left-only] [--right-only] [--right-shift-x N] "
-                "[--right-shift-y N] [--no-properties]\n"
+                "[--right-shift-y N] [--shift-sweep] [--sweep-start-x N] "
+                "[--sweep-end-x N] [--sweep-step-x N] [--sweep-hold-frames N] "
+                "[--label-value N] [--no-properties]\n"
             );
             std::exit(0);
         } else {
@@ -194,6 +239,32 @@ Options parse_args(int argc, char** argv) {
     if (options.stereo_scene && options.alignment_grid) {
         std::fprintf(stderr, "--stereo-scene cannot be combined with --alignment-grid\n");
         std::exit(2);
+    }
+    if (options.shift_sweep && options.stereo_scene) {
+        std::fprintf(stderr, "--shift-sweep cannot be combined with --stereo-scene\n");
+        std::exit(2);
+    }
+    if (options.shift_sweep && options.sample_count != 1) {
+        std::fprintf(stderr, "--shift-sweep requires --msaa 1 because shifted diagnostic fills use non-MSAA textures\n");
+        std::exit(2);
+    }
+    if (options.shift_sweep) {
+        bool ascending = options.sweep_start_x <= options.sweep_end_x;
+        if ((ascending && options.sweep_step_x < 0) || (!ascending && options.sweep_step_x > 0)) {
+            options.sweep_step_x = -options.sweep_step_x;
+        }
+        if (!frames_explicit) {
+            int segment_count = 1;
+            int shift = options.sweep_start_x;
+            while (shift != options.sweep_end_x && segment_count < 100000) {
+                int next_shift = shift + options.sweep_step_x;
+                shift = options.sweep_step_x > 0
+                    ? std::min(next_shift, options.sweep_end_x)
+                    : std::max(next_shift, options.sweep_end_x);
+                ++segment_count;
+            }
+            options.frames = std::max(options.frames, segment_count * options.sweep_hold_frames);
+        }
     }
     return options;
 }
@@ -210,6 +281,28 @@ const char* eye_mode_name(EyePatternMode mode) {
         return "right-only";
     }
     return "unknown";
+}
+
+int sweep_shift_x_for_frame(const Options& options, int frame) {
+    if (!options.shift_sweep) {
+        return options.right_shift_x;
+    }
+
+    int segment = frame / std::max(1, options.sweep_hold_frames);
+    int shift = options.sweep_start_x + segment * options.sweep_step_x;
+    if (options.sweep_step_x > 0) {
+        return std::min(shift, options.sweep_end_x);
+    }
+    return std::max(shift, options.sweep_end_x);
+}
+
+bool sweep_finished(const Options& options, int frame) {
+    if (!options.shift_sweep) {
+        return false;
+    }
+    int shift = sweep_shift_x_for_frame(options, frame);
+    return (options.sweep_step_x > 0 && shift >= options.sweep_end_x)
+        || (options.sweep_step_x < 0 && shift <= options.sweep_end_x);
 }
 
 void print_hr(const char* label, HRESULT hr) {
@@ -437,9 +530,11 @@ struct PatternFillContext {
     int frame;
     int shift_x;
     int shift_y;
+    int label_value;
     bool rgba;
     bool static_pattern;
     bool alignment_grid;
+    bool show_shift_label;
     bool stereo_scene;
     float scene_ipd_scale;
 };
@@ -563,11 +658,15 @@ void draw_signed_number(
     int magnitude = std::abs(value);
     draw_plus_or_minus(mapped, desc, x, y, plus, scale, color, rgba);
     x += 6 * scale;
-    if (magnitude >= 10) {
-        draw_segment_digit(mapped, desc, x, y, (magnitude / 10) % 10, scale, color, rgba);
-        x += 6 * scale;
+    int divisor = 1;
+    while (magnitude / divisor >= 10) {
+        divisor *= 10;
     }
-    draw_segment_digit(mapped, desc, x, y, magnitude % 10, scale, color, rgba);
+    while (divisor > 0) {
+        draw_segment_digit(mapped, desc, x, y, (magnitude / divisor) % 10, scale, color, rgba);
+        x += 6 * scale;
+        divisor /= 10;
+    }
 }
 
 void draw_letter_l(
@@ -775,6 +874,13 @@ void fill_stereo_scene_mapped(
     } else {
         draw_letter_r(mapped, desc, 28, 24, 8, 230, fill->rgba);
     }
+    if (fill->show_shift_label) {
+        int label_x = std::max(18, static_cast<int>(width / 2) - 95);
+        int label_y = 34;
+        draw_rect(mapped, desc, label_x - 18, label_y - 18, 230, 88, 8, fill->rgba);
+        draw_rect(mapped, desc, label_x - 14, label_y - 14, 222, 80, 42, fill->rgba);
+        draw_signed_number(mapped, desc, label_x, label_y, fill->label_value, 8, 255, fill->rgba);
+    }
 }
 
 void fill_alignment_grid_mapped(
@@ -855,6 +961,13 @@ void fill_alignment_grid_mapped(
         draw_letter_l(mapped, desc, 28, 24, 8, 220, fill->rgba);
     } else {
         draw_letter_r(mapped, desc, 28, 24, 8, 220, fill->rgba);
+    }
+    if (fill->show_shift_label) {
+        int label_x = std::max(18, center_x - 95);
+        int label_y = std::max(18, center_y - 150);
+        draw_rect(mapped, desc, label_x - 18, label_y - 18, 230, 88, 8, fill->rgba);
+        draw_rect(mapped, desc, label_x - 14, label_y - 14, 222, 80, 42, fill->rgba);
+        draw_signed_number(mapped, desc, label_x, label_y, fill->label_value, 8, 255, fill->rgba);
     }
 }
 
@@ -970,8 +1083,10 @@ bool fill_eye_pattern(
     int frame,
     int shift_x,
     int shift_y,
+    int label_value,
     bool static_pattern,
     bool alignment_grid,
+    bool show_shift_label,
     bool stereo_scene,
     float scene_ipd_scale
 ) {
@@ -987,9 +1102,11 @@ bool fill_eye_pattern(
         frame,
         shift_x,
         shift_y,
+        label_value,
         desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM,
         static_pattern,
         alignment_grid,
+        show_shift_label,
         stereo_scene,
         scene_ipd_scale,
     };
@@ -1091,7 +1208,7 @@ int main(int argc, char** argv) {
 
     query_system(system, &options);
     std::printf(
-        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d alignment_grid=%d stereo_scene=%d scene_ipd_scale=%.2f eye_mode=%s right_shift=%d,%d\n",
+        "OpenVR app loop width=%u height=%u frames=%d fps=%d format=%s samples=%u submit_msaa=%d bounds=%d static_pattern=%d alignment_grid=%d stereo_scene=%d scene_ipd_scale=%.2f eye_mode=%s right_shift=%d,%d shift_sweep=%d sweep=%d..%d step=%d hold=%d\n",
         options.width,
         options.height,
         options.frames,
@@ -1106,7 +1223,12 @@ int main(int argc, char** argv) {
         static_cast<double>(options.scene_ipd_scale),
         eye_mode_name(options.eye_mode),
         options.right_shift_x,
-        options.right_shift_y
+        options.right_shift_y,
+        options.shift_sweep ? 1 : 0,
+        options.sweep_start_x,
+        options.sweep_end_x,
+        options.sweep_step_x,
+        options.sweep_hold_frames
     );
     if (options.sample_count > 1 && options.submit_msaa) {
         std::fprintf(stderr, "warning: --submit-msaa intentionally submits raw MSAA textures; real runtimes may reject this boundary case\n");
@@ -1157,7 +1279,7 @@ int main(int argc, char** argv) {
     }
 
     vr::Texture_t left_texture = { left_submit.Get(), vr::TextureType_DirectX, vr::ColorSpace_Auto };
-    bool shifted_right_eye = options.right_shift_x != 0 || options.right_shift_y != 0;
+    bool shifted_right_eye = options.shift_sweep || options.right_shift_x != 0 || options.right_shift_y != 0;
     vr::Texture_t right_texture = {
         (options.eye_mode == EyePatternMode::Mono && !shifted_right_eye ? left_submit.Get() : right_submit.Get()),
         vr::TextureType_DirectX,
@@ -1170,8 +1292,16 @@ int main(int argc, char** argv) {
     vr::TrackedDevicePose_t render_poses[vr::k_unMaxTrackedDeviceCount] = {};
     vr::TrackedDevicePose_t game_poses[vr::k_unMaxTrackedDeviceCount] = {};
     bool unexpected_error = false;
+    int last_logged_shift_x = 1000000;
     for (int frame = 0; frame < options.frames; ++frame) {
         auto target_time = std::chrono::steady_clock::now() + frame_interval;
+        int active_right_shift_x = sweep_shift_x_for_frame(options, frame);
+        int active_label_value = options.show_label ? options.label_value : active_right_shift_x;
+        bool show_label = options.show_label || options.shift_sweep;
+        if (active_right_shift_x != last_logged_shift_x) {
+            std::printf("alignment_sweep frame=%d right_shift_x=%d\n", frame, active_right_shift_x);
+            last_logged_shift_x = active_right_shift_x;
+        }
 
         vr::EVRCompositorError pose_result = compositor->WaitGetPoses(
             render_poses,
@@ -1190,8 +1320,10 @@ int main(int argc, char** argv) {
                 frame,
                 0,
                 0,
+                active_label_value,
                 options.static_pattern,
                 options.alignment_grid,
+                show_label,
                 options.stereo_scene,
                 options.scene_ipd_scale
             );
@@ -1205,10 +1337,12 @@ int main(int argc, char** argv) {
                     right.Get(),
                     vr::Eye_Right,
                     frame,
-                    options.right_shift_x,
+                    active_right_shift_x,
                     options.right_shift_y,
+                    active_label_value,
                     options.static_pattern,
                     options.alignment_grid,
+                    show_label,
                     options.stereo_scene,
                     options.scene_ipd_scale
                 );
@@ -1219,10 +1353,12 @@ int main(int argc, char** argv) {
                     right.Get(),
                     options.eye_mode == EyePatternMode::Mono ? vr::Eye_Left : vr::Eye_Right,
                     frame,
-                    options.right_shift_x,
+                    active_right_shift_x,
                     options.right_shift_y,
+                    active_label_value,
                     options.static_pattern,
                     options.alignment_grid,
+                    show_label,
                     options.stereo_scene,
                     options.scene_ipd_scale
                 );
@@ -1247,15 +1383,20 @@ int main(int argc, char** argv) {
 
         if (frame == 0 || frame % 30 == 0) {
             std::printf(
-                "frame=%d pose=%d hmd_valid=%d left_submit=%d right_submit=%d\n",
+                "frame=%d pose=%d hmd_valid=%d left_submit=%d right_submit=%d right_shift_x=%d\n",
                 frame,
                 pose_result,
                 render_poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid ? 1 : 0,
                 left_result,
-                right_result
+                right_result,
+                active_right_shift_x
             );
         }
         std::this_thread::sleep_until(target_time);
+        if (options.shift_sweep && sweep_finished(options, frame)
+            && ((frame + 1) % options.sweep_hold_frames == 0)) {
+            break;
+        }
     }
 
     std::printf("done\n");
