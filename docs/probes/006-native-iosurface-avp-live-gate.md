@@ -144,14 +144,75 @@ Confirm that a moving synthetic pattern is visible in both eyes and remains
 stable long enough to classify decoder/display success. Route native surface
 facts to #39 and human observations to #41.
 
+### 2026-07-10 Physical AVP Eyes-On Result
+
+Run: the same release `iosurface-synthetic` bridge configuration and installed
+physical AVP client used by the no-eyes gate.
+
+Question: Does the already-proven encoded stream produce a visible binocular
+image, and is the native stereo presentation aligned well enough to proceed to
+real submitted frames?
+
+Artifacts captured locally in the ignored directory
+`.code/probes/006-native-iosurface-avp-eyes-on-20260710/`:
+
+- `client-console.log`
+- `bridge-console.log`
+- `bridge-session-log.txt`
+
+Verified:
+
+- The client entered `Streaming` at `2144x2048` per eye with a `90.0` Hz
+  refresh hint.
+- The bridge continued 90-frame cadence windows with zero deadline misses and
+  continuously queued and sent video packets during the observation.
+- Human-observed: the synthetic pattern was visible in the headset.
+- Human-observed: the left/right presentation was not aligned.
+- While the headset was worn, the bridge began logging asymmetric per-eye FOV
+  values and nonzero eye offsets instead of the initial zero/default view
+  values.
+
+Failed:
+
+- Stereo alignment. The native source draws the same centered calibration
+  features in both packed eye halves, but those features did not fuse into an
+  aligned binocular image.
+
+Unknown:
+
+- The direction and magnitude of the misalignment.
+- Whether the mismatch originates in packed content coordinates, projection
+  metadata, eye transforms, or client-side presentation.
+- Live HMD motion correctness. The client console continued to print
+  `Sending fake tracking...`, so the view-parameter change is not sufficient
+  evidence of valid head tracking or world locking.
+
+Verdict: `display passed / stereo alignment failed`. VideoToolbox encode,
+transport, decode, and physical display are green. The next visual work must be
+a bounded stereo-contract probe, not arbitrary comfort tuning and not a claim
+that the synthetic surface is product-ready.
+
+Do not repeat:
+
+- Do not use a single unlabeled image shift to hide whether the error is content
+  packing or projection metadata.
+- Do not interpret nonzero eye offsets as proof of live HMD tracking while the
+  client still reports fake tracking.
+
+Next action: add eye labels and a finite one-variable calibration sweep that
+separates source-content shift from projection/FOV shift. Use one short eyes-on
+run to classify the error before changing the real-game path.
+
 ## Verdict
 
-`alive`: the native IOSurface/VideoToolbox/ALVR path reaches the physical AVP at
-headset-rate cadence without CrossOver. Visual correctness remains deliberately
-unclaimed until an eyes-on run is recorded.
+`alive with stereo blocker`: the native IOSurface/VideoToolbox/ALVR path reaches
+the physical AVP at headset-rate cadence without CrossOver, and the encoded
+image is visible. The binocular presentation is not aligned, so stereo geometry
+remains a blocker.
 
 ## Next Action
 
-Use the same commands for a bounded eyes-on display check, then freeze this
-synthetic mode as a native encode-surface contract probe and move production
-work toward real GPU texture handoff in issue #40.
+Freeze the encode/transport portion of this synthetic mode as a passing native
+surface contract. Add a labeled, one-variable stereo calibration probe under
+issue #41, then use its result to constrain real GPU texture handoff work in
+issue #40.
