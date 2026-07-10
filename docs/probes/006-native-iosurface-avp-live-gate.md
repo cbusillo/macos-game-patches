@@ -203,6 +203,61 @@ Next action: add eye labels and a finite one-variable calibration sweep that
 separates source-content shift from projection/FOV shift. Use one short eyes-on
 run to classify the error before changing the real-game path.
 
+### 2026-07-10 Clean Upstream Forward-Port Gate
+
+Run: `cbusillo/ALVR@57a92083` on `feature/native-surface-contract`, based on
+upstream `master` `e9b8e3ac`. This is the add-only current-upstream replacement
+for the historical diagnostic branch, not a wholesale cherry-pick.
+
+Question: Does the isolated IOSurface lease, VideoToolbox, metadata, and current
+ALVR transport contract still reach the physical AVP after removing the old
+shared-memory/server-core branch history?
+
+Artifacts were captured locally in ignored `.code/probes/007-*` directories for
+the bounded failure and final-pass runs.
+
+Device-found failures fixed before the final pass:
+
+- The existing dedicated session initially negotiated H.264 while the contract
+  emits HEVC. Startup now preserves the dedicated session and sets its preferred
+  codec to HEVC before `ServerCoreContext` loads it.
+- A fresh or materially changed session used the first client handshake to
+  persist current-upstream restart settings. With no ALVR dashboard process,
+  rerunning the same bounded command is required and documented.
+- Raw ALVR tracking poll timestamps used a server-uptime clock while video used
+  a run-relative clock. Switching sources caused an intentional monotonicity
+  failure. Tracking timestamps are now normalized into the probe-local clock,
+  while reuse of one pose preserves one pose timestamp.
+- Linux and Windows CI exposed macOS-only queue internals as dead code. Those
+  internals are now target/test gated.
+- Review exposed silent pre-connection transport drops. Cadence and summary logs
+  now report ALVR-sent frames separately from VideoToolbox-encoded frames, and
+  connect mode requires a real client plus at least one sent frame.
+
+Final verified run:
+
+- The physical AVP client entered `Streaming` at `2144x2048` per eye with a
+  `90.0` Hz refresh hint.
+- HEVC remained the negotiated codec and the client console contained no fatal
+  decoder, panic, timeout, or crash message during the bounded run.
+- The probe submitted and encoded `900/900` frames, handed `783` post-connection
+  frames to ALVR transport, and achieved `90.007` FPS.
+- All six IOSurface-backed leases were available at exit with `900/900`
+  acquire/recycle accounting.
+- Two startup deadline misses were recorded rather than hidden; the maximum was
+  `19.241 ms`, followed by zero-miss steady-state cadence windows.
+- The summary explicitly reported `alvr_connected=true`.
+
+Verdict: `clean forward port passed`. The current-upstream native surface
+ownership, encode, metadata, and physical-client transport contract is green.
+This does not change the eyes-on result: the synthetic binocular presentation
+remains misaligned, and no real Metal/CrossOver producer or fence import exists
+yet.
+
+Next action: review and merge the isolated ALVR contract, then build the labeled
+one-variable stereo calibration probe before starting real GPU producer/fence
+handoff work.
+
 ## Verdict
 
 `alive with stereo blocker`: the native IOSurface/VideoToolbox/ALVR path reaches
