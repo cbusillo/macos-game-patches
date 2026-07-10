@@ -10,10 +10,12 @@
     "actionlint": ".github/actionlint.yaml",
     "environment": "docs/environment.md",
     "sourceWorkspace": "docs/source-workspace.md",
-    "activeOptionBPlan": "docs/option-b-v21-native-bridge-plan.md",
+    "activeAlvrPlan": "GitHub issue #36: Plan: GPU-resident Mac ALVR bridge",
+    "historicalOptionBPlan": "docs/option-b-v21-native-bridge-plan.md",
     "probeLedger": "docs/probes/README.md",
     "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
     "avpRuntimeGate": "docs/probes/002-alvr-v21-avp-runtime-gate.md",
+    "openVrSubmittedFrameContract": "docs/probes/005-openvr-submitted-frame-contract.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
   },
   "qualityGate": {
