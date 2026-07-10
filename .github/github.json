@@ -14,6 +14,7 @@
     "probeLedger": "docs/probes/README.md",
     "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
     "avpRuntimeGate": "docs/probes/002-alvr-v21-avp-runtime-gate.md",
+    "nativeSurfaceAvpGate": "docs/probes/006-native-iosurface-avp-live-gate.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
   },
   "qualityGate": {
@@ -50,20 +51,25 @@
   "relatedRepos": [
     {
       "name": "alvr-visionos",
-      "repo": "alvr-org/alvr-visionos",
+      "repo": "cbusillo/alvr-visionos",
+      "upstreamRepo": "alvr-org/alvr-visionos",
       "localPath": "../alvr-visionos",
-      "baselineCommit": "301b9285073949033727baab2d556fe9e8620612",
-      "purpose": "Apple Vision Pro client source checkout for v21 compatibility probes"
+      "baselineCommit": "3a00da3fd572262e991b5905665f50f451464f0b",
+      "purpose": "Apple Vision Pro v21 client baseline with the ALVR submodule pinned to the Apple mDNS compatibility branch"
     },
     {
       "name": "ALVR",
-      "repo": "alvr-org/ALVR",
+      "repo": "cbusillo/ALVR",
+      "upstreamRepo": "alvr-org/ALVR",
       "localPath": "../alvr",
-      "baselineCommit": "d9f2b19d2b98b9d70411439fef83300c84ed171d",
-      "purpose": "Standalone streamer/server source checkout and v21 client-core reference"
+      "baselineCommit": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819",
+      "upstreamBaselineCommit": "e9b8e3ac62e62ad8007a7b92fb08ec33dea045ba",
+      "purpose": "Tested macOS bridge diagnostic checkpoint plus clean upstream baseline for the native surface forward-port"
     }
   ],
-  "validatedThrough": [],
+  "validatedThrough": [
+    "2026-07-10 native IOSurface physical AVP no-eyes gate"
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,

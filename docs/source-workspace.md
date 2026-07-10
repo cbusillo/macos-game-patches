@@ -20,23 +20,35 @@ tree outside the visionOS client checkout.
 
 ## Current Baseline
 
-- `alvr-org/alvr-visionos`: `301b9285073949033727baab2d556fe9e8620612`
-- `alvr-org/ALVR` for v21 client-core work:
-  `d9f2b19d2b98b9d70411439fef83300c84ed171d`
+- `cbusillo/alvr-visionos` active AVP client:
+  `3a00da3fd572262e991b5905665f50f451464f0b`
+- visionOS checkout's `ALVR` submodule:
+  `109643c88e402b36766020b8f6a99ea48aa8d55f`
+- `cbusillo/ALVR` tested diagnostic checkpoint:
+  `4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819`
+- `alvr-org/ALVR` clean forward-port baseline:
+  `e9b8e3ac62e62ad8007a7b92fb08ec33dea045ba`
 - ALVR version: `21.0.0-dev12`
 
 ## Setup
 
 ```bash
 cd ~/Developer
-git clone https://github.com/alvr-org/alvr-visionos.git alvr-visionos
-git clone https://github.com/alvr-org/ALVR.git alvr
+git clone https://github.com/cbusillo/alvr-visionos.git alvr-visionos
+git clone https://github.com/cbusillo/ALVR.git alvr
 
 cd ~/Developer/alvr-visionos
 git submodule update --init ALVR
-git -C ALVR fetch --tags origin master
-git -C ALVR checkout d9f2b19d2b98b9d70411439fef83300c84ed171d
+git -C ALVR remote add fork \
+  https://github.com/cbusillo/ALVR.git 2>/dev/null || true
+git -C ALVR fetch fork visionos-client-mdns-c5d8bd26
+git -C ALVR checkout 109643c88e402b36766020b8f6a99ea48aa8d55f
 git -C ALVR submodule update --init --recursive
+
+cd ~/Developer/alvr
+git remote add upstream https://github.com/alvr-org/ALVR.git 2>/dev/null || true
+git fetch origin diagnostic/bgra-nv12-probe
+git fetch upstream master
 ```
 
 Apply patch artifacts from this repo to the sibling source checkout:

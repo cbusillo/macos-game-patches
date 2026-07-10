@@ -15,3 +15,4 @@ Use this shape:
 
 - [001 - ALVR v21 visionOS compatibility](001-alvr-v21-visionos-compatibility.md)
 - [002 - ALVR v21 AVP runtime gate](002-alvr-v21-avp-runtime-gate.md)
+- [006 - Native IOSurface AVP live gate](006-native-iosurface-avp-live-gate.md)
