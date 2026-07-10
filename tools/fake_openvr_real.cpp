@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace {
@@ -115,6 +116,15 @@ LONG g_fake_event_index = 0;
 LONG g_logged_compute_distortion = 0;
 LONG g_logged_legacy_compute_distortion = 0;
 LONG g_logged_poll_next_event_empty = 0;
+LONG g_logged_wait_get_poses_sleep = 0;
+std::atomic<uint32_t> g_tracking_space_origin { static_cast<uint32_t>(vr::TrackingUniverseStanding) };
+std::mutex g_shared_memory_mutex;
+std::mutex g_frame_pose_publish_mutex;
+HANDLE g_shared_memory_file = INVALID_HANDLE_VALUE;
+HANDLE g_shared_memory_mapping = nullptr;
+AlvrSharedMemory* g_shared_memory = nullptr;
+
+void log_line(const char* text);
 
 enum class FakeActionKind : uint8_t {
     Unknown,
@@ -154,6 +164,54 @@ uint64_t fake_frame_counter() {
     return g_fake_start_counter + static_cast<uint64_t>(elapsed * kFakeRefreshHz);
 }
 
+void log_matrix34(const char* label, const vr::HmdMatrix34_t& matrix) {
+    char message[512] = {};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "%s=[%.6f %.6f %.6f %.6f; %.6f %.6f %.6f %.6f; %.6f %.6f %.6f %.6f]",
+        label,
+        matrix.m[0][0],
+        matrix.m[0][1],
+        matrix.m[0][2],
+        matrix.m[0][3],
+        matrix.m[1][0],
+        matrix.m[1][1],
+        matrix.m[1][2],
+        matrix.m[1][3],
+        matrix.m[2][0],
+        matrix.m[2][1],
+        matrix.m[2][2],
+        matrix.m[2][3]
+    );
+    log_line(message);
+}
+
+void log_projection_raw_values(
+    const char* label,
+    vr::EVREye eye,
+    float left,
+    float right,
+    float top,
+    float bottom,
+    bool shared_view
+) {
+    char message[256] = {};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "%s eye=%d source=%s raw=[%.6f %.6f %.6f %.6f]",
+        label,
+        eye,
+        shared_view ? "shared-view" : "fallback",
+        left,
+        right,
+        top,
+        bottom
+    );
+    log_line(message);
+}
+
 bool env_string_equals(const char* name, const char* expected) {
     char value[64] = {};
     DWORD len = GetEnvironmentVariableA(name, value, sizeof(value));
@@ -174,9 +232,27 @@ uint32_t env_u32(const char* name, uint32_t fallback) {
     return static_cast<uint32_t>(parsed);
 }
 
+uint32_t wait_get_poses_sleep_ms() {
+    return env_u32("ALVR_FAKE_WAIT_GET_POSES_SLEEP_MS", static_cast<uint32_t>(1000.0 / kFakeRefreshHz));
+}
+
+uint32_t render_target_dimension(const char* name, uint32_t fallback) {
+    uint32_t value = env_u32(name, fallback);
+    return value >= 320 ? value : fallback;
+}
+
 struct SharedViewConfig {
     float fov[2][4] = {};
     float eye_x_m[2] = {};
+};
+
+struct SharedHmdPose {
+    uint64_t timestamp_ns = 0;
+    float matrix[3][4] = {
+        { 1.0f, 0.0f, 0.0f, 0.0f },
+        { 0.0f, 1.0f, 0.0f, 0.0f },
+        { 0.0f, 0.0f, 1.0f, 0.0f },
+    };
 };
 
 std::string wine_shared_memory_path() {
@@ -187,6 +263,68 @@ std::string wine_shared_memory_path() {
         }
     }
     return path;
+}
+
+void close_shared_memory_locked() {
+    if (g_shared_memory) {
+        UnmapViewOfFile(g_shared_memory);
+        g_shared_memory = nullptr;
+    }
+    if (g_shared_memory_mapping) {
+        CloseHandle(g_shared_memory_mapping);
+        g_shared_memory_mapping = nullptr;
+    }
+    if (g_shared_memory_file != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_shared_memory_file);
+        g_shared_memory_file = INVALID_HANDLE_VALUE;
+    }
+}
+
+void close_shared_memory() {
+    std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
+    close_shared_memory_locked();
+}
+
+AlvrSharedMemory* shared_memory() {
+    std::lock_guard<std::mutex> lock(g_shared_memory_mutex);
+    if (g_shared_memory && g_shared_memory->magic == ALVR_SHM_MAGIC
+        && g_shared_memory->version == ALVR_SHM_VERSION && g_shared_memory->initialized != 0
+        && g_shared_memory->shutdown == 0) {
+        return g_shared_memory;
+    }
+    if (g_shared_memory) {
+        close_shared_memory_locked();
+    }
+
+    std::string path = wine_shared_memory_path();
+    g_shared_memory_file = CreateFileA(
+        path.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (g_shared_memory_file == INVALID_HANDLE_VALUE) {
+        return nullptr;
+    }
+
+    g_shared_memory_mapping =
+        CreateFileMappingA(g_shared_memory_file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+    if (!g_shared_memory_mapping) {
+        close_shared_memory_locked();
+        return nullptr;
+    }
+
+    g_shared_memory = static_cast<AlvrSharedMemory*>(MapViewOfFile(
+        g_shared_memory_mapping, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(AlvrSharedMemory)
+    ));
+    if (!g_shared_memory) {
+        close_shared_memory_locked();
+    }
+
+    return g_shared_memory;
 }
 
 bool valid_fov_angle(float value) {
@@ -240,34 +378,11 @@ bool read_shared_view_config(SharedViewConfig* config) {
         return false;
     }
 
-    std::string path = wine_shared_memory_path();
-    HANDLE file = CreateFileA(
-        path.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr
-    );
-    if (file == INVALID_HANDLE_VALUE) {
+    auto* shm = shared_memory();
+    if (!shm) {
         return false;
     }
 
-    HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!mapping) {
-        CloseHandle(file);
-        return false;
-    }
-
-    void* ptr = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(AlvrSharedMemory));
-    if (!ptr) {
-        CloseHandle(mapping);
-        CloseHandle(file);
-        return false;
-    }
-
-    auto* shm = static_cast<const AlvrSharedMemory*>(ptr);
     bool ok = shm->magic == ALVR_SHM_MAGIC && shm->version == ALVR_SHM_VERSION
         && shm->initialized != 0 && shm->shutdown == 0 && shm->view_config_set != 0
         && bridge_heartbeat_live(shm);
@@ -282,10 +397,121 @@ bool read_shared_view_config(SharedViewConfig* config) {
         ok = valid_shared_view_config(*config);
     }
 
-    UnmapViewOfFile(ptr);
-    CloseHandle(mapping);
-    CloseHandle(file);
     return ok;
+}
+
+bool valid_pose_matrix(const float matrix[3][4]) {
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (!std::isfinite(matrix[row][col]) || std::fabs(matrix[row][col]) > 1000.0f) {
+                return false;
+            }
+        }
+    }
+
+    auto row_len_sq = [&](int row) {
+        return matrix[row][0] * matrix[row][0] + matrix[row][1] * matrix[row][1]
+            + matrix[row][2] * matrix[row][2];
+    };
+    auto row_dot = [&](int a, int b) {
+        return matrix[a][0] * matrix[b][0] + matrix[a][1] * matrix[b][1]
+            + matrix[a][2] * matrix[b][2];
+    };
+
+    return row_len_sq(0) >= 0.5f && row_len_sq(0) <= 1.5f && row_len_sq(1) >= 0.5f
+        && row_len_sq(1) <= 1.5f && row_len_sq(2) >= 0.5f && row_len_sq(2) <= 1.5f
+        && std::fabs(row_dot(0, 1)) <= 0.2f && std::fabs(row_dot(0, 2)) <= 0.2f
+        && std::fabs(row_dot(1, 2)) <= 0.2f;
+}
+
+uint32_t interlocked_load_u32(const volatile uint32_t* value) {
+    static_assert(sizeof(long) == sizeof(uint32_t));
+    return static_cast<uint32_t>(_InterlockedCompareExchange(
+        reinterpret_cast<volatile long*>(const_cast<volatile uint32_t*>(value)), 0, 0
+    ));
+}
+
+bool read_pose_seqlock(
+    const volatile uint32_t* sequence,
+    const uint64_t* timestamp_ns,
+    const float matrix[3][4],
+    SharedHmdPose* pose
+) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        uint32_t before = interlocked_load_u32(sequence);
+        if (before == 0 || (before & 1U) != 0) {
+            continue;
+        }
+
+        uint64_t timestamp = *timestamp_ns;
+        float local_matrix[3][4] = {};
+        std::memcpy(local_matrix, matrix, sizeof(local_matrix));
+
+        uint32_t after = interlocked_load_u32(sequence);
+        if (before != after || (after & 1U) != 0) {
+            continue;
+        }
+        if (!valid_pose_matrix(local_matrix)) {
+            return false;
+        }
+
+        pose->timestamp_ns = timestamp != 0 ? timestamp : 1;
+        std::memcpy(pose->matrix, local_matrix, sizeof(pose->matrix));
+        return true;
+    }
+
+    return false;
+}
+
+bool read_shared_hmd_pose(SharedHmdPose* pose) {
+    if (!pose) {
+        return false;
+    }
+
+    auto* shm = shared_memory();
+    if (!shm) {
+        return false;
+    }
+
+    bool ok = shm->magic == ALVR_SHM_MAGIC && shm->version == ALVR_SHM_VERSION
+        && shm->initialized != 0 && shm->shutdown == 0 && shm->hmd_pose_set != 0
+        && bridge_heartbeat_live(shm);
+    if (ok) {
+        ok = read_pose_seqlock(
+            &shm->hmd_pose_sequence, &shm->hmd_pose_timestamp_ns, shm->hmd_pose, pose
+        );
+    }
+
+    return ok;
+}
+
+uint64_t publish_frame_pose_snapshot(const SharedHmdPose* pose) {
+    if (!pose || pose->timestamp_ns == 0 || !valid_pose_matrix(pose->matrix)) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> writer_lock(g_frame_pose_publish_mutex);
+    auto* shm = shared_memory();
+    if (!shm) {
+        return 0;
+    }
+
+    uint64_t generation = 0;
+    if (shm->magic == ALVR_SHM_MAGIC && shm->version == ALVR_SHM_VERSION
+        && shm->initialized != 0 && shm->shutdown == 0 && bridge_heartbeat_live(shm)) {
+        auto* sequence_address = reinterpret_cast<volatile long*>(&shm->frame_pose_sequence);
+        uint32_t sequence = static_cast<uint32_t>(
+            _InterlockedCompareExchange(sequence_address, 0, 0)
+        );
+        uint32_t write_sequence = ((sequence & 1U) == 0) ? sequence + 1U : sequence + 2U;
+        _InterlockedExchange(sequence_address, static_cast<long>(write_sequence));
+        std::memcpy(shm->frame_pose, pose->matrix, sizeof(shm->frame_pose));
+        shm->frame_pose_timestamp_ns = pose->timestamp_ns;
+        _InterlockedExchange(sequence_address, static_cast<long>(write_sequence + 1U));
+        generation = (static_cast<uint64_t>(write_sequence) + 1U) / 2U;
+    }
+
+    return generation;
 }
 
 bool shared_eye_raw(vr::EVREye eye, float* left, float* right, float* top, float* bottom) {
@@ -307,6 +533,7 @@ bool shared_eye_raw(vr::EVREye eye, float* left, float* right, float* top, float
     if (bottom) {
         *bottom = std::tan(config.fov[eye_index][2]);
     }
+
     return true;
 }
 
@@ -504,28 +731,43 @@ bool is_fake_controller(vr::TrackedDeviceIndex_t device);
 bool is_fake_tracked_device(vr::TrackedDeviceIndex_t device);
 vr::ETrackedControllerRole fake_controller_role(vr::TrackedDeviceIndex_t device);
 
-void fill_pose(vr::TrackedDevicePose_t* pose) {
+void fill_pose_with_snapshot(vr::TrackedDevicePose_t* pose, bool hmd_pose, const SharedHmdPose* shared_pose) {
     if (!pose) {
         return;
     }
     std::memset(pose, 0, sizeof(*pose));
-    pose->mDeviceToAbsoluteTracking = identity34();
+    if (hmd_pose && shared_pose) {
+        std::memcpy(pose->mDeviceToAbsoluteTracking.m, shared_pose->matrix, sizeof(shared_pose->matrix));
+    } else {
+        pose->mDeviceToAbsoluteTracking = identity34();
+    }
     pose->eTrackingResult = vr::TrackingResult_Running_OK;
     pose->bPoseIsValid = true;
     pose->bDeviceIsConnected = true;
 }
 
-void fill_poses(vr::TrackedDevicePose_t* poses, uint32_t count) {
+void fill_pose(vr::TrackedDevicePose_t* pose, bool hmd_pose) {
+    SharedHmdPose shared_pose;
+    fill_pose_with_snapshot(pose, hmd_pose, hmd_pose && read_shared_hmd_pose(&shared_pose) ? &shared_pose : nullptr);
+}
+
+void fill_poses_with_snapshot(vr::TrackedDevicePose_t* poses, uint32_t count, const SharedHmdPose* shared_pose) {
     if (!poses) {
         return;
     }
     for (uint32_t index = 0; index < count; ++index) {
-        fill_pose(&poses[index]);
+        fill_pose_with_snapshot(&poses[index], index == vr::k_unTrackedDeviceIndex_Hmd, shared_pose);
         if (!is_fake_tracked_device(index)) {
             poses[index].bPoseIsValid = false;
             poses[index].bDeviceIsConnected = false;
         }
     }
+}
+
+void fill_poses(vr::TrackedDevicePose_t* poses, uint32_t count) {
+    SharedHmdPose shared_pose;
+    const SharedHmdPose* pose_snapshot = read_shared_hmd_pose(&shared_pose) ? &shared_pose : nullptr;
+    fill_poses_with_snapshot(poses, count, pose_snapshot);
 }
 
 void copy_string(const char* value, char* buffer, uint32_t buffer_size) {
@@ -665,11 +907,20 @@ void* __stdcall fake_c_ret0() { return nullptr; }
 void __thiscall fake_get_recommended_render_target_size(void*, uint32_t* width, uint32_t* height) {
     log_call("IVRSystem::GetRecommendedRenderTargetSize");
     if (width) {
-        *width = 1280;
+        *width = render_target_dimension("ALVR_FAKE_RENDER_TARGET_WIDTH", 1280);
     }
     if (height) {
-        *height = 720;
+        *height = render_target_dimension("ALVR_FAKE_RENDER_TARGET_HEIGHT", 720);
     }
+    char message[128] = {};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "IVRSystem::GetRecommendedRenderTargetSize return width=%u height=%u",
+        width ? *width : 0,
+        height ? *height : 0
+    );
+    log_line(message);
 }
 
 void __stdcall fake_c_get_recommended_render_target_size(uint32_t* width, uint32_t* height) {
@@ -776,22 +1027,30 @@ void __thiscall fake_get_projection_raw(
     void*, vr::EVREye eye, float* left, float* right, float* top, float* bottom
 ) {
     log_eye_call("IVRSystem::GetProjectionRaw", eye);
-    if (shared_eye_raw(eye, left, right, top, bottom)) {
+    bool shared_view = shared_eye_raw(eye, left, right, top, bottom);
+    if (shared_view) {
         log_eye_call("IVRSystem::GetProjectionRaw using shared view", eye);
-        return;
-    }
-    if (left) {
+    } else if (left) {
         *left = -1.0f;
     }
-    if (right) {
+    if (!shared_view && right) {
         *right = 1.0f;
     }
-    if (top) {
+    if (!shared_view && top) {
         *top = -1.0f;
     }
-    if (bottom) {
+    if (!shared_view && bottom) {
         *bottom = 1.0f;
     }
+    log_projection_raw_values(
+        "IVRSystem::GetProjectionRaw return",
+        eye,
+        left ? *left : 0.0f,
+        right ? *right : 0.0f,
+        top ? *top : 0.0f,
+        bottom ? *bottom : 0.0f,
+        shared_view
+    );
 }
 
 void __stdcall fake_c_get_projection_raw(vr::EVREye eye, float* left, float* right, float* top, float* bottom) {
@@ -862,7 +1121,12 @@ vr::HmdMatrix34_t __thiscall fake_get_eye_to_head_transform(void*, vr::EVREye ey
         log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
     }
     vr::HmdMatrix34_t result = identity34(eye_x_m);
-    log_call("IVRSystem::GetEyeToHeadTransform return");
+    char message[128] = {};
+    std::snprintf(
+        message, sizeof(message), "IVRSystem::GetEyeToHeadTransform return eye=%d eye_x_m=%.6f", eye, eye_x_m
+    );
+    log_line(message);
+    log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", result);
     return result;
 }
 
@@ -874,8 +1138,13 @@ vr::HmdMatrix34_t* __thiscall fake_cpp_get_eye_to_head_transform(void*, vr::HmdM
             log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
         }
         *output = identity34(eye_x_m);
+        char message[128] = {};
+        std::snprintf(
+            message, sizeof(message), "IVRSystem::GetEyeToHeadTransform return eye=%d eye_x_m=%.6f", eye, eye_x_m
+        );
+        log_line(message);
+        log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", *output);
     }
-    log_call("IVRSystem::GetEyeToHeadTransform return");
     return output;
 }
 
@@ -1421,7 +1690,7 @@ bool __stdcall fake_c_poll_next_event(vr::VREvent_t* event, uint32_t event_size)
 bool __thiscall fake_poll_next_event_with_pose(
     void*, vr::ETrackingUniverseOrigin, vr::VREvent_t* event, uint32_t event_size, vr::TrackedDevicePose_t* pose
 ) {
-    fill_pose(pose);
+    fill_pose(pose, false);
     return fake_poll_next_event(nullptr, event, event_size);
 }
 
@@ -1501,7 +1770,7 @@ bool __thiscall fake_get_controller_state_with_pose(
 ) {
     const bool ok = fake_get_controller_state(nullptr, device, state, state_size);
     if (is_fake_tracked_device(device)) {
-        fill_pose(pose);
+        fill_pose(pose, device == vr::k_unTrackedDeviceIndex_Hmd);
     } else if (pose) {
         std::memset(pose, 0, sizeof(*pose));
     }
@@ -1770,18 +2039,42 @@ uint32_t __stdcall fake_c_overlay_pid(vr::VROverlayHandle_t) {
 
 void __thiscall fake_set_tracking_space(void*, vr::ETrackingUniverseOrigin origin) {
     log_call_u32("IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    g_tracking_space_origin.store(static_cast<uint32_t>(origin), std::memory_order_relaxed);
 }
 void __stdcall fake_c_set_tracking_space(vr::ETrackingUniverseOrigin origin) {
     log_call_u32("FnTable:IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    g_tracking_space_origin.store(static_cast<uint32_t>(origin), std::memory_order_relaxed);
 }
 vr::ETrackingUniverseOrigin __thiscall fake_tracking_space(void*) {
     log_call("IVRCompositor::GetTrackingSpace");
-    return vr::TrackingUniverseStanding;
+    auto origin = static_cast<vr::ETrackingUniverseOrigin>(
+        g_tracking_space_origin.load(std::memory_order_relaxed)
+    );
+    char message[128] = {};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "IVRCompositor::GetTrackingSpace return origin=%d",
+        origin
+    );
+    log_line(message);
+    return origin;
 }
 
 vr::ETrackingUniverseOrigin __stdcall fake_c_tracking_space() {
     log_call("FnTable:IVRCompositor::GetTrackingSpace");
-    return vr::TrackingUniverseStanding;
+    auto origin = static_cast<vr::ETrackingUniverseOrigin>(
+        g_tracking_space_origin.load(std::memory_order_relaxed)
+    );
+    char message[128] = {};
+    std::snprintf(
+        message,
+        sizeof(message),
+        "FnTable:IVRCompositor::GetTrackingSpace return origin=%d",
+        origin
+    );
+    log_line(message);
+    return origin;
 }
 
 vr::EVRCompositorError __thiscall fake_wait_get_poses(
@@ -1789,15 +2082,41 @@ vr::EVRCompositorError __thiscall fake_wait_get_poses(
 ) {
     log_call("IVRCompositor::WaitGetPoses");
     log_call_u32_pair("IVRCompositor::WaitGetPoses counts", render_count, game_count);
-    Sleep(static_cast<DWORD>(1000.0 / kFakeRefreshHz));
-    fill_poses(render_poses, render_count);
-    fill_poses(game_poses, game_count);
+    uint32_t sleep_ms = wait_get_poses_sleep_ms();
+    if (InterlockedCompareExchange(&g_logged_wait_get_poses_sleep, 1, 0) == 0) {
+        char message[128] = {};
+        std::snprintf(message, sizeof(message), "fake WaitGetPoses sleep_ms=%u", sleep_ms);
+        log_line(message);
+    }
+    if (sleep_ms != 0) {
+        Sleep(static_cast<DWORD>(sleep_ms));
+    }
+    SharedHmdPose render_shared_pose;
+    const SharedHmdPose* render_pose_snapshot =
+        read_shared_hmd_pose(&render_shared_pose) ? &render_shared_pose : nullptr;
+    uint64_t pose_generation = publish_frame_pose_snapshot(render_pose_snapshot);
+    fill_poses_with_snapshot(render_poses, render_count, render_pose_snapshot);
+    SharedHmdPose game_shared_pose;
+    const SharedHmdPose* game_pose_snapshot =
+        read_shared_hmd_pose(&game_shared_pose) ? &game_shared_pose : nullptr;
+    fill_poses_with_snapshot(game_poses, game_count, game_pose_snapshot);
     if (render_poses && render_count > 0) {
-        log_call_u32_pair(
-            "IVRCompositor::WaitGetPoses hmd",
-            render_poses[0].bPoseIsValid ? 1 : 0,
-            static_cast<uint32_t>(render_poses[0].eTrackingResult)
+        char message[320] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRCompositor::WaitGetPoses contract pose_generation=%llu pose_timestamp_ns=%llu hmd_valid=%u tracking_result=%u connected=%u source=%s",
+            static_cast<unsigned long long>(pose_generation),
+            static_cast<unsigned long long>(
+                render_pose_snapshot ? render_pose_snapshot->timestamp_ns : 0
+            ),
+            render_poses[0].bPoseIsValid ? 1U : 0U,
+            static_cast<uint32_t>(render_poses[0].eTrackingResult),
+            render_poses[0].bDeviceIsConnected ? 1U : 0U,
+            render_pose_snapshot ? "shared-hmd-pose" : "fallback-identity"
         );
+        log_line(message);
+        log_matrix34("IVRCompositor::WaitGetPoses hmd_pose", render_poses[0].mDeviceToAbsoluteTracking);
     }
     return vr::VRCompositorError_None;
 }
@@ -1806,8 +2125,33 @@ vr::EVRCompositorError __thiscall fake_get_last_poses(
     void*, vr::TrackedDevicePose_t* render_poses, uint32_t render_count, vr::TrackedDevicePose_t* game_poses, uint32_t game_count
 ) {
     log_call("IVRCompositor::GetLastPoses");
-    fill_poses(render_poses, render_count);
-    fill_poses(game_poses, game_count);
+    SharedHmdPose render_shared_pose;
+    const SharedHmdPose* render_pose_snapshot =
+        read_shared_hmd_pose(&render_shared_pose) ? &render_shared_pose : nullptr;
+    uint64_t pose_generation = publish_frame_pose_snapshot(render_pose_snapshot);
+    fill_poses_with_snapshot(render_poses, render_count, render_pose_snapshot);
+    SharedHmdPose game_shared_pose;
+    const SharedHmdPose* game_pose_snapshot =
+        read_shared_hmd_pose(&game_shared_pose) ? &game_shared_pose : nullptr;
+    fill_poses_with_snapshot(game_poses, game_count, game_pose_snapshot);
+    if (render_poses && render_count > 0) {
+        char message[320] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRCompositor::GetLastPoses contract pose_generation=%llu pose_timestamp_ns=%llu hmd_valid=%u tracking_result=%u connected=%u source=%s",
+            static_cast<unsigned long long>(pose_generation),
+            static_cast<unsigned long long>(
+                render_pose_snapshot ? render_pose_snapshot->timestamp_ns : 0
+            ),
+            render_poses[0].bPoseIsValid ? 1U : 0U,
+            static_cast<uint32_t>(render_poses[0].eTrackingResult),
+            render_poses[0].bDeviceIsConnected ? 1U : 0U,
+            render_pose_snapshot ? "shared-hmd-pose" : "fallback-identity"
+        );
+        log_line(message);
+        log_matrix34("IVRCompositor::GetLastPoses hmd_pose", render_poses[0].mDeviceToAbsoluteTracking);
+    }
     return vr::VRCompositorError_None;
 }
 
@@ -1824,11 +2168,41 @@ vr::EVRCompositorError __stdcall fake_c_get_last_poses(
 }
 
 vr::EVRCompositorError __thiscall fake_last_pose(
-    void*, vr::TrackedDeviceIndex_t, vr::TrackedDevicePose_t* render_pose, vr::TrackedDevicePose_t* game_pose
+    void*, vr::TrackedDeviceIndex_t device, vr::TrackedDevicePose_t* render_pose, vr::TrackedDevicePose_t* game_pose
 ) {
     log_call("IVRCompositor::GetLastPoseForTrackedDeviceIndex");
-    fill_pose(render_pose);
-    fill_pose(game_pose);
+    bool hmd_pose = device == vr::k_unTrackedDeviceIndex_Hmd;
+    SharedHmdPose render_shared_pose;
+    const SharedHmdPose* render_pose_snapshot =
+        hmd_pose && read_shared_hmd_pose(&render_shared_pose) ? &render_shared_pose : nullptr;
+    uint64_t pose_generation = publish_frame_pose_snapshot(render_pose_snapshot);
+    fill_pose_with_snapshot(render_pose, hmd_pose, render_pose_snapshot);
+    SharedHmdPose game_shared_pose;
+    const SharedHmdPose* game_pose_snapshot =
+        hmd_pose && read_shared_hmd_pose(&game_shared_pose) ? &game_shared_pose : nullptr;
+    fill_pose_with_snapshot(game_pose, hmd_pose, game_pose_snapshot);
+    if (render_pose) {
+        char message[384] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRCompositor::GetLastPoseForTrackedDeviceIndex contract device=%u pose_generation=%llu pose_timestamp_ns=%llu hmd_valid=%u tracking_result=%u connected=%u source=%s",
+            device,
+            static_cast<unsigned long long>(pose_generation),
+            static_cast<unsigned long long>(
+                render_pose_snapshot ? render_pose_snapshot->timestamp_ns : 0
+            ),
+            render_pose->bPoseIsValid ? 1U : 0U,
+            static_cast<uint32_t>(render_pose->eTrackingResult),
+            render_pose->bDeviceIsConnected ? 1U : 0U,
+            render_pose_snapshot ? "shared-hmd-pose" : "fallback-identity"
+        );
+        log_line(message);
+        log_matrix34(
+            "IVRCompositor::GetLastPoseForTrackedDeviceIndex hmd_pose",
+            render_pose->mDeviceToAbsoluteTracking
+        );
+    }
     return vr::VRCompositorError_None;
 }
 
@@ -1875,7 +2249,7 @@ void fill_frame_timing(vr::Compositor_FrameTiming* timing, uint32_t size, uint64
         legacy.m_flWaitGetPosesCalledMs = -1.0f;
         legacy.m_flNewPosesReadyMs = -0.5f;
         legacy.m_flNewFrameReadyMs = 0.0f;
-        fill_pose(&legacy.m_HmdPose);
+        fill_pose(&legacy.m_HmdPose, true);
         std::memcpy(timing, &legacy, output_size);
         return;
     }
@@ -1891,7 +2265,7 @@ void fill_frame_timing(vr::Compositor_FrameTiming* timing, uint32_t size, uint64
     timing->m_flNewFrameReadyMs = 0.0f;
     timing->m_nNumVSyncsReadyForUse = 1;
     timing->m_nNumVSyncsToFirstView = 1;
-    fill_pose(&timing->m_HmdPose);
+    fill_pose(&timing->m_HmdPose, true);
 }
 
 bool __thiscall fake_get_frame_timing(void*, vr::Compositor_FrameTiming* timing, uint32_t frames_ago) {
@@ -2593,7 +2967,7 @@ vr::EVRInputError __stdcall fake_c_input_get_pose_action_data(
         std::memset(data, 0, sizeof(*data));
         data->bActive = true;
         data->activeOrigin = input_origin_for_handle(restrict_to_device);
-        fill_pose(&data->pose);
+        fill_pose(&data->pose, false);
     }
     return vr::VRInputError_None;
 }
@@ -4124,7 +4498,11 @@ extern "C" __declspec(dllexport) uint32_t VR_InitInternal2(
     return VR_InitInternal(error, application_type);
 }
 
-extern "C" __declspec(dllexport) void VR_ShutdownInternal() { log_line("fake VR_ShutdownInternal"); }
+extern "C" __declspec(dllexport) void VR_ShutdownInternal() {
+    std::lock_guard<std::mutex> writer_lock(g_frame_pose_publish_mutex);
+    close_shared_memory();
+    log_line("fake VR_ShutdownInternal");
+}
 extern "C" __declspec(dllexport) bool VR_IsHmdPresent() { return true; }
 extern "C" __declspec(dllexport) bool VR_IsRuntimeInstalled() { return true; }
 

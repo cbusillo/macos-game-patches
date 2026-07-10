@@ -63,6 +63,7 @@ constexpr const char* kLegacyCompositor022 = "IVRCompositor_022";
 constexpr uint32_t kMinPackedEyeWidth = 16;
 constexpr uint64_t kMaxBridgeHeartbeatAgeNs = 5'000'000'000ULL;
 constexpr uint64_t kBridgeHeartbeatFutureToleranceNs = 250'000'000ULL;
+constexpr uint64_t kMaxEyeSubmitSkewNs = 50'000'000ULL;
 
 using VR_InitInternalFn = uint32_t(__cdecl*)(vr::EVRInitError*, vr::EVRApplicationType);
 using VR_InitInternal2Fn = uint32_t(__cdecl*)(vr::EVRInitError*, vr::EVRApplicationType, const char*);
@@ -98,11 +99,14 @@ struct EyeFrame {
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t frame_number = 0;
+    uint64_t submit_timestamp_ns = 0;
     uint32_t real_submit_us = 0;
     uint32_t capture_total_us = 0;
     uint32_t copy_resource_us = 0;
     uint32_t map_wait_us = 0;
     uint32_t copy_pixels_us = 0;
+    bool needs_synthetic_fill = false;
+    uint64_t synthetic_frame_number = UINT64_MAX;
     std::vector<uint8_t> bgra;
 };
 
@@ -111,6 +115,17 @@ struct StagingCache {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11Texture2D> texture;
     D3D11_TEXTURE2D_DESC desc = {};
+};
+
+struct D3D11UnmapGuard {
+    ID3D11DeviceContext* context = nullptr;
+    ID3D11Resource* resource = nullptr;
+
+    ~D3D11UnmapGuard() {
+        if (context && resource) {
+            context->Unmap(resource, 0);
+        }
+    }
 };
 
 struct TextureCrop {
@@ -218,6 +233,11 @@ std::string env_string(const char* name) {
     return buffer;
 }
 
+bool env_enabled(const char* name) {
+    std::string value = env_string(name);
+    return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "YES";
+}
+
 uint32_t env_u32(const char* name, uint32_t default_value) {
     std::string value = env_string(name);
     if (value.empty()) {
@@ -240,6 +260,14 @@ uint32_t env_u32(const char* name, uint32_t default_value) {
         return default_value;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+uint32_t env_divisor(const char* name, uint32_t default_value) {
+    uint32_t value = env_u32(name, default_value);
+    if (value == 0) {
+        return default_value;
+    }
+    return value;
 }
 
 std::string sibling_real_openvr_path() {
@@ -511,12 +539,123 @@ bool wait_for_bridge_ready(AlvrSharedMemory* shm, int timeout_ms) {
     return false;
 }
 
+bool valid_pose_matrix(const float matrix[3][4]) {
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (!std::isfinite(matrix[row][col]) || std::fabs(matrix[row][col]) > 1000.0f) {
+                return false;
+            }
+        }
+    }
+
+    auto row_len_sq = [&](int row) {
+        return matrix[row][0] * matrix[row][0] + matrix[row][1] * matrix[row][1]
+            + matrix[row][2] * matrix[row][2];
+    };
+    auto row_dot = [&](int a, int b) {
+        return matrix[a][0] * matrix[b][0] + matrix[a][1] * matrix[b][1]
+            + matrix[a][2] * matrix[b][2];
+    };
+
+    return row_len_sq(0) >= 0.5f && row_len_sq(0) <= 1.5f && row_len_sq(1) >= 0.5f
+        && row_len_sq(1) <= 1.5f && row_len_sq(2) >= 0.5f && row_len_sq(2) <= 1.5f
+        && std::fabs(row_dot(0, 1)) <= 0.2f && std::fabs(row_dot(0, 2)) <= 0.2f
+        && std::fabs(row_dot(1, 2)) <= 0.2f;
+}
+
+uint32_t interlocked_load_u32(const volatile uint32_t* value) {
+    static_assert(sizeof(long) == sizeof(uint32_t));
+    return static_cast<uint32_t>(_InterlockedCompareExchange(
+        reinterpret_cast<volatile long*>(const_cast<volatile uint32_t*>(value)), 0, 0
+    ));
+}
+
+struct PoseSnapshot {
+    uint32_t sequence = 0;
+    uint64_t generation = 0;
+    uint64_t timestamp_ns = 0;
+    float matrix[3][4] = {};
+};
+
+bool read_frame_pose_snapshot(const AlvrSharedMemory* shm, PoseSnapshot* pose) {
+    if (!shm || !pose) {
+        return false;
+    }
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        uint32_t before = interlocked_load_u32(&shm->frame_pose_sequence);
+        if (before == 0 || (before & 1U) != 0) {
+            continue;
+        }
+
+        uint64_t timestamp = shm->frame_pose_timestamp_ns;
+        float matrix[3][4] = {};
+        std::memcpy(matrix, shm->frame_pose, sizeof(matrix));
+
+        uint32_t after = interlocked_load_u32(&shm->frame_pose_sequence);
+        if (before != after || (after & 1U) != 0) {
+            continue;
+        }
+        if (timestamp == 0 || !valid_pose_matrix(matrix)) {
+            return false;
+        }
+
+        pose->sequence = after;
+        pose->generation = after / 2;
+        pose->timestamp_ns = timestamp;
+        std::memcpy(pose->matrix, matrix, sizeof(pose->matrix));
+        return true;
+    }
+
+    return false;
+}
+
+const char* view_params_source(const AlvrSharedMemory* shm) {
+    if (!shm) {
+        return "missing-shared-memory";
+    }
+    const bool has_view_config = shm->view_config_set != 0;
+    const bool has_hmd_pose = shm->hmd_pose_set != 0;
+    if (has_view_config && has_hmd_pose) {
+        return "shared-view-bridge-latest-hmd-pose";
+    }
+    if (has_view_config) {
+        return "shared-view-missing-hmd-pose";
+    }
+    return "bridge-fallback-or-missing-view";
+}
+
+const char* contract_unknown_fields(const AlvrSharedMemory* shm, bool has_diagnostic_pose) {
+    if (!shm) {
+        return "shared_memory,view_params,render_pose_generation,clock_alignment,tracking_space_return,projection_matrix_return,exact_app_render_pose_pairing";
+    }
+    const bool has_view_config = shm->view_config_set != 0;
+    const bool has_hmd_pose = shm->hmd_pose_set != 0;
+    if (has_view_config && has_hmd_pose && has_diagnostic_pose) {
+        return "clock_alignment,tracking_space_return,projection_matrix_return,exact_app_render_pose_pairing";
+    }
+    if (has_view_config && has_hmd_pose) {
+        return "render_pose_generation,frame_pose_timestamp,clock_alignment,tracking_space_return,projection_matrix_return,exact_app_render_pose_pairing";
+    }
+    if (has_view_config) {
+        return "hmd_pose,render_pose_generation,frame_pose_timestamp,clock_alignment,tracking_space_return,projection_matrix_return,exact_app_render_pose_pairing";
+    }
+    return "view_params,hmd_pose,render_pose_generation,frame_pose_timestamp,clock_alignment,tracking_space_return,projection_matrix_return,exact_app_render_pose_pairing";
+}
+
 class SharedMemorySubmitWriter {
 public:
     SharedMemorySubmitWriter()
-        : m_inner_crop_px(env_u32("ALVR_SHIM_INNER_CROP_PX", 0)) {
+        : m_inner_crop_px(env_u32("ALVR_SHIM_INNER_CROP_PX", 0)),
+          m_scale_divisor(env_divisor("ALVR_SHIM_SCALE_DIVISOR", 1)),
+          m_synthetic_frame(env_enabled("ALVR_SHIM_SYNTHETIC_FRAME")) {
         if (m_inner_crop_px != 0) {
             log_line("using inner-eye packing crop=%u px", m_inner_crop_px);
+        }
+        if (m_scale_divisor != 1) {
+            log_line("using diagnostic packed-frame scale divisor=%u", m_scale_divisor);
+        }
+        if (m_synthetic_frame) {
+            log_line("using diagnostic synthetic frame; D3D11 readback disabled");
         }
     }
 
@@ -528,6 +667,7 @@ public:
         const vr::VRTextureBounds_t* bounds,
         vr::EVRSubmitFlags flags,
         vr::EVRCompositorError real_result,
+        uint64_t submit_timestamp_ns,
         uint32_t real_submit_us
     ) {
         SubmitDiagnostic diagnostic;
@@ -538,7 +678,26 @@ public:
         diagnostic.texture = texture;
         diagnostic.bounds = bounds;
 
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (real_result != vr::VRCompositorError_None) {
+            invalidate_pending_pair_locked();
+            log_line(
+                "discarding Submit eye=%d result=%d and invalidating pending pair",
+                eye,
+                real_result
+            );
+            return;
+        }
+
+        if (eye != vr::Eye_Left && eye != vr::Eye_Right) {
+            invalidate_pending_pair_locked();
+            log_line("discarding Submit with unsupported eye=%d", eye);
+            return;
+        }
+
         if (!texture || texture->eType != vr::TextureType_DirectX || !texture->handle) {
+            invalidate_pending_pair_locked();
             if (should_log_rejection(diagnostic, RejectionKind::UnsupportedTextureType)) {
                 log_submit_diagnostic(diagnostic, "unsupported-texture-type");
             }
@@ -555,6 +714,7 @@ public:
             reinterpret_cast<void**>(submitted.GetAddressOf())
         );
         if (FAILED(hr) || !submitted) {
+            invalidate_pending_pair_locked();
             if (should_log_rejection(diagnostic, RejectionKind::NotD3D11Texture2D, nullptr, hr)) {
                 log_submit_diagnostic(diagnostic, "not-id3d11texture2d", nullptr, hr);
             }
@@ -563,19 +723,41 @@ public:
 
         EyeFrame frame;
         if (!read_eye_texture(submitted.Get(), diagnostic, &frame)) {
+            invalidate_pending_pair_locked();
             return;
         }
 
-        std::lock_guard<std::mutex> lock(m_mutex);
         frame.frame_number = ++m_submit_counter;
+        frame.submit_timestamp_ns = submit_timestamp_ns;
         frame.real_submit_us = real_submit_us;
-        if (eye == vr::Eye_Left) {
-            m_left = std::move(frame);
-        } else if (eye == vr::Eye_Right) {
-            m_right = std::move(frame);
-        } else {
-            return;
+
+        EyeFrame* current = eye == vr::Eye_Left ? &m_left : &m_right;
+        EyeFrame* opposite = eye == vr::Eye_Left ? &m_right : &m_left;
+        if (current->valid) {
+            log_line(
+                "discarding unmatched Submit pair before repeated eye=%d prior_ordinal=%llu new_ordinal=%llu",
+                eye,
+                static_cast<unsigned long long>(current->frame_number),
+                static_cast<unsigned long long>(frame.frame_number)
+            );
+            invalidate_pending_pair_locked();
+        } else if (opposite->valid) {
+            uint64_t skew_ns = submit_timestamp_ns >= opposite->submit_timestamp_ns
+                ? submit_timestamp_ns - opposite->submit_timestamp_ns
+                : opposite->submit_timestamp_ns - submit_timestamp_ns;
+            if (frame.frame_number != opposite->frame_number + 1 || skew_ns > kMaxEyeSubmitSkewNs) {
+                log_line(
+                    "discarding unmatched Submit pair eye=%d prior_ordinal=%llu new_ordinal=%llu skew_ns=%llu",
+                    eye,
+                    static_cast<unsigned long long>(opposite->frame_number),
+                    static_cast<unsigned long long>(frame.frame_number),
+                    static_cast<unsigned long long>(skew_ns)
+                );
+                invalidate_pending_pair_locked();
+            }
         }
+
+        *current = std::move(frame);
 
         publish_pair_if_ready_locked();
     }
@@ -647,6 +829,17 @@ private:
             );
             return false;
         }
+        if (crop.width > ALVR_MAX_WIDTH / 2 || crop.height > ALVR_MAX_HEIGHT) {
+            log_line(
+                "unsupported Submit texture eye=%d crop exceeds protocol bounds crop=%ux%u max=%ux%u",
+                eye,
+                crop.width,
+                crop.height,
+                ALVR_MAX_WIDTH / 2,
+                ALVR_MAX_HEIGHT
+            );
+            return false;
+        }
         if (crop_result.used_fallback) {
             log_line(
                 "using fallback Submit crop eye=%d raw=[%.4f %.4f %.4f %.4f] crop=%u,%u %ux%u texture=%ux%u",
@@ -662,6 +855,20 @@ private:
                 desc.Width,
                 desc.Height
             );
+        }
+
+        if (m_synthetic_frame) {
+            frame->valid = true;
+            frame->width = crop.width;
+            frame->height = crop.height;
+            frame->bgra.resize(static_cast<size_t>(crop.width) * crop.height * ALVR_BYTES_PER_PIXEL);
+            frame->copy_resource_us = 0;
+            frame->map_wait_us = 0;
+            frame->copy_pixels_us = 0;
+            frame->capture_total_us = elapsed_us(capture_start, std::chrono::steady_clock::now());
+            frame->needs_synthetic_fill = true;
+            log_frame_stats(eye, *frame);
+            return true;
         }
 
         StagingCache& cache = eye == vr::Eye_Left ? m_left_staging : m_right_staging;
@@ -704,6 +911,7 @@ private:
             log_submit_diagnostic(diagnostic, "staging-map-failed", &desc, hr);
             return false;
         }
+        D3D11UnmapGuard unmap_guard { cache.context.Get(), cache.texture.Get() };
 
         frame->valid = true;
         frame->width = crop.width;
@@ -717,12 +925,16 @@ private:
         frame->copy_pixels_us = elapsed_us(copy_pixels_start, copy_pixels_done);
         frame->capture_total_us = elapsed_us(capture_start, copy_pixels_done);
         log_frame_stats(eye, *frame);
-        cache.context->Unmap(cache.texture.Get(), 0);
         return true;
     }
 
+    void invalidate_pending_pair_locked() {
+        m_left.valid = false;
+        m_right.valid = false;
+    }
+
     bool should_log_submit_metadata(const SubmitDiagnostic& diagnostic) {
-        SubmitSignature signature = submit_signature(diagnostic);
+        SubmitSignature signature = submit_signature(diagnostic, nullptr, false);
         size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
         std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
         return should_log_signature(
@@ -734,7 +946,7 @@ private:
     }
 
     bool should_log_submit_desc(const SubmitDiagnostic& diagnostic, const D3D11_TEXTURE2D_DESC& desc) {
-        SubmitSignature signature = submit_signature(diagnostic, &desc);
+        SubmitSignature signature = submit_signature(diagnostic, &desc, false);
         size_t eye_index = diagnostic.eye == vr::Eye_Right ? 1 : 0;
         std::lock_guard<std::mutex> lock(m_diagnostic_mutex);
         return should_log_signature(
@@ -1039,7 +1251,7 @@ private:
         for (int attempt = 0; attempt < ALVR_NUM_BUFFERS; ++attempt) {
             int idx = alvr_shm_next_buffer(sequence + attempt);
             AlvrFrameHeader* header = &m_shm->frame_headers[idx];
-            uint32_t expected = ALVR_FRAME_EMPTY;
+            long expected = static_cast<long>(ALVR_FRAME_EMPTY);
             if (_InterlockedCompareExchange(
                     reinterpret_cast<volatile long*>(&header->state),
                     ALVR_FRAME_WRITING,
@@ -1064,16 +1276,18 @@ private:
             inner_crop_px = std::min(m_inner_crop_px, source_eye_width - kMinPackedEyeWidth);
         }
         uint32_t eye_width = source_eye_width - inner_crop_px;
-        uint32_t output_width = eye_width * 2;
-        if (output_width == 0 || height == 0) {
+        uint32_t output_eye_width = (eye_width / m_scale_divisor) & ~1U;
+        uint32_t output_height = (height / m_scale_divisor) & ~1U;
+        uint32_t output_width = output_eye_width * 2;
+        if (output_width == 0 || output_height == 0) {
             return;
         }
 
-        if (!ensure_mapped_locked(output_width, height)) {
+        if (!ensure_mapped_locked(output_width, output_height)) {
             return;
         }
-        if (m_width != output_width || m_height != height) {
-            log_line("dropping changed output shape %ux%u configured=%ux%u", output_width, height, m_width, m_height);
+        if (m_width != output_width || m_height != output_height) {
+            log_line("dropping changed output shape %ux%u configured=%ux%u", output_width, output_height, m_width, m_height);
             return;
         }
 
@@ -1084,24 +1298,37 @@ private:
         }
 
         auto pair_copy_start = std::chrono::steady_clock::now();
+        if (m_synthetic_frame) {
+            fill_pending_synthetic_frame_locked(m_left, vr::Eye_Left, m_frames_published);
+            fill_pending_synthetic_frame_locked(m_right, vr::Eye_Right, m_frames_published);
+        }
+
         uint8_t* dst_base = m_frame_data + static_cast<size_t>(buffer) * ALVR_MAX_FRAME_SIZE;
         uint32_t dst_pitch = output_width * ALVR_BYTES_PER_PIXEL;
-        uint32_t eye_bytes = eye_width * ALVR_BYTES_PER_PIXEL;
-        for (uint32_t y = 0; y < height; ++y) {
-            const uint8_t* left = m_left.bgra.data() + static_cast<size_t>(y) * m_left.width * ALVR_BYTES_PER_PIXEL;
+        uint32_t eye_bytes = output_eye_width * ALVR_BYTES_PER_PIXEL;
+        for (uint32_t y = 0; y < output_height; ++y) {
+            uint32_t source_y = y * m_scale_divisor;
+            const uint8_t* left = m_left.bgra.data() + static_cast<size_t>(source_y) * m_left.width * ALVR_BYTES_PER_PIXEL;
             const uint8_t* right =
                 m_right.bgra.data()
-                + (static_cast<size_t>(y) * m_right.width + inner_crop_px) * ALVR_BYTES_PER_PIXEL;
+                + (static_cast<size_t>(source_y) * m_right.width + inner_crop_px) * ALVR_BYTES_PER_PIXEL;
             uint8_t* dst = dst_base + static_cast<size_t>(y) * dst_pitch;
-            std::memcpy(dst, left, eye_bytes);
-            std::memcpy(dst + eye_bytes, right, eye_bytes);
+            if (m_scale_divisor == 1) {
+                std::memcpy(dst, left, eye_bytes);
+                std::memcpy(dst + eye_bytes, right, eye_bytes);
+            } else {
+                copy_scaled_row(dst, left, output_eye_width, m_scale_divisor);
+                copy_scaled_row(dst + eye_bytes, right, output_eye_width, m_scale_divisor);
+            }
         }
         auto pair_copy_done = std::chrono::steady_clock::now();
 
         AlvrFrameHeader* header = &m_shm->frame_headers[buffer];
         header->width = output_width;
-        header->height = height;
+        header->height = output_height;
         header->stride = dst_pitch;
+        PoseSnapshot diagnostic_pose;
+        const bool has_diagnostic_pose = read_frame_pose_snapshot(m_shm, &diagnostic_pose);
         header->timestamp_ns = now_ns();
         header->frame_number = m_frames_published;
         header->is_idr = (m_frames_published % 90 == 0) ? 1 : 0;
@@ -1121,14 +1348,19 @@ private:
         _InterlockedIncrement64(reinterpret_cast<volatile LONG64*>(&m_shm->frames_written));
 
         ++m_frames_published;
-        if (m_frames_published == 1 || m_frames_published % 90 == 0) {
+        bool first_pose_contract_sample = has_diagnostic_pose && !m_logged_pose_contract_sample;
+        if (has_diagnostic_pose) {
+            m_logged_pose_contract_sample = true;
+        }
+        if (m_frames_published == 1 || m_frames_published % 90 == 0 || first_pose_contract_sample) {
             log_line(
-                "published Submit pair frame=%llu output=%ux%u source_eye_width=%u inner_crop=%u left=%ux%u right=%ux%u timing_us real_submit=%u capture=%u copy_resource=%u map_wait=%u copy_pixels=%u pair_copy=%u",
+                "published Submit pair frame=%llu output=%ux%u source_eye_width=%u inner_crop=%u scale_divisor=%u left=%ux%u right=%ux%u timing_us real_submit=%u capture=%u copy_resource=%u map_wait=%u copy_pixels=%u pair_copy=%u",
                 static_cast<unsigned long long>(m_frames_published - 1),
                 output_width,
-                height,
+                output_height,
                 source_eye_width,
                 inner_crop_px,
+                m_scale_divisor,
                 m_left.width,
                 m_left.height,
                 m_right.width,
@@ -1139,6 +1371,31 @@ private:
                 header->producer_map_wait_us,
                 header->producer_copy_pixels_us,
                 header->producer_pair_copy_us
+            );
+            log_line(
+                "Submit pair contract frame=%llu pairing=consecutive-successful-left-right left_submit_ordinal=%llu right_submit_ordinal=%llu left_submit_result=0 right_submit_result=0 submit_skew_ns=%llu left_submit_timestamp_ns=%llu right_submit_timestamp_ns=%llu submit_clock=wine-steady pose_source=%s pose_use=diagnostic-only pose_generation=%llu pose_sequence=%u pose_timestamp_ns=%llu pose_clock=shared-hmd-pose-timestamp video_timestamp_ns=%llu video_clock=wine-steady idr=%u output=%ux%u view_params_source=%s sync=synchronous-submit-readback unknown_fields=[%s]",
+                static_cast<unsigned long long>(m_frames_published - 1),
+                static_cast<unsigned long long>(m_left.frame_number),
+                static_cast<unsigned long long>(m_right.frame_number),
+                static_cast<unsigned long long>(
+                    m_left.submit_timestamp_ns >= m_right.submit_timestamp_ns
+                        ? m_left.submit_timestamp_ns - m_right.submit_timestamp_ns
+                        : m_right.submit_timestamp_ns - m_left.submit_timestamp_ns
+                ),
+                static_cast<unsigned long long>(m_left.submit_timestamp_ns),
+                static_cast<unsigned long long>(m_right.submit_timestamp_ns),
+                has_diagnostic_pose ? "fake-runtime-latest-pose-api-snapshot" : "missing",
+                static_cast<unsigned long long>(has_diagnostic_pose ? diagnostic_pose.generation : 0),
+                has_diagnostic_pose ? diagnostic_pose.sequence : 0,
+                static_cast<unsigned long long>(
+                    has_diagnostic_pose ? diagnostic_pose.timestamp_ns : 0
+                ),
+                static_cast<unsigned long long>(header->timestamp_ns),
+                header->is_idr,
+                output_width,
+                output_height,
+                view_params_source(m_shm),
+                contract_unknown_fields(m_shm, has_diagnostic_pose)
             );
         }
 
@@ -1156,6 +1413,9 @@ private:
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     uint32_t m_inner_crop_px = 0;
+    uint32_t m_scale_divisor = 1;
+    bool m_synthetic_frame = false;
+    bool m_logged_pose_contract_sample = false;
     uint64_t m_submit_counter = 0;
     std::atomic<uint64_t> m_submit_diagnostic_counter { 0 };
     uint64_t m_frames_published = 0;
@@ -1171,6 +1431,46 @@ private:
     EyeFrame m_right;
     StagingCache m_left_staging;
     StagingCache m_right_staging;
+
+    static void copy_scaled_row(uint8_t* dst, const uint8_t* src, uint32_t output_width, uint32_t divisor) {
+        for (uint32_t x = 0; x < output_width; ++x) {
+            std::memcpy(
+                dst + static_cast<size_t>(x) * ALVR_BYTES_PER_PIXEL,
+                src + static_cast<size_t>(x) * divisor * ALVR_BYTES_PER_PIXEL,
+                ALVR_BYTES_PER_PIXEL
+            );
+        }
+    }
+
+    static void fill_pending_synthetic_frame_locked(EyeFrame& frame, vr::EVREye eye, uint64_t frame_number) {
+        if (!frame.needs_synthetic_fill || frame.synthetic_frame_number == frame_number) {
+            return;
+        }
+
+        auto fill_start = std::chrono::steady_clock::now();
+        fill_synthetic_frame(frame.bgra.data(), frame.width, frame.height, eye, frame_number);
+        auto fill_done = std::chrono::steady_clock::now();
+        frame.copy_pixels_us += elapsed_us(fill_start, fill_done);
+        frame.capture_total_us += elapsed_us(fill_start, fill_done);
+        frame.synthetic_frame_number = frame_number;
+        frame.needs_synthetic_fill = false;
+    }
+
+    static void fill_synthetic_frame(uint8_t* dst, uint32_t width, uint32_t height, vr::EVREye eye, uint64_t frame_number) {
+        uint32_t base = eye == vr::Eye_Left ? 0xFF302018U : 0xFF183020U;
+        uint32_t stripe = eye == vr::Eye_Left ? 0xFFE0E0E0U : 0xFFC0E0FFU;
+        uint32_t marker = 0xFFFF4040U;
+        uint32_t drift = width == 0 ? 0 : static_cast<uint32_t>((frame_number * 8) % width);
+        uint32_t* pixels = reinterpret_cast<uint32_t*>(dst);
+
+        for (uint32_t y = 0; y < height; ++y) {
+            uint32_t color = (y % 120) < 4 ? stripe : base;
+            std::fill_n(pixels + static_cast<size_t>(y) * width, width, color);
+            if (drift < width) {
+                pixels[static_cast<size_t>(y) * width + drift] = marker;
+            }
+        }
+    }
 };
 
 SharedMemorySubmitWriter g_writer;
@@ -1194,10 +1494,13 @@ vr::EVRCompositorError __thiscall hooked_cpp_submit(
         log_line("missing real C++ Submit for object %p", self);
         return vr::VRCompositorError_InvalidTexture;
     }
+    uint64_t submit_timestamp_ns = now_ns();
     auto submit_start = std::chrono::steady_clock::now();
     vr::EVRCompositorError result = real_submit(self, eye, texture, bounds, flags);
     auto submit_done = std::chrono::steady_clock::now();
-    g_writer.capture_submit(eye, texture, bounds, flags, result, elapsed_us(submit_start, submit_done));
+    g_writer.capture_submit(
+        eye, texture, bounds, flags, result, submit_timestamp_ns, elapsed_us(submit_start, submit_done)
+    );
     return result;
 }
 
@@ -1211,10 +1514,13 @@ vr::EVRCompositorError OPENVR_FNTABLE_CALLTYPE hooked_c_submit(
         log_line("missing real C Submit");
         return vr::VRCompositorError_InvalidTexture;
     }
+    uint64_t submit_timestamp_ns = now_ns();
     auto submit_start = std::chrono::steady_clock::now();
     vr::EVRCompositorError result = g_real_c_submit(eye, texture, bounds, flags);
     auto submit_done = std::chrono::steady_clock::now();
-    g_writer.capture_submit(eye, texture, bounds, flags, result, elapsed_us(submit_start, submit_done));
+    g_writer.capture_submit(
+        eye, texture, bounds, flags, result, submit_timestamp_ns, elapsed_us(submit_start, submit_done)
+    );
     return result;
 }
 
