@@ -39,7 +39,10 @@ jobs:
           reporter: github-check
 
       - name: Validate Python tools
-        run: python3 -m py_compile tools/vr_stack_cleanup.py
+        run: >-
+          python3 -m py_compile
+          tools/vr_stack_cleanup.py
+          tools/launch_freedom_crossover.py
 
       - name: Install gitleaks
         env:

@@ -23,7 +23,7 @@
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py"
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py"
     },
     "security": {
       "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
