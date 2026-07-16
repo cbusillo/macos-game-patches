@@ -18,6 +18,9 @@ bridge.
 - Prefer focused probes over broad framework code until a path has produced real
   evidence.
 - Add scripts only after a repeated command or check is worth automating.
+- Treat released game binaries as fixed inputs. Do not build or maintain custom
+  game forks; compatibility changes belong in the runtime, translation, bridge,
+  or upstream patch/request layer.
 
 ## Patch Artifacts
 

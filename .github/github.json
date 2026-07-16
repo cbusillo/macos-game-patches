@@ -1,6 +1,18 @@
 {
   "defaultBranch": "main",
   "projectType": "macos-game-vr-research-baseline",
+  "jetbrains": {
+    "ide": "IntelliJ IDEA",
+    "scopePreference": "changed_files"
+  },
+  "runtimeAssumptions": {
+    "gameplayControllers": "PS VR2 Sense controllers paired directly to Apple Vision Pro with visionOS 26 accessory tracking and the ALVR PSVR2Sense profile",
+    "freedomSourceGeometry": "Freedom can switch its submitted side-by-side texture from 3240x1800 to 2808x1560 at level load; the native IOSurface pool remains fixed at 3240x1800 and the focused gate expects that transition explicitly",
+    "crossoverBottleWarmup": "The probe owns and resets the dedicated Steam bottle, atomically installs the patched MoltenVK with its existing signature, preloads that exact file in x86_64 mode, and keeps a small patched-library Notepad window open so the tested game is never the bottle's first GUI process; the initial producer handshake allows 600 seconds while per-frame gates remain unchanged",
+    "openBrushRuntimeDiscovery": "Steam build 23545184 and current Open Brush desktop releases are OpenXR-only, so the compatibility probe pins official release 1.0.28, the newest verified OpenVR build. Physical immersive testing passes both PS VR2 Sense controller sources and all exercised Open Brush inputs, while exact pose pairing, hardware encode, transport, and decode delivery remain clean. The maintained launcher uses a 1280x720 mirror, 1080x1344 per-eye targets, and suppresses the broken animated-logo video during each run. The apparent 34 FPS source ceiling was a probe observer effect: the fake OpenVR runtime opened and closed its diagnostic file for every logged API call. A resolution-matched official SteamVR Tutorial control reproduced 31.192 FPS before that logger was corrected. The runtime now keeps one locked buffered log file and preserves the same diagnostics. Extended Open Brush artifact real-native-encode-20260716T112248Z submitted, encoded, and released 5400/5400 frames with zero producer or native drops, a 90.006 FPS final window, 449 us average native conversion, and clean restoration. Hardened Tutorial artifact real-native-encode-20260716T113326Z records a target-specific pass and 90.000 FPS tail while preserving its expected RGBA native-format failure. Official Freedom artifact real-native-encode-20260716T112715Z independently passed 5400/5400 disconnected frames with zero drops and a 90.006 FPS tail. Custom game builds and maintained game forks remain out of scope. Open Brush has completed its controller and performance-discriminator purpose.",
+    "freedomPhysicalLifecycle": "Official Freedom physical artifact real-native-encode-20260716T132419Z passed initial viewing, Digital Crown recenter, headset removal/reentry, and full ALVR client termination/relaunch with a clear and smooth image. Longer soak artifact real-native-encode-20260716T152355Z then encoded and transported 81000/81000 target frames, held a 90.006 FPS final window, averaged 734 us native conversion, exhausted no native pool, and remained clear and smooth throughout approximately 15 minutes. After the finite host stopped, ALVR returned to search. Without a manual client relaunch, recovery artifact real-native-encode-20260716T154756Z created new stream and format epochs and encoded and transported 2700/2700 frames; the user looked after that short stream ended, so active recovery is machine-verified but not directly human-observed. A preceding cold Invalid Resource submission failed before any frame and did not reproduce on the immediate retry. AVP validation issue #41 is complete.",
+    "iosurfaceLaunchdService": "The native bridge claims fixed per-user Mach service com.alvr.macos-bridge.iosurface with bootstrap_check_in, authenticates raw Mach senders from kernel audit trailers, validates send-once reply rights, and drains oversized or invalid messages. The runner uses one global run lock and transient stable-path launchd plist, removes an owned stale job before replacing the signed app, requires one Launch Services record for the already-authorized app URL, verifies the expected Developer ID team and CDHash against the live launchd PID, signals through launchctl rather than cached PIDs, and fails if the job, plist, lock, client, or staged game files remain. Physical preflight now selects exactly one connected and unlocked Vision Pro, captures the exact launched PID before mDNS readiness, relaunches the installed ALVR client console-attached, parses its mDNS protocol/device ID/IP, and seeds that exact trusted identity before host startup. A producer startup barrier, first-frame prime, and bounded 100 ms slot wait prevent pre-ready traffic and transient producer loss. Connected artifact real-native-encode-20260716T223050Z passes the strict gate with 5400/5400 frames encoded and transported at 2880x1792, a 12 ms sink connection, zero producer/native drops, zero pose-generation gaps, one 5539 us backpressure wait, an 89.819 FPS full-run average, a 90.033 FPS tail, zero stale post-host IPD/origin/format diagnostics, and clean restoration. Post-review artifact real-native-encode-20260716T224204Z passes 30/30 while additionally proving exact Launch Services, live process identity, and global lock/plist/service teardown. Eyes-on artifact real-native-encode-20260716T230058Z again transported 5400/5400 frames with zero drops or pose gaps and a user-confirmed clear, smooth image; its cadence-only failure was caused by an unrelated concurrent nine-core FFmpeg AV1 probe plus other active host workloads, so it does not replace the strict automated pass. Final review-fix artifact real-native-encode-20260716T231338Z passes 30/30 with connection timing started at producer handshake, exact PID checks before and after post-host observation, synchronized stream-state diagnostics, zero stale messages, and exact teardown. The earlier discovery/cadence failure is superseded; the next action under #53 is implementation and evidence consolidation for review."
+  },
   "docs": {
     "overview": "README.md",
     "agentGuidelines": "AGENTS.md",
@@ -11,11 +23,21 @@
     "environment": "docs/environment.md",
     "sourceWorkspace": "docs/source-workspace.md",
     "activeAlvrPlan": "GitHub issue #36: Plan: GPU-resident Mac ALVR bridge",
+    "activeTextureHandoffPlan": "GitHub issue #53: Plan: Production DXVK IOSurface handoff pool",
     "historicalOptionBPlan": "docs/option-b-v21-native-bridge-plan.md",
     "probeLedger": "docs/probes/README.md",
     "firstProbe": "docs/probes/001-alvr-v21-visionos-compatibility.md",
     "avpRuntimeGate": "docs/probes/002-alvr-v21-avp-runtime-gate.md",
     "openVrSubmittedFrameContract": "docs/probes/005-openvr-submitted-frame-contract.md",
+    "moltenVkIOSurfaceHandoff": "docs/probes/006-moltenvk-iosurface-handoff.md",
+    "dxvkD3d11IOSurfaceInterop": "docs/probes/007-dxvk-d3d11-iosurface-interop.md",
+    "realOpenVrIOSurfaceHandoff": "docs/probes/008-real-openvr-iosurface-handoff.md",
+    "productionIOSurfacePool": "docs/probes/009-production-iosurface-pool.md",
+    "freedomLocalWindowRegression": "docs/probes/010-freedom-local-window-regression.md",
+    "openBrushControllerSmoke": "docs/probes/011-open-brush-controller-smoke.md",
+    "steamVrTutorialUnityPerformanceControl": "docs/probes/012-steamvr-tutorial-unity-performance-control.md",
+    "crossoverDxvkPatches": "patches/crossover-dxvk/README.md",
+    "crossoverMoltenVkPatches": "patches/crossover-moltenvk/README.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
   },
   "qualityGate": {
@@ -25,14 +47,18 @@
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py"
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py",
+      "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
       "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
       "gitleaksVersion": "8.30.1"
     },
     "runtimePreflight": {
-      "vrStackCleanup": "python3 tools/vr_stack_cleanup.py"
+      "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
+      "iosurfaceMachRight": "bash tools/run_iosurface_mach_port_probe.sh",
+      "iosurfaceWineImport": "bash tools/run_wine_iosurface_mach_port_probe.sh",
+      "iosurfaceNativeBind": "bash tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "docsRequiredWhen": [
       "new experiment plans are added",

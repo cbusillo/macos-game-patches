@@ -66,7 +66,8 @@ Route plan updates to the owning issue before moving on:
 
 - #38 for submitted-frame contract facts.
 - #39 for native macOS encode surface facts.
-- #40 for CrossOver/GPTK texture handoff facts.
+- #40 for the completed CrossOver/GPTK texture-handoff discovery record.
+- #53 for production handoff-pool implementation facts.
 - #41 for AVP validation and human-observation rules.
 - #36 only for parent-level recovery state or direction changes.
 
@@ -89,3 +90,10 @@ Use this shape:
 - [003 - Real OpenVR world-locked geometry](003-real-openvr-world-locked-geometry.md)
 - [004 - Windows reference VR baseline](004-windows-reference-vr-baseline.md)
 - [005 - OpenVR submitted frame contract](005-openvr-submitted-frame-contract.md)
+- [006 - MoltenVK IOSurface handoff](006-moltenvk-iosurface-handoff.md)
+- [007 - DXVK D3D11 IOSurface interop](007-dxvk-d3d11-iosurface-interop.md)
+- [008 - Real OpenVR IOSurface handoff](008-real-openvr-iosurface-handoff.md)
+- [009 - Production IOSurface handoff pool](009-production-iosurface-pool.md)
+- [010 - Freedom local window regression](010-freedom-local-window-regression.md)
+- [011 - Open Brush controller smoke](011-open-brush-controller-smoke.md)
+- [012 - SteamVR Tutorial Unity performance control](012-steamvr-tutorial-unity-performance-control.md)

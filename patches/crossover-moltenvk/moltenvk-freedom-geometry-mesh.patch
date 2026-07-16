@@ -1,0 +1,406 @@
+--- a/External/SPIRV-Cross/spirv_glsl.cpp
++++ b/External/SPIRV-Cross/spirv_glsl.cpp
+@@ -12463,6 +12463,7 @@
+ 		}
+ 
+ 		append_global_func_args(callee, length, arglist);
++		append_additional_function_call_args(callee, arglist);
+ 
+ 		funexpr += merge(arglist);
+ 		funexpr += ")";
+@@ -19106,4 +19107,3 @@
+ 	// default behavior
+ 	return convert_to_string(value, current_locale_radix_character);
+ }
+-
+--- a/External/SPIRV-Cross/spirv_glsl.hpp
++++ b/External/SPIRV-Cross/spirv_glsl.hpp
+@@ -793,6 +793,9 @@
+ 	void emit_uninitialized_temporary(uint32_t type, uint32_t id);
+ 	SPIRExpression &emit_uninitialized_temporary_expression(uint32_t type, uint32_t id);
+ 	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist);
++	virtual void append_additional_function_call_args(const SPIRFunction &, SmallVector<std::string> &)
++	{
++	}
+ 	std::string to_non_uniform_aware_expression(uint32_t id);
+ 	std::string to_expression(uint32_t id, bool register_expression_read = true);
+ 	std::string to_composite_constructor_expression(const SPIRType &parent_type, uint32_t id, bool block_like_type);
+--- a/External/SPIRV-Cross/spirv_msl.cpp
++++ b/External/SPIRV-Cross/spirv_msl.cpp
+@@ -27,6 +27,7 @@
+ #include <algorithm>
+ #include <assert.h>
+ #include <numeric>
++#include <set>
+ 
+ using namespace spv;
+ using namespace SPIRV_CROSS_NAMESPACE;
+@@ -1888,15 +1889,6 @@
+ 			statement(to_name(stage_in_var_id));
+ 		}
+ 
+-		auto resources = get_sorted_entry_point_args(false);
+-
+-		for (auto &resource : resources)
+-		{
+-			statement(need_comma ? ", " : "", resource.name);
+-			need_comma = true;
+-		}
+-
+-
+ 		if (msl_options.argument_buffers)
+ 		{
+ 			for (uint32_t i = 0; i < kMaxArgumentBuffers; i++)
+@@ -1909,6 +1901,15 @@
+ 				need_comma = true;
+ 			}
+ 		}
++
++		auto resources = get_sorted_entry_point_args(false);
++
++		for (auto &resource : resources)
++		{
++			statement(need_comma ? ", " : "", resource.name);
++			need_comma = true;
++		}
++
+ 		ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var)
+ 		{
+ 			if (var.storage == StorageClassInput && is_builtin_variable(var))
+@@ -1965,14 +1966,67 @@
+ 		auto &ib_type = get_variable_data_type(ib_var);
+ 
+ 		msl_options.for_mesh_pipeline = false;
++		std::set<LocationComponentPair> active_locations;
++		for (uint32_t member_index = 0; member_index < ib_type.member_types.size(); member_index++)
++		{
++			BuiltIn builtin = BuiltInMax;
++			if (is_member_builtin(ib_type, member_index, &builtin))
++				continue;
++
++			uint32_t component = 0;
++			uint32_t location = get_member_location(ib_type.self, member_index, &component);
++			if (location != k_unknown_location)
++				active_locations.insert({ location, component == k_unknown_component ? 0 : component });
++		}
++
++		auto next_input = inputs_by_location.begin();
++		auto emit_unused_inputs_before = [&](const LocationComponentPair *limit) {
++			while (next_input != inputs_by_location.end() && (!limit || next_input->first < *limit))
++			{
++				LocationComponentPair key = next_input->first;
++				MSLShaderInterfaceVariable input = next_input->second;
++				++next_input;
++
++				if (input.builtin != BuiltInMax || active_locations.count(key))
++					continue;
++
++				string type_name = get_variable_format_string(input.format);
++				string vector_type = type_name + get_vertex_loader_component_suffix(input.vecsize);
++				string attribute = join(" [[user(locn", key.location);
++				if (key.component != 0)
++					attribute += join("_", key.component);
++				attribute += ")]]";
++				statement(vector_type, " _spv_unused_loc", key.location, "_", key.component, attribute, ";");
++			}
++		};
++
++		bool emitted_remaining_inputs = false;
+ 		int i = 0;
+ 		for (auto &member : ib_type.member_types)
+ 		{
+ 			auto type = get<SPIRType>(member);
+ 			auto parent = get<SPIRType>(type.parent_type);
++			BuiltIn builtin = BuiltInMax;
++			if (is_member_builtin(ib_type, i, &builtin))
++			{
++				if (!emitted_remaining_inputs)
++				{
++					emit_unused_inputs_before(nullptr);
++					emitted_remaining_inputs = true;
++				}
++			}
++			else
++			{
++				uint32_t component = 0;
++				uint32_t location = get_member_location(ib_type.self, i, &component);
++				LocationComponentPair key = { location, component == k_unknown_component ? 0 : component };
++				emit_unused_inputs_before(&key);
++			}
+ 			emit_struct_member(ib_type, type.parent_type, i);
+ 			i++;
+ 		}
++		if (!emitted_remaining_inputs)
++			emit_unused_inputs_before(nullptr);
+ 		msl_options.for_mesh_pipeline = true;
+ 
+ 		int vertex_count = get_primitive_vertex_count();
+@@ -11871,10 +11925,24 @@
+ 			decl += ", ";
+ 	}
+ 
++	if (!processing_entry_point && get_execution_model() == ExecutionModelGeometry)
++	{
++		if (!func.arguments.empty())
++			decl += ", ";
++		decl += "thread mesh_stream_t& meshStream";
++	}
++
+ 	decl += ")";
+ 	statement(decl);
+ }
+ 
++void CompilerMSL::append_additional_function_call_args(const SPIRFunction &callee,
++                                                        SmallVector<string> &arglist)
++{
++	if (get_execution_model() == ExecutionModelGeometry && callee.self != ir.default_entry_point)
++		arglist.push_back("meshStream");
++}
++
+ static bool needs_chroma_reconstruction(const MSLConstexprSampler *constexpr_sampler)
+ {
+ 	// For now, only multiplanar images need explicit reconstruction. GBGR and BGRG images
+--- a/External/SPIRV-Cross/spirv_msl.hpp
++++ b/External/SPIRV-Cross/spirv_msl.hpp
+@@ -898,6 +898,8 @@
+ 	                                           const uint32_t *args, uint32_t count) override;
+ 	void emit_header() override;
+ 	void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags) override;
++	void append_additional_function_call_args(const SPIRFunction &func,
++	                                          SmallVector<std::string> &arglist) override;
+ 	void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id) override;
+ 	void emit_subgroup_op(const Instruction &i) override;
+ 	std::string to_texture_op(const Instruction &i, bool sparse, bool *forward,
+--- a/MoltenVKShaderConverter/SPIRV-Cross/spirv_glsl.cpp
++++ b/MoltenVKShaderConverter/SPIRV-Cross/spirv_glsl.cpp
+@@ -12463,6 +12463,7 @@
+ 		}
+ 
+ 		append_global_func_args(callee, length, arglist);
++		append_additional_function_call_args(callee, arglist);
+ 
+ 		funexpr += merge(arglist);
+ 		funexpr += ")";
+@@ -19106,4 +19107,3 @@
+ 	// default behavior
+ 	return convert_to_string(value, current_locale_radix_character);
+ }
+-
+--- a/MoltenVKShaderConverter/SPIRV-Cross/spirv_glsl.hpp
++++ b/MoltenVKShaderConverter/SPIRV-Cross/spirv_glsl.hpp
+@@ -793,6 +793,9 @@
+ 	void emit_uninitialized_temporary(uint32_t type, uint32_t id);
+ 	SPIRExpression &emit_uninitialized_temporary_expression(uint32_t type, uint32_t id);
+ 	void append_global_func_args(const SPIRFunction &func, uint32_t index, SmallVector<std::string> &arglist);
++	virtual void append_additional_function_call_args(const SPIRFunction &, SmallVector<std::string> &)
++	{
++	}
+ 	std::string to_non_uniform_aware_expression(uint32_t id);
+ 	std::string to_expression(uint32_t id, bool register_expression_read = true);
+ 	std::string to_composite_constructor_expression(const SPIRType &parent_type, uint32_t id, bool block_like_type);
+--- a/MoltenVKShaderConverter/SPIRV-Cross/spirv_msl.cpp
++++ b/MoltenVKShaderConverter/SPIRV-Cross/spirv_msl.cpp
+@@ -27,6 +27,7 @@
+ #include <algorithm>
+ #include <assert.h>
+ #include <numeric>
++#include <set>
+ 
+ using namespace spv;
+ using namespace SPIRV_CROSS_NAMESPACE;
+@@ -1888,15 +1889,6 @@
+ 			statement(to_name(stage_in_var_id));
+ 		}
+ 
+-		auto resources = get_sorted_entry_point_args(false);
+-
+-		for (auto &resource : resources)
+-		{
+-			statement(need_comma ? ", " : "", resource.name);
+-			need_comma = true;
+-		}
+-
+-
+ 		if (msl_options.argument_buffers)
+ 		{
+ 			for (uint32_t i = 0; i < kMaxArgumentBuffers; i++)
+@@ -1909,6 +1901,15 @@
+ 				need_comma = true;
+ 			}
+ 		}
++
++		auto resources = get_sorted_entry_point_args(false);
++
++		for (auto &resource : resources)
++		{
++			statement(need_comma ? ", " : "", resource.name);
++			need_comma = true;
++		}
++
+ 		ir.for_each_typed_id<SPIRVariable>([&](uint32_t var_id, SPIRVariable &var)
+ 		{
+ 			if (var.storage == StorageClassInput && is_builtin_variable(var))
+@@ -1965,14 +1966,67 @@
+ 		auto &ib_type = get_variable_data_type(ib_var);
+ 
+ 		msl_options.for_mesh_pipeline = false;
++		std::set<LocationComponentPair> active_locations;
++		for (uint32_t member_index = 0; member_index < ib_type.member_types.size(); member_index++)
++		{
++			BuiltIn builtin = BuiltInMax;
++			if (is_member_builtin(ib_type, member_index, &builtin))
++				continue;
++
++			uint32_t component = 0;
++			uint32_t location = get_member_location(ib_type.self, member_index, &component);
++			if (location != k_unknown_location)
++				active_locations.insert({ location, component == k_unknown_component ? 0 : component });
++		}
++
++		auto next_input = inputs_by_location.begin();
++		auto emit_unused_inputs_before = [&](const LocationComponentPair *limit) {
++			while (next_input != inputs_by_location.end() && (!limit || next_input->first < *limit))
++			{
++				LocationComponentPair key = next_input->first;
++				MSLShaderInterfaceVariable input = next_input->second;
++				++next_input;
++
++				if (input.builtin != BuiltInMax || active_locations.count(key))
++					continue;
++
++				string type_name = get_variable_format_string(input.format);
++				string vector_type = type_name + get_vertex_loader_component_suffix(input.vecsize);
++				string attribute = join(" [[user(locn", key.location);
++				if (key.component != 0)
++					attribute += join("_", key.component);
++				attribute += ")]]";
++				statement(vector_type, " _spv_unused_loc", key.location, "_", key.component, attribute, ";");
++			}
++		};
++
++		bool emitted_remaining_inputs = false;
+ 		int i = 0;
+ 		for (auto &member : ib_type.member_types)
+ 		{
+ 			auto type = get<SPIRType>(member);
+ 			auto parent = get<SPIRType>(type.parent_type);
++			BuiltIn builtin = BuiltInMax;
++			if (is_member_builtin(ib_type, i, &builtin))
++			{
++				if (!emitted_remaining_inputs)
++				{
++					emit_unused_inputs_before(nullptr);
++					emitted_remaining_inputs = true;
++				}
++			}
++			else
++			{
++				uint32_t component = 0;
++				uint32_t location = get_member_location(ib_type.self, i, &component);
++				LocationComponentPair key = { location, component == k_unknown_component ? 0 : component };
++				emit_unused_inputs_before(&key);
++			}
+ 			emit_struct_member(ib_type, type.parent_type, i);
+ 			i++;
+ 		}
++		if (!emitted_remaining_inputs)
++			emit_unused_inputs_before(nullptr);
+ 		msl_options.for_mesh_pipeline = true;
+ 
+ 		int vertex_count = get_primitive_vertex_count();
+@@ -11871,10 +11925,24 @@
+ 			decl += ", ";
+ 	}
+ 
++	if (!processing_entry_point && get_execution_model() == ExecutionModelGeometry)
++	{
++		if (!func.arguments.empty())
++			decl += ", ";
++		decl += "thread mesh_stream_t& meshStream";
++	}
++
+ 	decl += ")";
+ 	statement(decl);
+ }
+ 
++void CompilerMSL::append_additional_function_call_args(const SPIRFunction &callee,
++                                                        SmallVector<string> &arglist)
++{
++	if (get_execution_model() == ExecutionModelGeometry && callee.self != ir.default_entry_point)
++		arglist.push_back("meshStream");
++}
++
+ static bool needs_chroma_reconstruction(const MSLConstexprSampler *constexpr_sampler)
+ {
+ 	// For now, only multiplanar images need explicit reconstruction. GBGR and BGRG images
+--- a/MoltenVKShaderConverter/SPIRV-Cross/spirv_msl.hpp
++++ b/MoltenVKShaderConverter/SPIRV-Cross/spirv_msl.hpp
+@@ -898,6 +898,8 @@
+ 	                                           const uint32_t *args, uint32_t count) override;
+ 	void emit_header() override;
+ 	void emit_function_prototype(SPIRFunction &func, const Bitset &return_flags) override;
++	void append_additional_function_call_args(const SPIRFunction &func,
++	                                          SmallVector<std::string> &arglist) override;
+ 	void emit_sampled_image_op(uint32_t result_type, uint32_t result_id, uint32_t image_id, uint32_t samp_id) override;
+ 	void emit_subgroup_op(const Instruction &i) override;
+ 	std::string to_texture_op(const Instruction &i, bool sparse, bool *forward,
+--- a/MoltenVK/MoltenVK.xcodeproj/project.pbxproj
++++ b/MoltenVK/MoltenVK.xcodeproj/project.pbxproj
+@@ -2693,7 +2693,7 @@
+ 					"\"${BUILT_PRODUCTS_DIR}\"",
+ 				);
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MARKETING_VERSION = "${CURRENT_PROJECT_VERSION}";
+ 				MTL_ENABLE_DEBUG_INFO = YES;
+ 				PRELINK_LIBS = "${CONFIGURATION_BUILD_DIR}/libMoltenVKShaderConverter.a";
+@@ -2766,7 +2766,7 @@
+ 					"\"${BUILT_PRODUCTS_DIR}\"",
+ 				);
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MARKETING_VERSION = "${CURRENT_PROJECT_VERSION}";
+ 				MTL_ENABLE_DEBUG_INFO = NO;
+ 				PRELINK_LIBS = "${CONFIGURATION_BUILD_DIR}/libMoltenVKShaderConverter.a";
+--- a/MoltenVKShaderConverter/MoltenVKShaderConverter.xcodeproj/project.pbxproj
++++ b/MoltenVKShaderConverter/MoltenVKShaderConverter.xcodeproj/project.pbxproj
+@@ -735,7 +735,7 @@
+ 				);
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+ 				MACH_O_TYPE = staticlib;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				PRODUCT_NAME = MoltenVKShaderConverter;
+ 				SKIP_INSTALL = YES;
+ 				TVOS_DEPLOYMENT_TARGET = 13.0;
+@@ -796,7 +796,7 @@
+ 				);
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+ 				MACH_O_TYPE = staticlib;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				PRODUCT_NAME = MoltenVKShaderConverter;
+ 				SKIP_INSTALL = YES;
+ 				TVOS_DEPLOYMENT_TARGET = 13.0;
+--- a/ExternalDependencies.xcodeproj/project.pbxproj
++++ b/ExternalDependencies.xcodeproj/project.pbxproj
+@@ -7236,7 +7236,7 @@
+ 				GCC_WARN_UNUSED_VARIABLE = NO;
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+ 				MACH_O_TYPE = staticlib;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				SKIP_INSTALL = YES;
+ 				TVOS_DEPLOYMENT_TARGET = 13.0;
+ 			};
+@@ -7286,7 +7286,7 @@
+ 				GCC_WARN_UNUSED_VARIABLE = NO;
+ 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
+ 				MACH_O_TYPE = staticlib;
+-				MACOSX_DEPLOYMENT_TARGET = 10.15;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				SKIP_INSTALL = YES;
+ 				TVOS_DEPLOYMENT_TARGET = 13.0;
+ 				VALIDATE_PRODUCT = YES;
