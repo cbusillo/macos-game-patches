@@ -1142,49 +1142,62 @@ def codesign_info(path: pathlib.Path, *, required: bool) -> dict[str, Any] | Non
         if required:
             raise ArtifactError("input.signature", "codesign is unavailable", path=str(path))
         return None
-    verify = subprocess.run(
-        [codesign, "--verify", "--strict", "--all-architectures", str(path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if verify.returncode != 0:
-        if required:
-            raise ArtifactError(
-                "input.signature",
-                "Code signature verification failed",
-                path=str(path),
-                stderr=verify.stderr.strip(),
-            )
-        return None
-    detail = subprocess.run(
-        [codesign, "-dv", "--verbose=4", str(path)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    output = detail.stderr + "\n" + detail.stdout
-    fields: dict[str, str | None] = {
-        "kind": None,
-        "identifier": None,
-        "teamIdentifier": None,
-        "cdhash": None,
-    }
-    for line in output.splitlines():
-        if line == "Signature=adhoc":
-            fields["kind"] = "adhoc"
-        elif line.startswith("Identifier="):
-            fields["identifier"] = line.split("=", 1)[1]
-        elif line.startswith("TeamIdentifier="):
-            value = line.split("=", 1)[1]
-            fields["teamIdentifier"] = None if value == "not set" else value
-        elif line.startswith("CDHash="):
-            fields["cdhash"] = line.split("=", 1)[1].lower()
-    if fields["kind"] is None and fields["teamIdentifier"] is not None:
-        fields["kind"] = "developer-id"
-    if fields["identifier"] is None or fields["cdhash"] is None or fields["kind"] is None:
-        raise ArtifactError("input.signature", "Code signature metadata is incomplete", path=str(path))
-    return fields
+    verification_path = path
+    temporary_path: pathlib.Path | None = None
+    if any(part.lower().endswith(".app") for part in path.parts):
+        descriptor, temporary_name = tempfile.mkstemp(prefix="runtime-artifact-codesign-")
+        os.close(descriptor)
+        temporary_path = pathlib.Path(temporary_name)
+        shutil.copyfile(path, temporary_path)
+        temporary_path.chmod(0o555)
+        verification_path = temporary_path
+    try:
+        verify = subprocess.run(
+            [codesign, "--verify", "--strict", "--all-architectures", str(verification_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if verify.returncode != 0:
+            if required:
+                raise ArtifactError(
+                    "input.signature",
+                    "Code signature verification failed",
+                    path=str(path),
+                    stderr=verify.stderr.strip(),
+                )
+            return None
+        detail = subprocess.run(
+            [codesign, "-dv", "--verbose=4", str(verification_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = detail.stderr + "\n" + detail.stdout
+        fields: dict[str, str | None] = {
+            "kind": None,
+            "identifier": None,
+            "teamIdentifier": None,
+            "cdhash": None,
+        }
+        for line in output.splitlines():
+            if line == "Signature=adhoc":
+                fields["kind"] = "adhoc"
+            elif line.startswith("Identifier="):
+                fields["identifier"] = line.split("=", 1)[1]
+            elif line.startswith("TeamIdentifier="):
+                value = line.split("=", 1)[1]
+                fields["teamIdentifier"] = None if value == "not set" else value
+            elif line.startswith("CDHash="):
+                fields["cdhash"] = line.split("=", 1)[1].lower()
+        if fields["kind"] is None and fields["teamIdentifier"] is not None:
+            fields["kind"] = "developer-id"
+        if fields["identifier"] is None or fields["cdhash"] is None or fields["kind"] is None:
+            raise ArtifactError("input.signature", "Code signature metadata is incomplete", path=str(path))
+        return fields
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def inspect_pe(path: pathlib.Path) -> dict[str, Any]:
