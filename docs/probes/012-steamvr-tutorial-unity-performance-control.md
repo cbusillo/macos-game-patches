@@ -177,10 +177,14 @@ installed SteamVR Tutorial directory byte-for-byte unchanged.
 
 ## Current Status
 
-`passed` on July 16, 2026 UTC. The approximately `34 FPS` ceiling was a probe
-observer effect caused by synchronous fake-runtime logging, not an inherent
-Open Brush, Unity 2019, CrossOver, IOSurface, or encoder limit. A second game
-download is not warranted. The target-specific Tutorial control now terminates
-reproducibly with a passing cadence verdict while preserving the expected native
-format failure. Resume official Freedom recenter, reconnect, headset
-removal/reentry, and physical soak validation with the buffered logger retained.
+`cadence-discriminator: passed; native-handoff: expected-fail` on July 16, 2026
+UTC. The approximately `34 FPS` ceiling was a probe observer effect caused by
+synchronous fake-runtime logging, not an inherent Open Brush, Unity 2019,
+CrossOver, IOSurface, or encoder limit. The target-specific Tutorial control now
+terminates reproducibly with a passing cadence verdict while preserving the
+expected RGBA-to-BGRA native-format failure.
+
+No second download was warranted to answer this probe's performance question.
+That historical decision does not replace issue #59's separate packaged-runtime
+generality gate. This probe is complete and remains a performance discriminator,
+not a supported gameplay target.
