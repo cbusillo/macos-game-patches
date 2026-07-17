@@ -334,6 +334,26 @@ Issue routing:
 
 ## Status
 
-`in-progress`: the official payload and reusable profiles pass strict preflight.
-The corrected `1.0.0-dev2` artifact must pass the disconnected smoke before
-physical qualification.
+`architecture-ceiling`: the official payload and reusable profiles pass strict
+preflight, and the packaged runtime sustains The Lab at the required cadence,
+but it has not produced visible game content.
+
+### Final Disconnected Classification
+
+Artifact `1.0.0-dev4`, seal
+`805d6ca7d57b42145cb8a9fd77c347671bda20fe9f7113d020da57152e1d466a`,
+encoded all 5,400 requested frames at a `89.925` FPS steady tail with zero
+producer/native drops, zero pose-generation gaps, and exact cleanup. Twelve
+sparse production samples were all black. The fake runtime recognized the
+historical `FnTable:IVRSystem_020`, `IVRSettings_002`, and `IVROverlay_020`
+interfaces, so missing those interfaces was not the remaining cause.
+
+The host now treats transient black production frames as valid frame data while
+retaining exact startup pixel failures and requiring eventual visible content.
+That change is merged in `cbusillo/ALVR` PR #5. The Lab still never became
+visible during the one-minute disconnected run, so physical qualification,
+controller gameplay, experience transitions, and recovery cannot be claimed.
+The physical Vision Pro was unavailable on July 17, 2026; the next discriminator
+is a live physical run. If live tracking/focus does not produce visible content,
+issue #59 has reached the declared custom-fake-runtime/compositor ceiling and
+must not be closed as a successful second-title qualification.
