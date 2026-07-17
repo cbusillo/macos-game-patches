@@ -1,0 +1,309 @@
+# Reproducible Runtime Artifact
+
+This document defines the manifest-backed artifact boundary for the
+owner-operated Mac ALVR runtime. GitHub issue #58 owns implementation status;
+this file records the durable build, provenance, and ownership contract.
+
+## Purpose
+
+The existing physical pipeline is proven, but its binaries come from sibling
+checkouts and local CrossOver, DXVK, and MoltenVK build trees. The artifact
+system converts those explicit inputs into one immutable, content-addressed
+runtime payload without changing the frame path or installing anything.
+
+The artifact builder does not claim that opaque local CrossOver build trees are
+reproducible. It verifies their outputs against checked-in hashes and records
+the recipes and patch identities that produced them. This is the honest
+reproducibility boundary until a later bootstrap issue reconstructs those source
+trees automatically.
+
+## Decisions
+
+- Use strict JSON for the manifest, lockfile, bindings, metadata, and dry-run
+  plans so the standard-library Python tool has no parser dependency.
+- Keep human-reviewed intent in `runtime/manifest.json` and resolved binary
+  hashes in `runtime/manifest.lock.json`.
+- Treat sibling Git checkouts as source identities pinned by remote and commit.
+- Classify every staged binary as a pinned-Git, repo-source, or opaque-local
+  build output; pin each by content hash and link it to its build recipe.
+- Produce an unsigned deterministic bridge application payload. Developer ID
+  signing and the stable installed CDHash remain a separate sealing boundary.
+- Publish artifacts atomically into a content-addressed directory under
+  `.code/runtime-artifacts/`.
+- Keep installation and removal read-only in this issue. The tool emits exact
+  operation plans; transactional mutation belongs to issue #61.
+- Never fetch or download dependencies while validating or building.
+- Keep executable prerequisite commands and allowed mutation roots in trusted
+  builder policy rather than allowing the manifest to widen its own authority.
+
+## Files
+
+```text
+runtime/
+  bindings.example.json
+  manifest.json
+  manifest.lock.json
+tools/
+  build_runtime_artifact.py
+.code/
+  runtime-bindings.json        # local, ignored
+  runtime-artifacts/           # generated, ignored
+```
+
+The checked-in manifest and lock contain no machine-specific absolute paths.
+Local paths are supplied through the ignored bindings file.
+
+## Input Classes
+
+### Git Sources
+
+Git inputs record a repository URL, local path binding, exact commit, and clean
+worktree policy. The builder verifies the current commit and tracked state
+before reading any generated binary from the checkout.
+
+The repository itself permits unrelated untracked files because each
+repo-owned source file is independently hash-pinned. Sibling source checkouts
+must be entirely clean.
+
+### Repository Sources
+
+Repo-owned build sources, protocol headers, patch files, recipes, the artifact
+builder, the unchanged production runner, the artifact contract, and the frozen
+v1 scope record are tracked by Git and pinned by SHA-256. A source edit therefore
+invalidates the manifest before an artifact can be produced.
+
+### Opaque Local Build Outputs
+
+The following are local build products, not vendored inputs:
+
+- patched CrossOver DXVK `d3d11.dll` and `dxgi.dll`;
+- patched CrossOver MoltenVK `libMoltenVK.dylib`;
+- the CrossOver Wine bridge `.dll` and Unix `.so`.
+
+The custom OpenVR binaries are repo-source builds. The native
+`alvr_macos_bridge` is a pinned-Git build from the exact ALVR host commit.
+
+Each output has one manifest identity, one artifact destination, one normalized
+format/kind/architecture contract, and one lockfile hash. PE certificate-table
+state and required Mach-O signatures are checked explicitly. Missing, changed,
+wrongly signed, or wrongly architected files fail closed.
+
+### User-Supplied Prerequisites
+
+CrossOver, Xcode, the Apple SDKs, Developer ID credentials, Steam, official game
+payloads, hardware, and privacy consent are not copied into the artifact unless
+an explicitly listed runtime binary is required. CrossOver version checks are
+assertions against the local user-owned application.
+
+## Artifact Layout
+
+```text
+mac-alvr-runtime-<version>-<full-seal>/
+  payload/
+    macos/
+      ALVRMacOSBridge.app/
+        Contents/Info.plist
+        Contents/MacOS/alvr_macos_bridge
+        Contents/Resources/runtime-owner.json
+      libMoltenVK.dylib
+    unix/
+      alvr_iosurface_bridge.so
+    windows/
+      alvr_iosurface_bridge.dll
+      d3d11.dll
+      dxgi.dll
+      openvr_api.dll
+      openvr_api.real.dll
+  config/
+    launch-agent.plist.template
+    runtime-defaults.json
+  plans/
+    install.template.json
+    uninstall.template.json
+  contract/
+    manifest.json
+    manifest.lock.json
+  provenance/
+    artifact.json
+    build-inputs.json
+    files.sha256
+```
+
+The seal is the SHA-256 of the canonical manifest hash, lock hash, and sorted
+content records. Those records cover `payload/`, `config/`, `plans/`, the
+canonical contract copies, and sealed build-input provenance. Only
+`provenance/artifact.json` and its derived checksum list are excluded to avoid
+self-reference. Absolute source paths, timestamps, usernames, and hostnames are
+excluded.
+
+`build-inputs.json` records the declared build command, actual Git commits and
+trees, tracked source hashes, prerequisite results, normalized binary metadata,
+signatures, and the separate sealing policy. `verify` cross-checks that sealed
+record against the contract and payload rather than trusting metadata alone. It
+also rejects undeclared files or directories, generated configuration or plans
+that differ from the contract, noncanonical JSON, and incorrect published
+modes.
+
+Artifact files are published as `0444` or `0555` without copied timestamps. All
+directories become `0555`; files and directories are flushed before atomic
+publication. A repeated build may reuse an existing content-addressed directory
+only when full verification succeeds.
+
+## Mutable Boundary
+
+The artifact itself is immutable. The manifest inventories mutable state with
+an owner and `transient`, `retained`, or `restored` lifecycle. Exact install and
+uninstall file mutations are also represented in paired operation templates:
+
+- the stable signed bridge application path;
+- CrossOver's live MoltenVK library;
+- the game's OpenVR, DXVK, and bridge files;
+- the per-user launchd plist and Mach service;
+- the runtime lock and ALVR session state; and
+- per-run backups, journals, logs, and evidence.
+
+The builder never writes to those locations.
+
+## Commands
+
+### Structural Check
+
+```bash
+python3 tools/build_runtime_artifact.py check
+```
+
+Validates the manifest and lock schema, tracked repository-source hashes, safe
+relative destinations, case-insensitive/path-prefix collisions, strict supply
+classes, exact plan inverses, and manifest-lock identity without requiring local
+runtime binaries.
+
+When the builder, contract, or another checked repository source changes, the
+read-only helper computes the exact proposed source hashes and canonical
+manifest hash:
+
+```bash
+python3 tools/build_runtime_artifact.py contract-digests
+```
+
+Review and apply those values to the manifest and lock, then rerun `check`.
+There is intentionally no automatic bless or write mode.
+
+### Local Validation
+
+```bash
+python3 tools/build_runtime_artifact.py validate \
+  --bindings .code/runtime-bindings.json
+```
+
+Checks Git commits and cleanliness, repo-source hashes, prerequisites, local
+binary hashes, file types, and required code signatures. It performs no writes.
+
+### Build
+
+```bash
+python3 tools/build_runtime_artifact.py build \
+  --bindings .code/runtime-bindings.json \
+  --output-root .code/runtime-artifacts
+```
+
+Stages into a locked temporary directory, computes the seal, writes canonical
+provenance, makes the artifact read-only, and atomically publishes it.
+
+### Dry-Run Ownership Plan
+
+```bash
+python3 tools/build_runtime_artifact.py plan \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --bindings .code/runtime-bindings.json
+```
+
+Resolves every source, target, backup, ownership marker, retention, and expected
+precondition to an exact absolute path. It reports complete install/uninstall
+plans, the resolved mutable-state inventory, readiness, and blockers, even when
+the current host is not in an installable state. It rejects an artifact built
+from a different external manifest or lock. The command emits JSON and performs
+no mutation.
+
+### Verify And Compare
+
+```bash
+python3 tools/build_runtime_artifact.py verify \
+  --artifact .code/runtime-artifacts/<artifact>
+
+python3 tools/build_runtime_artifact.py compare \
+  .code/runtime-build-a/<artifact> \
+  .code/runtime-build-b/<artifact>
+```
+
+`verify` recalculates all content records and the seal. `compare` requires two
+independent artifacts to have identical seals and file records.
+
+### Self-Test
+
+```bash
+python3 tools/build_runtime_artifact.py self-test
+```
+
+Creates bounded temporary fixtures and covers valid, missing, hash-mismatched,
+wrong-type, unsafe-destination, symlink, wrong-commit, tracked/untracked dirty
+worktree, atomic-build, read-only publication, exact-plan, contract mismatch,
+exact modes, undeclared directories, tamper detection, and two-build-equivalence
+behavior. It does not use CrossOver or Apple tooling and runs in CI.
+
+## Binding Rules
+
+Bindings use `${NAME}` references. The built-ins are `${REPO_ROOT}` and
+`${HOME}`. Unknown names, recursive references, non-string values, and unknown
+binding keys are rejected.
+
+Input bindings resolve to regular non-symlink files or Git directories. Plan
+targets resolve under one of the explicitly allowed roots in the manifest.
+Existing symlinks cannot escape those roots.
+
+The builder accepts only the project-owned target-root templates and exact
+prerequisite command/plist locations compiled into its trusted policy. A
+manifest cannot add commands or widen the target sandbox. Local binding values
+remain an explicit operator trust boundary.
+
+`runtime/bindings.example.json` documents the qualified local shape. Copy it to
+`.code/runtime-bindings.json` and replace only the local build-output roots.
+
+## Error Contract
+
+Failures are emitted as JSON with a stable symbolic code and context. Important
+classes include:
+
+- `manifest.invalid` and `lock.invalid`;
+- `binding.missing` and `binding.unknown`;
+- `path.unsafe` and `path.symlink`;
+- `git.revision`, `git.remote`, and `git.dirty`;
+- `source.hash`, `source.untracked`, `input.missing`, `input.hash`, and
+  `input.type`;
+- `input.signature` and `prerequisite.mismatch`;
+- `artifact.publish`, `artifact.verify`, and `artifact.compare`;
+- `plan.unresolved` for incomplete or unsafe dry-run plans; and
+- `internal.error` for unexpected failures that are still returned as JSON.
+
+There is no continue-anyway override for integrity, identity, architecture, or
+path failures.
+
+## Validation Gate
+
+Issue #58 is complete when:
+
+1. `check` and `self-test` pass in CI.
+2. `validate` passes against the qualified local bindings.
+3. Two independent local builds compare equal.
+4. The dry-run plan reports every owned install and uninstall path without
+   modifying the host.
+5. The existing probe runner and frame-path sources remain unchanged.
+
+## Non-Goals
+
+- rebuilding or downloading CrossOver, DXVK, or MoltenVK source trees;
+- signing or registering the bridge application;
+- installing files into CrossOver or a game;
+- starting ALVR, a game, or the Vision Pro client;
+- defining the reusable per-game profile schema;
+- adding GUI, notarization, updates, or telemetry; and
+- changing the proven frame, pose, transport, controller, or lifecycle path.

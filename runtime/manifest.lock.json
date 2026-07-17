@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "id": "native_bridge",
+      "sha256": "5304c19dfdfe488ace4d12d5d4284b8a04cfcba6f49360c86b20a391c595a326",
+      "signature": {
+        "cdhash": "08cd0bd30e0174943537f772093e6d3988616552",
+        "identifier": "alvr_macos_bridge-ea231a705ea9939a",
+        "kind": "adhoc",
+        "teamIdentifier": null
+      }
+    },
+    {
+      "id": "patched_moltenvk",
+      "sha256": "03b2606d35090a5f735056abb5cd941ca7d5517c3e2ede0ab1e3fde331aad34a",
+      "signature": {
+        "cdhash": "07686f4a2e06a7504b020ec93106b59915588dad",
+        "identifier": "libMoltenVK-55554944867c7a1df4bb3f0590f38390b0408e66",
+        "kind": "adhoc",
+        "teamIdentifier": null
+      }
+    },
+    {
+      "id": "dxvk_d3d11",
+      "sha256": "f03b12d66b30202c1e5df7d1ba2d0b8dc0c8397d9c53849cfe91fa9e9e418578"
+    },
+    {
+      "id": "dxvk_dxgi",
+      "sha256": "19f4fc1ce7f954aa295d18a2b4e24ad98099f57f923160a1c9aa8cb17f9b5102"
+    },
+    {
+      "id": "openvr_shim",
+      "sha256": "b64ac3dd7e336873d6a7536da545f2c772565463ca83ef5d1d1bf3693bee97c6"
+    },
+    {
+      "id": "custom_openvr_runtime",
+      "sha256": "74a15f37b0907603029ea1c8449b1d2808254e080741ad6820d36554a5c84c5d"
+    },
+    {
+      "id": "wine_bridge_windows",
+      "sha256": "9ffc94fad11db7cb8524656c82fb39a96cce40cd8e2113071ad5af8b79a1f3f1"
+    },
+    {
+      "id": "wine_bridge_unix",
+      "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
+    }
+  ],
+  "manifestSha256": "bd3c4c29c323f19755ca5e6bf2e71111308d94961e1576b5556b06a5b2cb4c5d",
+  "schemaVersion": 1
+}
