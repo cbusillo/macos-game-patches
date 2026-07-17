@@ -163,13 +163,28 @@ constexpr uint32_t kPoolSlotCount = 3;
 constexpr uint32_t kFrameFlagConsumerSample = 1u << 1;
 constexpr uint32_t kFrameFlagFallbackPose = 1u << 2;
 constexpr uint32_t kFrameFlagStartupBarrier = 1u << 3;
+constexpr uint64_t kFirstConsumerSampleFrame = 450;
+constexpr uint64_t kConsumerSampleInterval = 450;
 constexpr uint64_t kResizeConsumerSampleFrame = 450;
 constexpr uint64_t kSeparateEyeConsumerSampleFrame = 30;
+constexpr uint32_t kVisibleColorThreshold = 96;
 constexpr uint64_t kPoolFenceTimeoutNanoseconds = UINT64_C(5000000000);
 constexpr auto kPoolAcquireTimeout = std::chrono::milliseconds(100);
 constexpr auto kPoolWorkerOrderTimeout = std::chrono::seconds(40);
 constexpr DWORD kPoolShutdownTimeoutMilliseconds = 40000;
 const int kModuleAnchor = 0;
+
+constexpr bool periodicConsumerSampleDue(uint64_t submittedFrames) {
+    return submittedFrames >= kFirstConsumerSampleFrame &&
+           (submittedFrames - kFirstConsumerSampleFrame) %
+                   kConsumerSampleInterval ==
+               0;
+}
+
+static_assert(!periodicConsumerSampleDue(449));
+static_assert(periodicConsumerSampleDue(450));
+static_assert(!periodicConsumerSampleDue(899));
+static_assert(periodicConsumerSampleDue(900));
 
 std::string environmentValue(const char *name) {
     const DWORD required = GetEnvironmentVariableA(name, nullptr, 0);
@@ -483,8 +498,13 @@ struct DxvkIosurfaceSubmitProof::PoolState {
     uint64_t nearestBlitFrames = 0;
     uint64_t separateEyeFrames = 0;
     uint64_t resizedFramesSinceTransition = 0;
+    uint64_t consumerSamples = 0;
+    uint64_t directConsumerSamples = 0;
     uint64_t resizedConsumerSamples = 0;
     uint64_t separateEyeConsumerSamples = 0;
+    uint64_t blackConsumerSamples = 0;
+    uint64_t visibleConsumerSamples = 0;
+    bool visibleContentValidated = false;
     uint32_t activeWorkers = 0;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -643,8 +663,12 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
         1,
     };
 
+    const bool sourceBgra =
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     if (sourceDescription.Width == width &&
-        sourceDescription.Height == height) {
+        sourceDescription.Height == height && sourceBgra) {
         submission->mode = PoolTransferMode::DirectCopy;
         d3dContext->CopyResource(
             slots[slotIndex].handoffTexture.Get(), sourceTexture);
@@ -687,6 +711,9 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
             &resizeSourceLayout,
             &sourceInfo);
         Slot &slot = slots[slotIndex];
+        const bool supportedSourceFormat =
+            sourceInfo.format == VK_FORMAT_R8G8B8A8_UNORM ||
+            sourceInfo.format == VK_FORMAT_B8G8R8A8_UNORM;
         if (FAILED(result) || sourceImage == VK_NULL_HANDLE ||
             resizeSourceLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
             slot.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
@@ -696,7 +723,8 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
             sourceInfo.extent.depth != 1 || sourceInfo.mipLevels != 1 ||
             sourceInfo.arrayLayers != 1 ||
             sourceInfo.samples != VK_SAMPLE_COUNT_1_BIT ||
-            sourceInfo.format != slot.format ||
+            !supportedSourceFormat ||
+            slot.format != VK_FORMAT_B8G8R8A8_UNORM ||
             (sourceInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0 ||
             (slot.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
             return fail("source-vulkan-image", VK_ERROR_FORMAT_NOT_SUPPORTED);
@@ -1039,9 +1067,7 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitSeparateEyeTransfer(
 
     const auto supportedSourceFormat = [](VkFormat format) {
         return format == VK_FORMAT_R8G8B8A8_UNORM ||
-               format == VK_FORMAT_R8G8B8A8_SRGB ||
-               format == VK_FORMAT_B8G8R8A8_UNORM ||
-               format == VK_FORMAT_B8G8R8A8_SRGB;
+               format == VK_FORMAT_B8G8R8A8_UNORM;
     };
     Slot &slot = slots[slotIndex];
     if (!supportedSourceFormat(leftSource.info.format) ||
@@ -1478,7 +1504,10 @@ void DxvkIosurfaceSubmitProof::shutdown() {
             "iosurface pool summary submitted=%llu released=%llu dropped=%llu "
             "source_transitions=%llu copy_frames=%llu linear_blit_frames=%llu "
             "nearest_blit_frames=%llu separate_eye_frames=%llu "
+            "consumer_samples=%llu direct_consumer_samples=%llu "
             "resized_consumer_samples=%llu separate_eye_consumer_samples=%llu "
+            "black_consumer_samples=%llu visible_consumer_samples=%llu "
+            "visible_content_validated=%u "
             "last_source=%ux%u output=%ux%u",
             static_cast<unsigned long long>(state->submittedFrames),
             static_cast<unsigned long long>(state->releasedFrames),
@@ -1488,9 +1517,14 @@ void DxvkIosurfaceSubmitProof::shutdown() {
             static_cast<unsigned long long>(state->linearBlitFrames),
             static_cast<unsigned long long>(state->nearestBlitFrames),
             static_cast<unsigned long long>(state->separateEyeFrames),
+            static_cast<unsigned long long>(state->consumerSamples),
+            static_cast<unsigned long long>(state->directConsumerSamples),
             static_cast<unsigned long long>(state->resizedConsumerSamples),
             static_cast<unsigned long long>(
                 state->separateEyeConsumerSamples),
+            static_cast<unsigned long long>(state->blackConsumerSamples),
+            static_cast<unsigned long long>(state->visibleConsumerSamples),
+            state->visibleContentValidated ? 1u : 0u,
             state->lastSourceWidth,
             state->lastSourceHeight,
             state->width,
@@ -2303,6 +2337,32 @@ DxvkIosurfaceSubmitProof::initializePool(
     if (FAILED(result) || !selfTestTexture) {
         return fail("self-test-source-create");
     }
+    std::vector<uint32_t> selfTestRgbaPixels(
+        static_cast<size_t>(selfTestWidth) * selfTestHeight);
+    const auto rgbaPixel = [](const std::array<uint8_t, 4> &bgra) {
+        return static_cast<uint32_t>(bgra[2]) |
+               (static_cast<uint32_t>(bgra[1]) << 8) |
+               (static_cast<uint32_t>(bgra[0]) << 16) |
+               (static_cast<uint32_t>(bgra[3]) << 24);
+    };
+    const uint32_t leftRgbaPixel = rgbaPixel(leftColor);
+    const uint32_t rightRgbaPixel = rgbaPixel(rightColor);
+    for (uint32_t y = 0; y < selfTestHeight; ++y) {
+        for (uint32_t x = 0; x < selfTestWidth; ++x) {
+            selfTestRgbaPixels[static_cast<size_t>(y) * selfTestWidth + x] =
+                x < selfTestWidth / 2 ? leftRgbaPixel : rightRgbaPixel;
+        }
+    }
+    D3D11_TEXTURE2D_DESC selfTestRgbaDescription = selfTestDescription;
+    selfTestRgbaDescription.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    D3D11_SUBRESOURCE_DATA selfTestRgbaData = selfTestData;
+    selfTestRgbaData.pSysMem = selfTestRgbaPixels.data();
+    ComPtr<ID3D11Texture2D> selfTestRgbaTexture;
+    result = state->d3dDevice->CreateTexture2D(
+        &selfTestRgbaDescription, &selfTestRgbaData, &selfTestRgbaTexture);
+    if (FAILED(result) || !selfTestRgbaTexture) {
+        return fail("self-test-rgba-source-create");
+    }
 
     for (uint32_t slotIndex = 0; slotIndex < kPoolSlotCount; ++slotIndex) {
         PoolState::Slot &slot = state->slots[slotIndex];
@@ -2317,8 +2377,14 @@ DxvkIosurfaceSubmitProof::initializePool(
         }
 
         PoolTransferSubmission transfer{};
-        if (!state->submitTransfer(selfTestTexture.Get(),
-                                   selfTestDescription,
+        ID3D11Texture2D *transferTexture = selfTestTexture.Get();
+        const D3D11_TEXTURE2D_DESC *transferDescription = &selfTestDescription;
+        if (slotIndex == 2) {
+            transferTexture = selfTestRgbaTexture.Get();
+            transferDescription = &selfTestRgbaDescription;
+        }
+        if (!state->submitTransfer(transferTexture,
+                                   *transferDescription,
                                    slotIndex,
                                    &transfer)) {
             logFunction(
@@ -2668,7 +2734,7 @@ void DxvkIosurfaceSubmitProof::capturePoolSources(
         leftDescription.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     if (leftDescription.SampleDesc.Count != 1 ||
         leftDescription.ArraySize != 1 || leftDescription.MipLevels != 1 ||
-        (!leftBgra && !(separateEyes && leftRgba))) {
+        (!leftBgra && !leftRgba)) {
         return;
     }
     D3D11_TEXTURE2D_DESC rightDescription{};
@@ -2930,18 +2996,34 @@ void DxvkIosurfaceSubmitProof::capturePoolSources(
                     ++state->separateEyeFrames;
                     break;
             }
-            if ((transfer.mode == PoolTransferMode::StereoLinearBlit ||
+            const bool retryConsumerSample =
+                !state->visibleContentValidated &&
+                periodicConsumerSampleDue(state->submittedFrames);
+            const bool resizedConsumerSample =
+                (transfer.mode == PoolTransferMode::StereoLinearBlit ||
                  transfer.mode == PoolTransferMode::StereoNearestBlit) &&
                 state->resizedFramesSinceTransition ==
-                    kResizeConsumerSampleFrame) {
-                workerContext->consumerSample = true;
-                ++state->resizedConsumerSamples;
-            } else if (
+                    kResizeConsumerSampleFrame;
+            const bool separateEyeConsumerSample =
                 transfer.mode == PoolTransferMode::SeparateEyeBlit &&
                 state->separateEyeFrames ==
-                    kSeparateEyeConsumerSampleFrame) {
+                    kSeparateEyeConsumerSampleFrame;
+            if (retryConsumerSample || resizedConsumerSample ||
+                separateEyeConsumerSample) {
                 workerContext->consumerSample = true;
-                ++state->separateEyeConsumerSamples;
+                ++state->consumerSamples;
+                switch (transfer.mode) {
+                    case PoolTransferMode::DirectCopy:
+                        ++state->directConsumerSamples;
+                        break;
+                    case PoolTransferMode::StereoLinearBlit:
+                    case PoolTransferMode::StereoNearestBlit:
+                        ++state->resizedConsumerSamples;
+                        break;
+                    case PoolTransferMode::SeparateEyeBlit:
+                        ++state->separateEyeConsumerSamples;
+                        break;
+                }
             }
         }
     }
@@ -3134,6 +3216,18 @@ void DxvkIosurfaceSubmitProof::runPoolWorker(PoolWorkerContext *context) {
             released = true;
             recycled = releasePass || releaseDropped;
             closed = releaseClosed;
+            if (context->consumerSample && (releasePass || releaseClosed)) {
+                const uint32_t visibleColor =
+                    static_cast<uint32_t>(release.actualBgra[0]) +
+                    static_cast<uint32_t>(release.actualBgra[1]) +
+                    static_cast<uint32_t>(release.actualBgra[2]);
+                if (visibleColor >= kVisibleColorThreshold) {
+                    ++state->visibleConsumerSamples;
+                    state->visibleContentValidated = true;
+                } else {
+                    ++state->blackConsumerSamples;
+                }
+            }
             if (closed) {
                 state->closing = true;
             }

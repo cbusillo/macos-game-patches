@@ -19,11 +19,39 @@ probe_arguments_text=${ALVR_NATIVE_PROBE_ARGUMENTS:-}
 legacy_probe_argument=${ALVR_NATIVE_PROBE_ARGUMENT:-}
 probe_extra_env=${ALVR_NATIVE_PROBE_EXTRA_ENV:-}
 probe_launcher_source=${ALVR_NATIVE_PROBE_LAUNCHER_SOURCE:-}
+runtime_artifact=${ALVR_NATIVE_RUNTIME_ARTIFACT:-}
+runtime_artifact_seal=
+profile_id=${ALVR_NATIVE_PROBE_PROFILE_ID:-}
+profile_sha256=${ALVR_NATIVE_PROBE_PROFILE_SHA256:-}
+profile_source_mode=${ALVR_NATIVE_PROBE_SOURCE_MODE:-}
+controller_profile=${ALVR_NATIVE_PROBE_CONTROLLER_PROFILE:-}
+game_dirs_text=${ALVR_NATIVE_PROBE_GAME_DIRS:-}
+openvr_dirs_text=${ALVR_NATIVE_PROBE_OPENVR_DIRS:-}
+stock_openvr_hashes_text=${ALVR_NATIVE_PROBE_STOCK_OPENVR_HASHES:-}
+target_ids_text=${ALVR_NATIVE_PROBE_TARGET_IDS:-}
+target_process_patterns_text=${ALVR_NATIVE_PROBE_TARGET_PROCESS_PATTERNS:-}
+target_workdirs_text=${ALVR_NATIVE_PROBE_TARGET_WORKDIRS:-}
+allowed_source_transitions_text=${ALVR_NATIVE_PROBE_ALLOWED_SOURCE_TRANSITIONS:-}
+expected_source_transitions_text=${ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS:-}
+startup_timeout_seconds=${ALVR_NATIVE_PROBE_STARTUP_TIMEOUT_SECONDS:-300}
+transition_timeout_seconds=${ALVR_NATIVE_PROBE_TRANSITION_TIMEOUT_SECONDS:-300}
 moltenvk="$crossover_app/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
 patched_moltenvk="$repo/.code/vendor/crossover-26.2.0/source/sources/moltenvk/Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib"
 dxvk_dir="$repo/.code/probes/008-real-openvr-iosurface/dxvk-d93568f1-build/src"
+dxvk_d3d11="$dxvk_dir/d3d11/d3d11.dll"
+dxvk_dxgi="$dxvk_dir/dxgi/dxgi.dll"
 fake_runtime_source="$repo/tools/fake_openvr_real.cpp"
 native_bridge="$alvr_checkout/target/release/alvr_macos_bridge"
+artifact_native_bridge_info=
+artifact_mode=0
+if [[ -n $runtime_artifact ]]; then
+	artifact_mode=1
+	patched_moltenvk="$runtime_artifact/payload/macos/libMoltenVK.dylib"
+	dxvk_d3d11="$runtime_artifact/payload/windows/d3d11.dll"
+	dxvk_dxgi="$runtime_artifact/payload/windows/dxgi.dll"
+	native_bridge="$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/MacOS/alvr_macos_bridge"
+	artifact_native_bridge_info="$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/Info.plist"
+fi
 native_bridge_codesign_identity='Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)'
 native_bridge_bundle_id=com.alvr.macos-bridge.iosurface
 native_bridge_bundle="$repo/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app"
@@ -74,6 +102,7 @@ moltenvk_signature_cdhash=
 moltenvk_prewarm_seconds=
 native_frames=${ALVR_NATIVE_PROBE_FRAMES:-300}
 native_connect=${ALVR_NATIVE_PROBE_CONNECT:-false}
+require_visible_content=${ALVR_NATIVE_PROBE_REQUIRE_VISIBLE_CONTENT:-false}
 pressure_pause_ms=${ALVR_NATIVE_PROBE_PRESSURE_PAUSE_MS:-0}
 fake_wait_get_poses_sleep_ms=${ALVR_FAKE_WAIT_GET_POSES_SLEEP_MS:-}
 expected_source_transition=${ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITION:-}
@@ -140,9 +169,63 @@ run_lock_acquired=0
 wine_bridge_source_existed=0
 wine_bridge_source_mutated=0
 probe_arguments=()
+game_dirs=()
+openvr_dirs=()
+stock_openvr_hashes=()
+target_ids=()
+target_process_patterns=()
+target_workdirs=()
+target_process_seen=()
+target_first_seen_epoch=()
+allowed_source_transitions=()
+expected_source_transitions=()
 
 stock_moltenvk_hash=5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056
 stock_openvr_hash=${ALVR_NATIVE_PROBE_STOCK_OPENVR_HASH:-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c}
+
+if [[ -n $game_dirs_text ]]; then
+	IFS=: read -r -a game_dirs <<<"$game_dirs_text"
+else
+	game_dirs+=("$game_dir")
+fi
+if [[ -n $openvr_dirs_text ]]; then
+	IFS=: read -r -a openvr_dirs <<<"$openvr_dirs_text"
+else
+	openvr_dirs+=("$engine_dir")
+fi
+if [[ -n $stock_openvr_hashes_text ]]; then
+	IFS=: read -r -a stock_openvr_hashes <<<"$stock_openvr_hashes_text"
+else
+	stock_openvr_hashes+=("$stock_openvr_hash")
+fi
+if [[ -n $target_ids_text ]]; then
+	IFS=: read -r -a target_ids <<<"$target_ids_text"
+else
+	target_ids+=("${profile_id:-game}")
+fi
+if [[ -n $target_process_patterns_text ]]; then
+	IFS=: read -r -a target_process_patterns <<<"$target_process_patterns_text"
+else
+	target_process_patterns+=("$probe_process_pattern")
+fi
+if [[ -n $target_workdirs_text ]]; then
+	IFS=: read -r -a target_workdirs <<<"$target_workdirs_text"
+else
+	target_workdirs+=("$game_workdir")
+fi
+game_dir=${game_dirs[0]}
+engine_dir=${openvr_dirs[0]}
+stock_openvr_hash=${stock_openvr_hashes[0]}
+game_workdir=${target_workdirs[0]}
+
+if [[ -n $expected_source_transitions_text ]]; then
+	IFS=, read -r -a expected_source_transitions <<<"$expected_source_transitions_text"
+elif [[ -n $expected_source_transition ]]; then
+	expected_source_transitions+=("$expected_source_transition")
+fi
+if [[ -n $allowed_source_transitions_text ]]; then
+	IFS=, read -r -a allowed_source_transitions <<<"$allowed_source_transitions_text"
+fi
 
 if [[ -n $probe_arguments_text && -n $legacy_probe_argument ]]; then
 	echo "set only one of ALVR_NATIVE_PROBE_ARGUMENTS or ALVR_NATIVE_PROBE_ARGUMENT" >&2
@@ -166,6 +249,13 @@ case "$native_connect" in
 true | false) ;;
 *)
 	echo "ALVR_NATIVE_PROBE_CONNECT must be true or false" >&2
+	exit 1
+	;;
+esac
+case "$require_visible_content" in
+true | false) ;;
+*)
+	echo "ALVR_NATIVE_PROBE_REQUIRE_VISIBLE_CONTENT must be true or false" >&2
 	exit 1
 	;;
 esac
@@ -199,6 +289,77 @@ if [[ -n $expected_source_transition &&
 	! $expected_source_transition =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
 	echo "ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITION must be WIDTHxHEIGHT" >&2
 	exit 1
+fi
+if [[ ${#game_dirs[@]} -eq 0 || ${#game_dirs[@]} -ne ${#openvr_dirs[@]} ||
+	${#openvr_dirs[@]} -ne ${#stock_openvr_hashes[@]} ||
+	${#stock_openvr_hashes[@]} -ne ${#target_ids[@]} ||
+	${#target_ids[@]} -ne ${#target_process_patterns[@]} ||
+	${#target_process_patterns[@]} -ne ${#target_workdirs[@]} ]]; then
+	echo "game, OpenVR, workdir, and stock-hash target lists must be nonempty and equal length" >&2
+	exit 1
+fi
+for ((index = 0; index < ${#game_dirs[@]}; index++)); do
+	[[ -n ${game_dirs[$index]} && -n ${openvr_dirs[$index]} &&
+		-n ${target_workdirs[$index]} ]] || {
+		echo "runtime target paths must not be empty" >&2
+		exit 1
+	}
+	[[ ${stock_openvr_hashes[$index]} =~ ^[0-9a-f]{64}$ ]] || {
+		echo "runtime target stock OpenVR hashes must be lowercase SHA-256 values" >&2
+		exit 1
+	}
+	[[ ${target_ids[$index]} =~ ^[a-z0-9]+(-[a-z0-9]+)*$ &&
+		-n ${target_process_patterns[$index]} ]] || {
+		echo "runtime target ids and process patterns must be valid" >&2
+		exit 1
+	}
+	target_process_seen[index]=0
+	target_first_seen_epoch[index]=0
+	for ((other = index + 1; other < ${#game_dirs[@]}; other++)); do
+		if [[ ${game_dirs[$index]} == "${game_dirs[$other]}" ||
+			${openvr_dirs[$index]} == "${openvr_dirs[$other]}" ]]; then
+			echo "runtime target directories must be unique" >&2
+			exit 1
+		fi
+	done
+done
+for transition in "${expected_source_transitions[@]}"; do
+	[[ $transition =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || {
+		echo "ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS must be comma-separated WIDTHxHEIGHT values" >&2
+		exit 1
+	}
+done
+for transition in "${allowed_source_transitions[@]}"; do
+	[[ $transition =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || {
+		echo "ALVR_NATIVE_PROBE_ALLOWED_SOURCE_TRANSITIONS must be comma-separated WIDTHxHEIGHT values" >&2
+		exit 1
+	}
+done
+if [[ -n $expected_source_transition && ${#expected_source_transitions[@]} -gt 0 &&
+	$expected_source_transition != "${expected_source_transitions[0]}" ]]; then
+	echo "legacy and plural expected source transition values disagree" >&2
+	exit 1
+fi
+for timeout_name in startup_timeout_seconds transition_timeout_seconds; do
+	timeout_value=${!timeout_name}
+	if ! [[ $timeout_value =~ ^[1-9][0-9]*$ ]] || ((timeout_value > 600)); then
+		echo "profile timeouts must be positive integers no greater than 600 seconds" >&2
+		exit 1
+	fi
+done
+if [[ $artifact_mode -eq 1 ]]; then
+	[[ $runtime_artifact == /* ]] || {
+		echo "ALVR_NATIVE_RUNTIME_ARTIFACT must be an absolute path" >&2
+		exit 1
+	}
+	[[ -n $profile_id && $profile_id =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || {
+		echo "artifact-backed runs require ALVR_NATIVE_PROBE_PROFILE_ID" >&2
+		exit 1
+	}
+	[[ $profile_sha256 =~ ^[0-9a-f]{64}$ ]] || {
+		echo "artifact-backed runs require ALVR_NATIVE_PROBE_PROFILE_SHA256" >&2
+		exit 1
+	}
 fi
 if [[ $native_connect == true && $pressure_pause_ms -ne 0 ]]; then
 	echo "pressure pause is only supported for disconnected validation" >&2
@@ -236,6 +397,30 @@ process_uses_bottle() {
 			index($0, prefix) == 1 { found = 1 }
 			END { exit !found }
 		'
+}
+
+record_target_processes() {
+	local command
+	local epoch
+	local index
+	local pid
+
+	epoch=$(date +%s)
+	for ((index = 0; index < ${#target_process_patterns[@]}; index++)); do
+		[[ ${target_process_seen[$index]} -eq 0 ]] || continue
+		while IFS= read -r pid; do
+			[[ -n $pid ]] || continue
+			if process_uses_bottle "$pid"; then
+				target_process_seen[index]=1
+				target_first_seen_epoch[index]=$epoch
+				command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+				printf 'epoch=%s target=%s pid=%s command=%s\n' \
+					"$epoch" "${target_ids[$index]}" "$pid" "$command" \
+					>>"$run_dir/target-process-events.txt"
+				break
+			fi
+		done < <(pgrep -f "${target_process_patterns[$index]}" 2>/dev/null || true)
+	done
 }
 
 bottle_process_pids() {
@@ -1298,12 +1483,23 @@ bootout_launch_agent() {
 }
 
 archive_logs() {
+	local index
 	[[ -f /tmp/alvr_openvr_submit_shim.log ]] &&
 		cp -p /tmp/alvr_openvr_submit_shim.log "$run_dir/openvr-submit-shim.log"
 	[[ -f /tmp/fake_openvr_real.log ]] &&
 		cp -p /tmp/fake_openvr_real.log "$run_dir/fake-openvr.log"
-	for log in "$game_dir"/*_d3d11.log "$game_dir"/*_dxgi.log; do
-		[[ -f $log ]] && cp -p "$log" "$run_dir/"
+	for ((index = 0; index < ${#game_dirs[@]}; index++)); do
+		for log in "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log; do
+			[[ -f $log ]] && cp -p "$log" "$run_dir/${target_ids[$index]}-${log##*/}"
+		done
+		if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
+			for log in \
+				"${target_workdirs[$index]}"/*_d3d11.log \
+				"${target_workdirs[$index]}"/*_dxgi.log; do
+				[[ -f $log ]] &&
+					cp -p "$log" "$run_dir/${target_ids[$index]}-workdir-${log##*/}"
+			done
+		fi
 	done
 	if [[ -f $avp_console_log ]]; then
 		cp -p "$avp_console_log" "$run_dir/avp-client-console.raw.log"
@@ -1320,6 +1516,8 @@ restore() {
 	restored=1
 	set +e
 	local cleanup_failed=0
+	local index
+	local path
 	if [[ $mutations_started -eq 1 ]]; then
 		stop_game
 		stop_pid "$launcher_pid"
@@ -1346,23 +1544,49 @@ restore() {
 		if [[ -f $backup_dir/libMoltenVK.dylib ]]; then
 			replace_file_atomically "$backup_dir/libMoltenVK.dylib" "$moltenvk" || cleanup_failed=1
 		fi
-		if [[ -f $backup_dir/openvr_api.dll ]]; then
-			cp -f "$backup_dir/openvr_api.dll" "$engine_dir/openvr_api.dll" || cleanup_failed=1
-		fi
-		rm -f "$engine_dir/openvr_api.real.dll"
-		rm -f "$game_dir/d3d11.dll" "$game_dir/dxgi.dll" "$game_dir/alvr_iosurface_bridge.dll"
-		rm -f "$game_dir"/*_d3d11.log "$game_dir"/*_dxgi.log
+		for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+			if [[ -f $backup_dir/openvr/$index/openvr_api.dll ]]; then
+				cp -f "$backup_dir/openvr/$index/openvr_api.dll" \
+					"${openvr_dirs[$index]}/openvr_api.dll" || cleanup_failed=1
+			fi
+			rm -f "${openvr_dirs[$index]}/openvr_api.real.dll"
+			rm -f \
+				"${game_dirs[$index]}/d3d11.dll" \
+				"${game_dirs[$index]}/dxgi.dll" \
+				"${game_dirs[$index]}/alvr_iosurface_bridge.dll"
+			rm -f "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log
+			if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
+				rm -f \
+					"${target_workdirs[$index]}"/*_d3d11.log \
+					"${target_workdirs[$index]}"/*_dxgi.log
+			fi
+		done
 		rm -f /tmp/alvr_openvr_submit_shim.log /tmp/fake_openvr_real.log /tmp/alvr_frame_buffer.shm
 		rm -f "$probe_dir"/real_submit_iosurface_{ready,ready.tmp,done,done.tmp}.txt
 		rm -f "$desktop_warmup_file"
 		{
 			printf 'moltenvk=%s\n' "$(hash_file "$moltenvk")"
-			printf 'openvr=%s\n' "$(hash_file "$engine_dir/openvr_api.dll")"
+			for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+				printf 'openvr[%d]=%s\n' "$index" \
+					"$(hash_file "${openvr_dirs[$index]}/openvr_api.dll")"
+				for path in \
+					"${openvr_dirs[$index]}/openvr_api.real.dll" \
+					"${game_dirs[$index]}/d3d11.dll" \
+					"${game_dirs[$index]}/dxgi.dll" \
+					"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
+					"${game_dirs[$index]}"/*_d3d11.log \
+					"${game_dirs[$index]}"/*_dxgi.log \
+					"${target_workdirs[$index]}"/*_d3d11.log \
+					"${target_workdirs[$index]}"/*_dxgi.log; do
+					if [[ -e $path ]]; then
+						printf 'unexpected-present=%s\n' "$path"
+						cleanup_failed=1
+					else
+						printf 'absent=%s\n' "$path"
+					fi
+				done
+			done
 			for path in \
-				"$engine_dir/openvr_api.real.dll" \
-				"$game_dir/d3d11.dll" \
-				"$game_dir/dxgi.dll" \
-				"$game_dir/alvr_iosurface_bridge.dll" \
 				"$desktop_warmup_file" \
 				"$launch_agent_plist" \
 				/tmp/alvr_openvr_submit_shim.log \
@@ -1383,7 +1607,10 @@ restore() {
 			fi
 		} >"$run_dir/restored-state.txt"
 		[[ $(hash_file "$moltenvk") == "$stock_moltenvk_hash" ]] || cleanup_failed=1
-		[[ $(hash_file "$engine_dir/openvr_api.dll") == "$stock_openvr_hash" ]] || cleanup_failed=1
+		for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+			[[ $(hash_file "${openvr_dirs[$index]}/openvr_api.dll") == "${stock_openvr_hashes[$index]}" ]] ||
+				cleanup_failed=1
+		done
 	fi
 	if [[ $run_lock_acquired -eq 1 ]]; then
 		rm -rf "$run_lock" || cleanup_failed=1
@@ -1415,25 +1642,50 @@ mkdir -p \
 	"$runtime_state_root" \
 	"$(dirname "$native_bridge_bundle")"
 
-for path in \
-	"$alvr_checkout/Cargo.toml" \
-	"$wine_source" \
-	"$wine_build" \
-	"$repo/tools/alvr_iosurface_bridge" \
-	"$moltenvk" \
-	"$patched_moltenvk" \
-	"$dxvk_dir/d3d11/d3d11.dll" \
-	"$dxvk_dir/dxgi/dxgi.dll" \
-	"$fake_runtime_source" \
-	"$cxstart" \
-	"$wineserver" \
-	"$game_executable" \
-	"$engine_dir/openvr_api.dll"; do
+required_paths=(
+	"$alvr_checkout/Cargo.toml"
+	"$repo/tools/alvr_iosurface_bridge"
+	"$moltenvk"
+	"$patched_moltenvk"
+	"$dxvk_d3d11"
+	"$dxvk_dxgi"
+	"$cxstart"
+	"$wineserver"
+	"$game_executable"
+)
+if [[ $artifact_mode -eq 1 ]]; then
+	required_paths+=(
+		"$runtime_artifact/provenance/artifact.json"
+		"$runtime_artifact/payload/windows/openvr_api.dll"
+		"$runtime_artifact/payload/windows/openvr_api.real.dll"
+		"$runtime_artifact/payload/windows/alvr_iosurface_bridge.dll"
+		"$runtime_artifact/payload/unix/alvr_iosurface_bridge.so"
+		"$native_bridge"
+		"$artifact_native_bridge_info"
+	)
+else
+	required_paths+=(
+		"$wine_source"
+		"$wine_build"
+		"$fake_runtime_source"
+	)
+fi
+for ((index = 0; index < ${#game_dirs[@]}; index++)); do
+	required_paths+=("${game_dirs[$index]}" "${openvr_dirs[$index]}/openvr_api.dll")
+done
+for path in "${required_paths[@]}"; do
 	[[ -e $path ]] || {
 		echo "missing=$path" >&2
 		exit 1
 	}
 done
+
+if [[ $artifact_mode -eq 1 ]]; then
+	python3 "$repo/tools/build_runtime_artifact.py" verify \
+		--artifact "$runtime_artifact" >"$run_dir/runtime-artifact-verify.json"
+	runtime_artifact_seal=$(jq -er '.sealId' \
+		"$runtime_artifact/provenance/artifact.json")
+fi
 
 codesign --verify --strict --all-architectures "$patched_moltenvk"
 moltenvk_signature_identifier=$(codesign -dv --verbose=4 "$patched_moltenvk" 2>&1 |
@@ -1445,12 +1697,22 @@ moltenvk_signature_cdhash=$(codesign -dv --verbose=4 "$patched_moltenvk" 2>&1 |
 	exit 1
 }
 
-cmp -s \
-	"$repo/tools/alvr_iosurface_bridge/iosurface_handoff_protocol.h" \
-	"$alvr_checkout/alvr/macos_bridge/src/iosurface_handoff_protocol.h" || {
-	echo "IOSurface protocol headers differ between producer and native bridge" >&2
-	exit 1
-}
+if [[ $artifact_mode -eq 1 ]]; then
+	artifact_protocol_hash=$(jq -er \
+		'.sourceFiles[] | select(.id == "iosurface_protocol") | .sha256' \
+		"$runtime_artifact/provenance/build-inputs.json")
+	[[ $(hash_file "$repo/tools/alvr_iosurface_bridge/iosurface_handoff_protocol.h") == "$artifact_protocol_hash" ]] || {
+		echo "qualification protocol header differs from the sealed artifact source" >&2
+		exit 1
+	}
+else
+	cmp -s \
+		"$repo/tools/alvr_iosurface_bridge/iosurface_handoff_protocol.h" \
+		"$alvr_checkout/alvr/macos_bridge/src/iosurface_handoff_protocol.h" || {
+		echo "IOSurface protocol headers differ between producer and native bridge" >&2
+		exit 1
+	}
+fi
 
 if [[ -n $(game_process_pids) ]]; then
 	echo "$probe_app_name is already running" >&2
@@ -1464,21 +1726,25 @@ fi
 	echo "CrossOver MoltenVK is not pristine" >&2
 	exit 1
 }
-[[ $(hash_file "$engine_dir/openvr_api.dll") == "$stock_openvr_hash" ]] || {
-	echo "$probe_app_name OpenVR DLL is not pristine" >&2
-	exit 1
-}
-for path in \
-	"$engine_dir/openvr_api.real.dll" \
-	"$game_dir/d3d11.dll" \
-	"$game_dir/dxgi.dll" \
-	"$game_dir/alvr_iosurface_bridge.dll" \
-	"$game_dir"/*_d3d11.log \
-	"$game_dir"/*_dxgi.log; do
-	[[ ! -e $path ]] || {
-		echo "staging target exists: $path" >&2
+for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+	[[ $(hash_file "${openvr_dirs[$index]}/openvr_api.dll") == "${stock_openvr_hashes[$index]}" ]] || {
+		echo "$probe_app_name OpenVR DLL is not pristine: ${openvr_dirs[$index]}/openvr_api.dll" >&2
 		exit 1
 	}
+	for path in \
+		"${openvr_dirs[$index]}/openvr_api.real.dll" \
+		"${game_dirs[$index]}/d3d11.dll" \
+		"${game_dirs[$index]}/dxgi.dll" \
+		"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
+		"${game_dirs[$index]}"/*_d3d11.log \
+		"${game_dirs[$index]}"/*_dxgi.log \
+		"${target_workdirs[$index]}"/*_d3d11.log \
+		"${target_workdirs[$index]}"/*_dxgi.log; do
+		[[ ! -e $path ]] || {
+			echo "staging target exists: $path" >&2
+			exit 1
+		}
+	done
 done
 
 acquire_run_lock
@@ -1504,11 +1770,16 @@ elif [[ -d $alvr_bridge_root ]]; then
 	rsync -a "$alvr_bridge_root/" "$alvr_runtime_root/"
 fi
 
-cargo build \
-	--manifest-path "$alvr_checkout/Cargo.toml" \
-	-p alvr_macos_bridge \
-	--release \
-	>"$run_dir/alvr-build.log" 2>&1
+if [[ $artifact_mode -eq 0 ]]; then
+	cargo build \
+		--manifest-path "$alvr_checkout/Cargo.toml" \
+		-p alvr_macos_bridge \
+		--release \
+		>"$run_dir/alvr-build.log" 2>&1
+else
+	printf 'artifact=%s\nseal=%s\n' "$runtime_artifact" "$runtime_artifact_seal" \
+		>"$run_dir/alvr-build.log"
+fi
 for legacy_native_bridge_bundle in "${legacy_native_bridge_bundles[@]}"; do
 	if [[ -d $legacy_native_bridge_bundle ]]; then
 		"$launch_services_register" -u "$legacy_native_bridge_bundle" \
@@ -1519,28 +1790,38 @@ done
 rm -rf "$native_bridge_install_staging"
 mkdir -p "$native_bridge_install_staging/Contents/MacOS"
 cp -p "$native_bridge" "$native_bridge_install_program"
-/usr/bin/plutil -create xml1 "$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleIdentifier -string "$native_bridge_bundle_id" \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleName -string ALVRMacOSBridge \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleDisplayName -string 'ALVR macOS Bridge' \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleExecutable -string alvr_macos_bridge \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundlePackageType -string APPL \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleVersion -string 1 \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert LSBackgroundOnly -bool true \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
-	'Connect to the ALVR client on the local network.' \
-	"$native_bridge_install_staging/Contents/Info.plist"
-/usr/bin/plutil -insert NSBonjourServices -json '["_alvr._tcp"]' \
-	"$native_bridge_install_staging/Contents/Info.plist"
+if [[ $artifact_mode -eq 1 ]]; then
+	cp -p "$artifact_native_bridge_info" \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	mkdir -p "$native_bridge_install_staging/Contents/Resources"
+	cp -p \
+		"$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json" \
+		"$native_bridge_install_staging/Contents/Resources/runtime-owner.json"
+else
+	/usr/bin/plutil -create xml1 "$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleIdentifier -string "$native_bridge_bundle_id" \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleName -string ALVRMacOSBridge \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleDisplayName -string 'ALVR macOS Bridge' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleExecutable -string alvr_macos_bridge \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundlePackageType -string APPL \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleVersion -string 1 \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert LSBackgroundOnly -bool true \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
+		'Connect to the ALVR client on the local network.' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert NSBonjourServices -json '["_alvr._tcp"]' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+fi
+chmod u+w "$native_bridge_install_program"
 codesign --force --deep \
 	--sign "$native_bridge_codesign_identity" \
 	--identifier "$native_bridge_bundle_id" \
@@ -1603,49 +1884,76 @@ cp -p "$native_bridge_bundle/Contents/Info.plist" "$native_bridge_info_evidence"
 	"$repo/tools/mach_service_oversize_probe.c" \
 	-o "$oversize_probe" \
 	>"$run_dir/oversize-probe-build.log" 2>&1
-x86_64-w64-mingw32-g++ \
-	-O2 -g -std=c++20 -static -static-libgcc -static-libstdc++ -shared \
-	"$repo/tools/openvr_submit_shim.cpp" \
-	"$repo/tools/dxvk_iosurface_submit_proof.cpp" \
-	-I"$alvr_checkout/openvr/headers" \
-	-I"$alvr_checkout/alvr/server_openvr/cpp" \
-	-I/opt/homebrew/include \
-	-ld3d11 -ld3d10 -ldxgi -lole32 \
-	-Wl,--out-implib,"$build_dir/openvr_api_shim.lib" \
-	-o "$shim" \
-	>"$run_dir/shim-build.log" 2>&1
-x86_64-w64-mingw32-g++ \
-	-O2 -std=c++17 -static -static-libgcc -static-libstdc++ -shared \
-	"$fake_runtime_source" \
-	-I"$alvr_checkout/openvr/headers" \
-	-I"$alvr_checkout/alvr/server_openvr/cpp" \
-	-o "$fake_runtime" \
-	>"$run_dir/fake-runtime-build.log" 2>&1
+if [[ $artifact_mode -eq 1 ]]; then
+	cp -p "$runtime_artifact/payload/windows/openvr_api.dll" "$shim"
+	cp -p "$runtime_artifact/payload/windows/openvr_api.real.dll" "$fake_runtime"
+	cp -p "$runtime_artifact/payload/windows/alvr_iosurface_bridge.dll" \
+		"$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll"
+	cp -p "$runtime_artifact/payload/unix/alvr_iosurface_bridge.so" \
+		"$bridge_root/x86_64-unix/alvr_iosurface_bridge.so"
+	{
+		printf 'artifact=%s\n' "$runtime_artifact"
+		printf 'seal=%s\n' "$runtime_artifact_seal"
+		for file in \
+			"$patched_moltenvk" \
+			"$dxvk_d3d11" \
+			"$dxvk_dxgi" \
+			"$shim" \
+			"$fake_runtime" \
+			"$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll" \
+			"$bridge_root/x86_64-unix/alvr_iosurface_bridge.so" \
+			"$native_bridge"; do
+			printf '%s  %s\n' "$(hash_file "$file")" "$file"
+		done
+	} >"$run_dir/artifact-payload.txt"
+	printf 'artifact payload; no source build\n' >"$run_dir/shim-build.log"
+	printf 'artifact payload; no source build\n' >"$run_dir/fake-runtime-build.log"
+	printf 'artifact payload; no source build\n' >"$run_dir/bridge-build.log"
+else
+	x86_64-w64-mingw32-g++ \
+		-O2 -g -std=c++20 -static -static-libgcc -static-libstdc++ -shared \
+		"$repo/tools/openvr_submit_shim.cpp" \
+		"$repo/tools/dxvk_iosurface_submit_proof.cpp" \
+		-I"$alvr_checkout/openvr/headers" \
+		-I"$alvr_checkout/alvr/server_openvr/cpp" \
+		-I/opt/homebrew/include \
+		-ld3d11 -ld3d10 -ldxgi -lole32 \
+		-Wl,--out-implib,"$build_dir/openvr_api_shim.lib" \
+		-o "$shim" \
+		>"$run_dir/shim-build.log" 2>&1
+	x86_64-w64-mingw32-g++ \
+		-O2 -std=c++17 -static -static-libgcc -static-libstdc++ -shared \
+		"$fake_runtime_source" \
+		-I"$alvr_checkout/openvr/headers" \
+		-I"$alvr_checkout/alvr/server_openvr/cpp" \
+		-o "$fake_runtime" \
+		>"$run_dir/fake-runtime-build.log" 2>&1
 
-if [[ -d $wine_bridge_source ]]; then
-	wine_bridge_source_existed=1
-	mkdir -p "$wine_bridge_backup"
-	rsync -a "$wine_bridge_source/" "$wine_bridge_backup/"
+	if [[ -d $wine_bridge_source ]]; then
+		wine_bridge_source_existed=1
+		mkdir -p "$wine_bridge_backup"
+		rsync -a "$wine_bridge_source/" "$wine_bridge_backup/"
+	fi
+	mutations_started=1
+	wine_bridge_source_mutated=1
+	rsync -a --delete \
+		"$repo/tools/alvr_iosurface_bridge/" \
+		"$wine_bridge_source/"
+	rm -f \
+		"$bridge_build/unixlib.o" \
+		"$bridge_build/alvr_iosurface_bridge.so" \
+		"$bridge_build/x86_64-windows/bridge.o" \
+		"$bridge_build/x86_64-windows/alvr_iosurface_bridge.dll"
+	arch -x86_64 make -C "$wine_build" -j8 \
+		dlls/alvr_iosurface_bridge/x86_64-windows/alvr_iosurface_bridge.dll \
+		dlls/alvr_iosurface_bridge/alvr_iosurface_bridge.so \
+		>"$run_dir/bridge-build.log" 2>&1
+	cp -f "$bridge_build/x86_64-windows/alvr_iosurface_bridge.dll" \
+		"$bridge_root/x86_64-windows/"
+	cp -f "$bridge_build/alvr_iosurface_bridge.so" \
+		"$bridge_root/x86_64-unix/"
+	restore_wine_bridge_source
 fi
-mutations_started=1
-wine_bridge_source_mutated=1
-rsync -a --delete \
-	"$repo/tools/alvr_iosurface_bridge/" \
-	"$wine_bridge_source/"
-rm -f \
-	"$bridge_build/unixlib.o" \
-	"$bridge_build/alvr_iosurface_bridge.so" \
-	"$bridge_build/x86_64-windows/bridge.o" \
-	"$bridge_build/x86_64-windows/alvr_iosurface_bridge.dll"
-arch -x86_64 make -C "$wine_build" -j8 \
-	dlls/alvr_iosurface_bridge/x86_64-windows/alvr_iosurface_bridge.dll \
-	dlls/alvr_iosurface_bridge/alvr_iosurface_bridge.so \
-	>"$run_dir/bridge-build.log" 2>&1
-cp -f "$bridge_build/x86_64-windows/alvr_iosurface_bridge.dll" \
-	"$bridge_root/x86_64-windows/"
-cp -f "$bridge_build/alvr_iosurface_bridge.so" \
-	"$bridge_root/x86_64-unix/"
-restore_wine_bridge_source
 
 for file in \
 	"$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll" \
@@ -1662,8 +1970,13 @@ done
 
 rm -f /tmp/alvr_frame_buffer.shm /tmp/alvr_openvr_submit_shim.log /tmp/fake_openvr_real.log
 cp -p "$moltenvk" "$backup_dir/libMoltenVK.dylib"
-cp -p "$engine_dir/openvr_api.dll" "$backup_dir/openvr_api.dll"
+for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+	mkdir -p "$backup_dir/openvr/$index"
+	cp -p "${openvr_dirs[$index]}/openvr_api.dll" \
+		"$backup_dir/openvr/$index/openvr_api.dll"
+done
 
+mutations_started=1
 replace_file_atomically "$patched_moltenvk" "$moltenvk"
 codesign --verify --strict --all-architectures "$moltenvk"
 if ! /usr/bin/time -p arch -x86_64 /usr/bin/python3 -c \
@@ -1674,11 +1987,14 @@ if ! /usr/bin/time -p arch -x86_64 /usr/bin/python3 -c \
 	exit 1
 fi
 moltenvk_prewarm_seconds=$(awk '$1 == "real" { print $2 }' "$run_dir/moltenvk-prewarm.log")
-cp -f "$fake_runtime" "$engine_dir/openvr_api.real.dll"
-cp -f "$shim" "$engine_dir/openvr_api.dll"
-cp -f "$dxvk_dir/d3d11/d3d11.dll" "$game_dir/d3d11.dll"
-cp -f "$dxvk_dir/dxgi/dxgi.dll" "$game_dir/dxgi.dll"
-cp -f "$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll" "$game_dir/alvr_iosurface_bridge.dll"
+for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
+	cp -f "$fake_runtime" "${openvr_dirs[$index]}/openvr_api.real.dll"
+	cp -f "$shim" "${openvr_dirs[$index]}/openvr_api.dll"
+	cp -f "$dxvk_d3d11" "${game_dirs[$index]}/d3d11.dll"
+	cp -f "$dxvk_dxgi" "${game_dirs[$index]}/dxgi.dll"
+	cp -f "$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll" \
+		"${game_dirs[$index]}/alvr_iosurface_bridge.dll"
+done
 start_desktop_warmup
 if [[ $native_connect == true ]]; then
 	launch_avp_client || {
@@ -1703,8 +2019,22 @@ write_launch_agent_plist
 	printf 'run_dir=%s\n' "$run_dir"
 	printf 'probe_app_name=%s\n' "$probe_app_name"
 	printf 'probe_process_pattern=%s\n' "$probe_process_pattern"
+	printf 'profile_id=%s\n' "$profile_id"
+	printf 'profile_sha256=%s\n' "$profile_sha256"
+	printf 'profile_source_mode=%s\n' "$profile_source_mode"
+	printf 'controller_profile=%s\n' "$controller_profile"
+	printf 'runtime_artifact=%s\n' "$runtime_artifact"
+	printf 'runtime_artifact_seal=%s\n' "$runtime_artifact_seal"
+	printf 'artifact_mode=%s\n' "$artifact_mode"
 	printf 'game_dir=%s\n' "$game_dir"
 	printf 'engine_dir=%s\n' "$engine_dir"
+	for ((index = 0; index < ${#game_dirs[@]}; index++)); do
+		printf 'target[%d].game_dir=%s\n' "$index" "${game_dirs[$index]}"
+		printf 'target[%d].openvr_dir=%s\n' "$index" "${openvr_dirs[$index]}"
+		printf 'target[%d].workdir=%s\n' "$index" "${target_workdirs[$index]}"
+		printf 'target[%d].stock_openvr_sha256=%s\n' \
+			"$index" "${stock_openvr_hashes[$index]}"
+	done
 	printf 'game_executable=%s\n' "$game_executable"
 	printf 'game_workdir=%s\n' "$game_workdir"
 	printf 'probe_arguments='
@@ -1736,10 +2066,15 @@ write_launch_agent_plist
 	printf 'desktop_explorer_pid=%s\n' "$desktop_explorer_pid"
 	printf 'native_frames=%s\n' "$native_frames"
 	printf 'native_connect=%s\n' "$native_connect"
+	printf 'require_visible_content=%s\n' "$require_visible_content"
 	printf 'pressure_pause_ms=%s\n' "$pressure_pause_ms"
 	printf 'fake_pacing_mode=%s\n' "$fake_pacing_mode"
 	printf 'fake_wait_get_poses_sleep_ms=%s\n' "$fake_wait_get_poses_sleep_ms"
 	printf 'expected_source_transition=%s\n' "$expected_source_transition"
+	printf 'expected_source_transitions=%s\n' "$expected_source_transitions_text"
+	printf 'allowed_source_transitions=%s\n' "$allowed_source_transitions_text"
+	printf 'startup_timeout_seconds=%s\n' "$startup_timeout_seconds"
+	printf 'transition_timeout_seconds=%s\n' "$transition_timeout_seconds"
 	printf 'producer_min_fps=%s\n' "$producer_min_fps"
 	printf 'producer_max_fps=%s\n' "$producer_max_fps"
 	printf 'source_size=%sx%s\n' "$source_width" "$source_height"
@@ -1776,8 +2111,8 @@ write_launch_agent_plist
 		"$bridge_root/x86_64-unix/alvr_iosurface_bridge.so" \
 		"$launch_agent_evidence" \
 		"$patched_moltenvk" \
-		"$dxvk_dir/d3d11/d3d11.dll" \
-		"$dxvk_dir/dxgi/dxgi.dll" \
+		"$dxvk_d3d11" \
+		"$dxvk_dxgi" \
 		"$fake_runtime"
 	printf 'macos_game_patches_head=%s\n' "$(git -C "$repo" rev-parse HEAD)"
 	printf 'alvr_head=%s\n' "$(git -C "$alvr_checkout" rev-parse HEAD)"
@@ -1870,7 +2205,8 @@ fi
 launcher_pid=$!
 
 startup_self_tests_seen=0
-for _ in $(seq 1 6000); do
+for _ in $(seq 1 $((startup_timeout_seconds * 10))); do
+	record_target_processes
 	if [[ $native_connect == true ]] && ! capture_avp_connection_state; then
 		break
 	fi
@@ -1957,6 +2293,7 @@ if [[ $bridge_wait_seconds -lt 120 ]]; then
 	bridge_wait_seconds=120
 fi
 for _ in $(seq 1 $((bridge_wait_seconds * 10))); do
+	record_target_processes
 	if rg -q '^native_source summary ' "$run_dir/native-bridge.log" 2>/dev/null; then
 		bridge_summary_seen=1
 	fi
@@ -2012,6 +2349,36 @@ if [[ $native_connect == true ]]; then
 		avp_post_host_status=1
 	fi
 fi
+
+record_target_processes
+target_processes_seen=0
+target_transition_gate=1
+entrypoint_first_seen_epoch=${target_first_seen_epoch[0]}
+{
+	for ((index = 0; index < ${#target_ids[@]}; index++)); do
+		transition_latency_seconds=-1
+		if [[ ${target_process_seen[$index]} -eq 1 ]]; then
+			target_processes_seen=$((target_processes_seen + 1))
+			if [[ $entrypoint_first_seen_epoch -gt 0 ]]; then
+				transition_latency_seconds=$((${target_first_seen_epoch[$index]} - entrypoint_first_seen_epoch))
+			fi
+		fi
+		printf 'target=%s seen=%s first_seen_epoch=%s transition_latency_seconds=%s\n' \
+			"${target_ids[$index]}" "${target_process_seen[$index]}" \
+			"${target_first_seen_epoch[$index]}" "$transition_latency_seconds"
+		if [[ $index -eq 0 && ${target_process_seen[$index]} -ne 1 ]]; then
+			target_transition_gate=0
+		elif [[ $native_connect == true && ${#target_ids[@]} -gt 1 && $index -gt 0 ]]; then
+			if [[ ${target_process_seen[$index]} -ne 1 || $transition_latency_seconds -lt 0 ||
+				$transition_latency_seconds -gt $transition_timeout_seconds ]]; then
+				target_transition_gate=0
+			fi
+		fi
+	done
+	printf 'seen=%s total=%s gate=%s timeout_seconds=%s\n' \
+		"$target_processes_seen" "${#target_ids[@]}" "$target_transition_gate" \
+		"$transition_timeout_seconds"
+} >"$run_dir/target-process-summary.txt"
 
 restore_status=0
 if ! restore; then
@@ -2077,6 +2444,40 @@ read -r submitted producer_post_close_submissions \
 producer_total_submissions=$((submitted + producer_post_close_submissions))
 producer_source_transitions=$(count_matches \
 	'iosurface pool source geometry transition' "$run_dir/openvr-submit-shim.log")
+producer_source_overflow=$(awk -v maximum_width="$source_width" -v maximum_height="$source_height" '
+	/iosurface pool submitted/ {
+		for (field = 1; field <= NF; field++) {
+			if ($field ~ /^source=[1-9][0-9]*x[1-9][0-9]*$/) {
+				sub(/^source=/, "", $field)
+				split($field, dimensions, "x")
+				if (dimensions[1] > maximum_width || dimensions[2] > maximum_height) count++
+			}
+		}
+	}
+	END { print count + 0 }
+' "$run_dir/openvr-submit-shim.log" 2>/dev/null || printf '0\n')
+producer_source_overflow=${producer_source_overflow:-0}
+producer_disallowed_source_transitions=0
+if [[ $profile_source_mode == fixed-with-transitions ]]; then
+	while IFS= read -r transition; do
+		transition=${transition#new=}
+		transition_allowed=0
+		if [[ $transition == "${source_width}x${source_height}" ]]; then
+			transition_allowed=1
+		else
+			for allowed_transition in "${allowed_source_transitions[@]}"; do
+				if [[ $transition == "$allowed_transition" ]]; then
+					transition_allowed=1
+					break
+				fi
+			done
+		fi
+		if [[ $transition_allowed -ne 1 ]]; then
+			producer_disallowed_source_transitions=$((producer_disallowed_source_transitions + 1))
+		fi
+	done < <(rg -o 'iosurface pool source geometry transition .*new=[1-9][0-9]*x[1-9][0-9]*' \
+		"$run_dir/openvr-submit-shim.log" 2>/dev/null | sed -E 's/.*(new=[0-9]+x[0-9]+).*/\1/' || true)
+fi
 producer_resized_submissions=$(count_matches \
 	'iosurface pool submitted .*transfer=stereo-(linear-clamped|nearest)' \
 	"$run_dir/openvr-submit-shim.log")
@@ -2157,7 +2558,7 @@ read -r producer_pressure_recovery_releases producer_pressure_recovery_slots < <
 	' "$run_dir/openvr-submit-shim.log" 2>/dev/null
 )
 nonblack_releases=$(awk '
-	/iosurface pool release/ && /result=(pass|closed|dropped)/ {
+	/iosurface pool release/ && /result=(pass|closed)/ {
 		for (field = 1; field <= NF; field++) {
 			if ($field ~ /^actual_bgra=/) {
 				sub(/^actual_bgra=/, "", $field)
@@ -2274,6 +2675,8 @@ native_video_span_ms=$(summary_value video_span_ms)
 native_dropped=$(summary_value dropped)
 native_not_ready_drops=$(summary_value not_ready_drops)
 native_pool_exhausted_drops=$(summary_value pool_exhausted_drops)
+native_black_consumer_samples=$(summary_value black_consumer_samples)
+native_visible_consumer_samples=$(summary_value visible_consumer_samples)
 native_pose_paired=$(summary_value pose_paired)
 native_pose_fallback=$(summary_value pose_fallback)
 native_pose_bootstrap=$(summary_value pose_bootstrap)
@@ -2301,6 +2704,8 @@ native_video_span_ms=${native_video_span_ms:-0}
 native_dropped=${native_dropped:-0}
 native_not_ready_drops=${native_not_ready_drops:-0}
 native_pool_exhausted_drops=${native_pool_exhausted_drops:-0}
+native_black_consumer_samples=${native_black_consumer_samples:-0}
+native_visible_consumer_samples=${native_visible_consumer_samples:-0}
 native_pose_paired=${native_pose_paired:-0}
 native_pose_fallback=${native_pose_fallback:-0}
 native_pose_bootstrap=${native_pose_bootstrap:-0}
@@ -2395,6 +2800,12 @@ else
 		pacing_pass=1
 	fi
 fi
+visible_content_pass=1
+if [[ $require_visible_content == true ]] &&
+	! [[ $consumer_validated -gt 0 && $nonblack_releases -gt 0 &&
+		$native_visible_consumer_samples -gt 0 ]]; then
+	visible_content_pass=0
+fi
 {
 	printf 'bridge_finished=%d\n' "$bridge_finished"
 	printf 'bridge_status=%d\n' "$bridge_status"
@@ -2402,6 +2813,9 @@ fi
 	printf 'native_bridge_exited=%d\n' "$native_bridge_exited"
 	printf 'native_bridge_exit_status=%d\n' "$native_bridge_exit_status"
 	printf 'restore_status=%d\n' "$restore_status"
+	printf 'target_processes_seen=%d\n' "$target_processes_seen"
+	printf 'target_processes_total=%d\n' "${#target_ids[@]}"
+	printf 'target_transition_gate=%d\n' "$target_transition_gate"
 	printf 'service_type=launchd-mach\n'
 	printf 'launchd_service_checked_in=%s\n' "$launchd_service_checked_in"
 	printf 'launchd_import_rejections=%s\n' "$launchd_import_rejections"
@@ -2441,12 +2855,16 @@ fi
 	printf 'producer_pressure_recovery_releases=%s\n' "$producer_pressure_recovery_releases"
 	printf 'producer_pressure_recovery_slots=%s\n' "$producer_pressure_recovery_slots"
 	printf 'producer_source_transitions=%s\n' "$producer_source_transitions"
+	printf 'producer_source_overflow=%s\n' "$producer_source_overflow"
+	printf 'producer_disallowed_source_transitions=%s\n' \
+		"$producer_disallowed_source_transitions"
 	printf 'producer_resized_submissions=%s\n' "$producer_resized_submissions"
 	printf 'producer_separate_eye_submissions=%s\n' "$producer_separate_eye_submissions"
 	printf 'producer_expected_resize_submissions=%s\n' "$producer_expected_resize_submissions"
 	printf 'resize_expectation_pass=%s\n' "$resize_expectation_pass"
 	printf 'consumer_validated=%s\n' "$consumer_validated"
-	printf 'production_content_gate=visual-required\n'
+	printf 'production_content_gate=%s\n' "$require_visible_content"
+	printf 'visible_content_pass=%s\n' "$visible_content_pass"
 	printf 'released=%s\n' "$released"
 	printf 'closed=%s\n' "$closed"
 	printf 'release_drops=%s\n' "$release_drops"
@@ -2479,6 +2897,8 @@ fi
 	printf 'native_dropped=%s\n' "$native_dropped"
 	printf 'native_not_ready_drops=%s\n' "$native_not_ready_drops"
 	printf 'native_pool_exhausted_drops=%s\n' "$native_pool_exhausted_drops"
+	printf 'native_black_consumer_samples=%s\n' "$native_black_consumer_samples"
+	printf 'native_visible_consumer_samples=%s\n' "$native_visible_consumer_samples"
 	printf 'native_pose_paired=%s\n' "$native_pose_paired"
 	printf 'native_pose_fallback=%s\n' "$native_pose_fallback"
 	printf 'native_pose_bootstrap=%s\n' "$native_pose_bootstrap"
@@ -2546,7 +2966,8 @@ verdict=fail
 common_pass=0
 if [[ $bridge_finished -eq 1 && $bridge_status -eq 0 &&
 	$bridge_summary_seen -eq 1 && $native_bridge_exited -eq 1 &&
-	$native_bridge_exit_status -eq 0 && $restore_status -eq 0 ]] &&
+	$native_bridge_exit_status -eq 0 && $restore_status -eq 0 &&
+	$target_transition_gate -eq 1 ]] &&
 	[[ $launchd_service_checked_in -eq 1 &&
 		$launchd_oversize_import_rejections -eq 1 &&
 		$launchd_oversize_frame_rejections -eq 1 &&
@@ -2560,7 +2981,10 @@ if [[ $bridge_finished -eq 1 && $bridge_status -eq 0 &&
 		$submitted -eq $released && $released -eq $native_received && $closed -eq 1 ]] &&
 	[[ $producer_source_transitions -eq 0 || $producer_resized_submissions -gt 0 ||
 		$producer_separate_eye_submissions -gt 0 ]] &&
+	[[ $producer_source_overflow -eq 0 ]] &&
+	[[ $producer_disallowed_source_transitions -eq 0 ]] &&
 	[[ $resize_expectation_pass -eq 1 ]] &&
+	[[ $visible_content_pass -eq 1 ]] &&
 	[[ $native_self_tests -eq 3 && $native_submitted -eq $native_frames && $native_encoded -eq $native_frames ]] &&
 	[[ $native_report_kind == summary && $native_producer_handshake -eq 1 &&
 		$native_startup_self_tests -eq 1 && $native_exact_pose_timeout -eq 0 ]] &&

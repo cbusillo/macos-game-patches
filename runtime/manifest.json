@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev1"
+    "version": "1.0.0-dev4"
   },
   "artifacts": [
     {
@@ -332,7 +332,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819"
+      "revision": "f59bfca6350f3bff27551f072cd403d2ee72ef42"
     },
     {
       "cleanPolicy": "all",
@@ -683,25 +683,25 @@
     {
       "id": "scope_record",
       "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
-      "sha256": "0dbe8d76d0262dbb8f4581f2996e798d95df521f45b01334ae5fa333c336b1e1",
+      "sha256": "6b48c46d69c6733dbf9d67aa896a279d64f25f050f009ff229d9e83478e2bd38",
       "supplyClass": "repo-source"
     },
     {
       "id": "openvr_shim_source",
       "path": "${REPO_ROOT}/tools/openvr_submit_shim.cpp",
-      "sha256": "b1880c3637d4031c782946fa95366068e5966e92219b185852f19bb6998f40fe",
+      "sha256": "d068a1b6f8d9a6e43f38971ade6359b191f314431c930f96d29d6855dadb095a",
       "supplyClass": "repo-source"
     },
     {
       "id": "custom_openvr_runtime_source",
       "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
-      "sha256": "6a1a9d2438f36bd8f27044be6374bf78f3ab59f78492232581f0821a3d440687",
+      "sha256": "f25726fb7210b94f7b47832b2b8af5851b310806d1412ca21476ed2631b0b212",
       "supplyClass": "repo-source"
     },
     {
       "id": "dxvk_submit_source",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
-      "sha256": "1c6aedaabc81d9b118bc315cdf95ce551659af2452c05415015465b5955c5bb1",
+      "sha256": "91a1e29a3a5215da33e84878afa4848b78fef06405c489da89394fb683dd2fab",
       "supplyClass": "repo-source"
     },
     {
@@ -786,12 +786,6 @@
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
       "sha256": "5ac3115d6a1c45e77d361f03d8d92e7afbf560b5880a3ead7438bf8d9904569b",
-      "supplyClass": "repo-source"
-    },
-    {
-      "id": "production_runner",
-      "path": "${REPO_ROOT}/tools/run_real_native_iosurface_probe.sh",
-      "sha256": "c6e906da5246402be2cef4637fc693fcf27e54318a4e7dc061c80c17e36e64fb",
       "supplyClass": "repo-source"
     },
     {

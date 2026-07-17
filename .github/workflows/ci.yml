@@ -22,8 +22,10 @@ jobs:
           jq empty \
             .github/github.json \
             runtime/bindings.example.json \
+            runtime/game-profile.schema.json \
             runtime/manifest.json \
-            runtime/manifest.lock.json
+            runtime/manifest.lock.json \
+            runtime/profiles/*.json
 
       - name: Lint Markdown
         uses: DavidAnson/markdownlint-cli2-action@v24
@@ -49,7 +51,13 @@ jobs:
           python3 -m py_compile \
             tools/vr_stack_cleanup.py \
             tools/launch_freedom_crossover.py \
-            tools/build_runtime_artifact.py
+            tools/build_runtime_artifact.py \
+            tools/runtime_profile.py
+
+      - name: Validate runtime profiles
+        run: |
+          python3 tools/runtime_profile.py check
+          python3 tools/runtime_profile.py self-test
 
       - name: Validate runtime artifact contract
         run: |

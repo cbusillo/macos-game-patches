@@ -2,10 +2,10 @@
   "artifacts": [
     {
       "id": "native_bridge",
-      "sha256": "5304c19dfdfe488ace4d12d5d4284b8a04cfcba6f49360c86b20a391c595a326",
+      "sha256": "51b08eaaf88c50c1f1883f5ded5fd431675a14b2ea4677859cacc9fa2aea1ec7",
       "signature": {
-        "cdhash": "08cd0bd30e0174943537f772093e6d3988616552",
-        "identifier": "alvr_macos_bridge-ea231a705ea9939a",
+        "cdhash": "1ebfc972781d795be9e17409c670c04a3534b1c7",
+        "identifier": "alvr_macos_bridge-4ab0c81704593ccd",
         "kind": "adhoc",
         "teamIdentifier": null
       }
@@ -30,11 +30,11 @@
     },
     {
       "id": "openvr_shim",
-      "sha256": "b64ac3dd7e336873d6a7536da545f2c772565463ca83ef5d1d1bf3693bee97c6"
+      "sha256": "4a387d577fce35cbcfbcb10ed10b4ccabd4d2e2f3e0fec81281d6f338f491c54"
     },
     {
       "id": "custom_openvr_runtime",
-      "sha256": "74a15f37b0907603029ea1c8449b1d2808254e080741ad6820d36554a5c84c5d"
+      "sha256": "cfba18355d1c2838fd4ff582385157ed193e97bf4bdf47c7a3dd74081f5201c7"
     },
     {
       "id": "wine_bridge_windows",
@@ -45,6 +45,6 @@
       "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
     }
   ],
-  "manifestSha256": "0ee413d1bf0a5dbc13620fa99c2e8f7c9b9d04eaf5678849f4822c5b9a1ac335",
+  "manifestSha256": "e7c1fb5b6510c3bdb32fae4cf18a7b87f93cb971f25acd3a6940c9803369de06",
   "schemaVersion": 1
 }

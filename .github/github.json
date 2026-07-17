@@ -7,7 +7,7 @@
   },
   "runtimeAssumptions": {
     "runtimeV1Boundary": "The first release is a single-machine, single-signing-identity, owner-operated CLI runtime for curated unmodified OpenVR/D3D11 games. It uses user-owned CrossOver, Steam, games, Apple tooling, and hardware; manually authored profiles; manual Vision Pro client launch; and the custom fake_openvr_real/openvr_submit_shim runtime rather than the real SteamVR compositor. Public distribution, OpenXR-only titles, direct Vulkan capture, other controllers, and automatic profile discovery are out of scope.",
-    "secondTitleGeneralityGate": "The Lab, Steam app 450390, is selected for issue #59 because its Valve Unity renderer, adaptive quality, transitions, and tracked-controller experiences differ materially from the Unreal Engine 4 Freedom baseline. The local manifest records build 7242747 but the payload must be restored and repinned before testing. Qualification is limited to the supported D3D11/OpenVR path; direct Vulkan capture, a real SteamVR compositor, game binary changes, maintained game forks, and anti-cheat bypasses are hard cut lines.",
+    "secondTitleGeneralityGate": "The Lab build 7242747 passes exact payload/profile preflight and the packaged D3D11/OpenVR frame path at 90 FPS, but its hub remains fully black through 5,400 disconnected frames even after exact legacy IVRSystem_020, IVRSettings_002, and IVROverlay_020 support. This is classified as a fake-runtime/compositor architecture ceiling until a live physical run proves headset tracking/focus changes the result. Direct Vulkan capture, a real SteamVR compositor, game binary changes, maintained game forks, and anti-cheat bypasses remain hard cut lines.",
     "gameplayControllers": "PS VR2 Sense controllers paired directly to Apple Vision Pro with visionOS 26-or-newer accessory tracking and the ALVR PSVR2Sense profile; the qualified device runs visionOS 27.0 beta",
     "freedomSourceGeometry": "Freedom can switch its submitted side-by-side texture from 3240x1800 to 2808x1560 at level load; the native IOSurface pool remains fixed at 3240x1800 and the focused gate expects that transition explicitly",
     "crossoverBottleWarmup": "The probe owns and resets the dedicated Steam bottle, atomically installs the patched MoltenVK with its existing signature, preloads that exact file in x86_64 mode, and keeps a small patched-library Notepad window open so the tested game is never the bottle's first GUI process; the initial producer handshake allows 600 seconds while per-frame gates remain unchanged",
@@ -51,12 +51,12 @@
   },
   "qualityGate": {
     "json": {
-      "metadata": "jq empty .github/github.json runtime/bindings.example.json runtime/manifest.json runtime/manifest.lock.json"
+      "metadata": "jq empty .github/github.json runtime/bindings.example.json runtime/game-profile.schema.json runtime/manifest.json runtime/manifest.lock.json runtime/profiles/*.json"
     },
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py",
       "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
@@ -72,6 +72,12 @@
       "verify": "python3 tools/build_runtime_artifact.py verify --artifact <artifact-a>",
       "compare": "python3 tools/build_runtime_artifact.py compare <artifact-a> <artifact-b>",
       "plan": "python3 tools/build_runtime_artifact.py plan --artifact <artifact-a> --bindings .code/runtime-bindings.json"
+    },
+    "runtimeProfile": {
+      "check": "python3 tools/runtime_profile.py check",
+      "fixtures": "python3 tools/runtime_profile.py self-test",
+      "preflight": "python3 tools/runtime_profile.py preflight --profile <profile> --artifact <artifact> --mode smoke",
+      "probe": "python3 tools/runtime_profile.py probe --profile <profile> --artifact <artifact> --mode <smoke|disconnected|physical>"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
@@ -106,7 +112,7 @@
       "name": "ALVR",
       "repo": "cbusillo/ALVR",
       "localPath": "../alvr",
-      "baselineCommit": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819",
+      "baselineCommit": "f59bfca6350f3bff27551f072cd403d2ee72ef42",
       "purpose": "Physically qualified macOS bridge host; client core is pinned separately by alvr-visionos"
     }
   ],

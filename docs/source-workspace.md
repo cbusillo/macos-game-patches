@@ -21,7 +21,7 @@ tree outside the visionOS client checkout.
 ## Qualified Runtime Baseline
 
 - Host: `cbusillo/ALVR`, branch `diagnostic/bgra-nv12-probe`, commit
-  `4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819`
+  `229e8ced76be9b62307fe79690229c5e6bc020d5`
 - visionOS client: `cbusillo/alvr-visionos`, branch `main`, commit
   `171cd9dca5ef85c9dfd9f35c565c265c08e8ce82`
 - visionOS client core: `cbusillo/ALVR`, branch
@@ -49,7 +49,7 @@ git -C ALVR checkout 109643c88e402b36766020b8f6a99ea48aa8d55f
 git -C ALVR submodule update --init --recursive
 
 cd ~/Developer/alvr
-git checkout 4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819
+git checkout 229e8ced76be9b62307fe79690229c5e6bc020d5
 ```
 
 Add `alvr-org` remotes when comparing or preparing upstream work. Do not apply
