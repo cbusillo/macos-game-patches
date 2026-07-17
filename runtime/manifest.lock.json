@@ -30,7 +30,7 @@
     },
     {
       "id": "openvr_shim",
-      "sha256": "b64ac3dd7e336873d6a7536da545f2c772565463ca83ef5d1d1bf3693bee97c6"
+      "sha256": "bc08f62562f3b5f5b6df77a910f0d0ae3df6063914b96075941fb4a6a4a478d5"
     },
     {
       "id": "custom_openvr_runtime",
@@ -45,6 +45,6 @@
       "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
     }
   ],
-  "manifestSha256": "bb316d387d2ad6b06da895063beca56521ff34a4192810555bfd0191efa17b46",
+  "manifestSha256": "e01f66e0e78e89e9665b7f6f4d4fb504c512a460e34378964f5357cdbb4a9d88",
   "schemaVersion": 1
 }

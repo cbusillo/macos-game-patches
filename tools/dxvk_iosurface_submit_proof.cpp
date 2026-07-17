@@ -643,8 +643,12 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
         1,
     };
 
+    const bool sourceBgra =
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+        sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     if (sourceDescription.Width == width &&
-        sourceDescription.Height == height) {
+        sourceDescription.Height == height && sourceBgra) {
         submission->mode = PoolTransferMode::DirectCopy;
         d3dContext->CopyResource(
             slots[slotIndex].handoffTexture.Get(), sourceTexture);
@@ -687,6 +691,11 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
             &resizeSourceLayout,
             &sourceInfo);
         Slot &slot = slots[slotIndex];
+        const bool supportedSourceFormat =
+            sourceInfo.format == VK_FORMAT_R8G8B8A8_UNORM ||
+            sourceInfo.format == VK_FORMAT_R8G8B8A8_SRGB ||
+            sourceInfo.format == VK_FORMAT_B8G8R8A8_UNORM ||
+            sourceInfo.format == VK_FORMAT_B8G8R8A8_SRGB;
         if (FAILED(result) || sourceImage == VK_NULL_HANDLE ||
             resizeSourceLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
             slot.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
@@ -696,7 +705,8 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
             sourceInfo.extent.depth != 1 || sourceInfo.mipLevels != 1 ||
             sourceInfo.arrayLayers != 1 ||
             sourceInfo.samples != VK_SAMPLE_COUNT_1_BIT ||
-            sourceInfo.format != slot.format ||
+            !supportedSourceFormat ||
+            slot.format != VK_FORMAT_B8G8R8A8_UNORM ||
             (sourceInfo.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0 ||
             (slot.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
             return fail("source-vulkan-image", VK_ERROR_FORMAT_NOT_SUPPORTED);
@@ -2303,6 +2313,32 @@ DxvkIosurfaceSubmitProof::initializePool(
     if (FAILED(result) || !selfTestTexture) {
         return fail("self-test-source-create");
     }
+    std::vector<uint32_t> selfTestRgbaPixels(
+        static_cast<size_t>(selfTestWidth) * selfTestHeight);
+    const auto rgbaPixel = [](const std::array<uint8_t, 4> &bgra) {
+        return static_cast<uint32_t>(bgra[2]) |
+               (static_cast<uint32_t>(bgra[1]) << 8) |
+               (static_cast<uint32_t>(bgra[0]) << 16) |
+               (static_cast<uint32_t>(bgra[3]) << 24);
+    };
+    const uint32_t leftRgbaPixel = rgbaPixel(leftColor);
+    const uint32_t rightRgbaPixel = rgbaPixel(rightColor);
+    for (uint32_t y = 0; y < selfTestHeight; ++y) {
+        for (uint32_t x = 0; x < selfTestWidth; ++x) {
+            selfTestRgbaPixels[static_cast<size_t>(y) * selfTestWidth + x] =
+                x < selfTestWidth / 2 ? leftRgbaPixel : rightRgbaPixel;
+        }
+    }
+    D3D11_TEXTURE2D_DESC selfTestRgbaDescription = selfTestDescription;
+    selfTestRgbaDescription.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    D3D11_SUBRESOURCE_DATA selfTestRgbaData = selfTestData;
+    selfTestRgbaData.pSysMem = selfTestRgbaPixels.data();
+    ComPtr<ID3D11Texture2D> selfTestRgbaTexture;
+    result = state->d3dDevice->CreateTexture2D(
+        &selfTestRgbaDescription, &selfTestRgbaData, &selfTestRgbaTexture);
+    if (FAILED(result) || !selfTestRgbaTexture) {
+        return fail("self-test-rgba-source-create");
+    }
 
     for (uint32_t slotIndex = 0; slotIndex < kPoolSlotCount; ++slotIndex) {
         PoolState::Slot &slot = state->slots[slotIndex];
@@ -2317,8 +2353,14 @@ DxvkIosurfaceSubmitProof::initializePool(
         }
 
         PoolTransferSubmission transfer{};
-        if (!state->submitTransfer(selfTestTexture.Get(),
-                                   selfTestDescription,
+        ID3D11Texture2D *transferTexture = selfTestTexture.Get();
+        const D3D11_TEXTURE2D_DESC *transferDescription = &selfTestDescription;
+        if (slotIndex == 2) {
+            transferTexture = selfTestRgbaTexture.Get();
+            transferDescription = &selfTestRgbaDescription;
+        }
+        if (!state->submitTransfer(transferTexture,
+                                   *transferDescription,
                                    slotIndex,
                                    &transfer)) {
             logFunction(
@@ -2668,7 +2710,7 @@ void DxvkIosurfaceSubmitProof::capturePoolSources(
         leftDescription.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     if (leftDescription.SampleDesc.Count != 1 ||
         leftDescription.ArraySize != 1 || leftDescription.MipLevels != 1 ||
-        (!leftBgra && !(separateEyes && leftRgba))) {
+        (!leftBgra && !leftRgba)) {
         return;
     }
     D3D11_TEXTURE2D_DESC rightDescription{};

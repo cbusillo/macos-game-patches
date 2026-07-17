@@ -262,6 +262,76 @@ Issue routing:
 `#59` as a discovered general runtime defect; update `#58` evidence and `#56`
 status when the corrected artifact passes.
 
+### Dev2 Hub RGBA Compatibility Failure
+
+Run:
+`the-lab/real-native-encode-20260717T193547Z`
+
+Question:
+Does the corrected ALVR host artifact accept The Lab hub's official D3D11/OpenVR
+submission path?
+
+Mode / build:
+300-frame disconnected smoke; The Lab build `7242747`; artifact
+`mac-alvr-runtime-1.0.0-dev2`; seal beginning `4f876d46c0b98178`.
+
+Commands:
+`python3 tools/runtime_profile.py probe --profile the-lab --artifact
+<dev2-artifact> --mode smoke`
+
+Expected proof:
+Producer handshake, three startup self-tests, 300 encoded frames, strict
+cadence and pose gates, and exact restoration.
+
+Artifacts captured:
+Artifact verification, target-process event, game launch log, DXVK logs,
+OpenVR shim and fake-runtime logs, bridge log, and restoration report.
+
+Logs checked:
+`openvr-submit-shim.log`, `fake-openvr.log`, `native-bridge.log`, The Lab DXVK
+logs, process events, and `restored-state.txt`.
+
+Human observation:
+Not requested because the disconnected producer handshake did not complete.
+
+Verified:
+The corrected host accepted `ALVR_BRIDGE_INPUT=iosurface`, checked into the
+launchd Mach service, and waited for the producer. The official hub loaded the
+artifact's local OpenVR shim and D3D11/DXVK path, queried the declared
+`1152x1280` per-eye recommendation, and submitted one side-by-side
+`2304x1280` `DXGI_FORMAT_R8G8B8A8_TYPELESS` texture with left/right bounds. The
+producer did not initialize because the proven transfer accepted a
+single-texture BGRA source or separate-eye RGBA sources, but not a
+single-texture RGBA source. Cleanup restored all stock hashes and removed all
+owned state.
+
+Inferred:
+The hub's fixed-size RGBA submission is a general runtime compatibility gap. It
+does not require Vulkan capture, a real compositor, title-specific protocol, or
+unbounded allocation.
+
+Failed / missing:
+The producer handshake and frame gates did not run.
+
+Unknown:
+Whether later hub and experience transitions expose additional compatibility
+gaps after RGBA conversion succeeds.
+
+Verdict:
+`alive` with a bounded general runtime fix.
+
+Do not repeat:
+Do not reinterpret the RGBA channel order as BGRA or bypass pixel validation.
+
+Next action:
+Allow supported single-texture RGBA images to use the existing bounded Vulkan
+blit into the BGRA IOSurface pool, exercise that conversion in one of the three
+startup self-tests, rebuild the same dev2 artifact contract, and repeat the
+smoke.
+
+Issue routing:
+`#59` general runtime defect.
+
 ## Status
 
 `in-progress`: the official payload and reusable profiles pass strict preflight.
