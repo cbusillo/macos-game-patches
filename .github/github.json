@@ -110,7 +110,10 @@
       "purpose": "Physically qualified macOS bridge host; client core is pinned separately by alvr-visionos"
     }
   ],
-  "validatedThrough": [],
+  "validatedThrough": [
+    "2026-07-17: issue #58 hardware-free gates passed: JSON, Python compile, contract check, self-test, Markdown, actionlint, tracked-index gitleaks, and changed-files JetBrains inspection",
+    "2026-07-17: issue #58 qualified local gate passed on the frozen Mac16,9/macOS 27.0/Xcode 27.0/CrossOver 26.2 matrix: validate, two independent builds, verify, compare, and complete read-only ownership/mutable-state plan; the pre-artifact bridge bundle is intentionally reported as unowned"
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,
