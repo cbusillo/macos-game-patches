@@ -1,0 +1,90 @@
+diff --git a/ALVRClient/EventHandler.swift b/ALVRClient/EventHandler.swift
+index f477ea2..eb277dd 100644
+--- a/ALVRClient/EventHandler.swift
++++ b/ALVRClient/EventHandler.swift
+@@ -149,6 +149,9 @@ class EventHandler: ObservableObject {
+ 
+     var framesSinceLastIDR:Int = 0
+     var framesSinceLastDecode:Int = 0
++    var videoPacketsReceived: UInt64 = 0
++    var decoderSubmissions: UInt64 = 0
++    var decoderCallbacks: UInt64 = 0
+ 
+     var streamEvent: AlvrEvent? = nil
+     
+@@ -492,6 +495,10 @@ class EventHandler: ObservableObject {
+             PerformanceTracker.shared.recordReceive(timestampNs: timestamp)
+         }
+         let nal = UnsafeMutableBufferPointer<UInt8>(start: UnsafeMutablePointer(mutating: frameData.buffer_ptr), count: Int(frameData.buffer_size))
++        videoPacketsReceived += 1
++        if videoPacketsReceived == 1 || videoPacketsReceived.isMultiple(of: 300) {
++            print("Video packet cadence received=\(videoPacketsReceived) bytes=\(nal.count) render_started=\(renderStarted) reset_pending=\(needsEncoderReset) timestamp_ns=\(timestamp)")
++        }
+         
+         objc_sync_enter(self.frameQueueLock)
+         self.framesSinceLastIDR += 1
+@@ -550,7 +557,15 @@ class EventHandler: ObservableObject {
+         }
+ 
+         if let vtDecompressionSession = self.vtDecompressionSession {
++            decoderSubmissions += 1
++            if decoderSubmissions == 1 || decoderSubmissions.isMultiple(of: 300) {
++                print("VideoToolbox decode submission cadence submitted=\(decoderSubmissions) received=\(videoPacketsReceived) bytes=\(nal.count) timestamp_ns=\(timestamp)")
++            }
+             VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: self.videoFormat!, codec: currentCodec) { [self] imageBuffer in
++                decoderCallbacks += 1
++                if decoderCallbacks == 1 || decoderCallbacks.isMultiple(of: 300) {
++                    print("VideoToolbox decode callback cadence callbacks=\(decoderCallbacks) submitted=\(decoderSubmissions) image_ready=\(imageBuffer != nil) timestamp_ns=\(timestamp)")
++                }
+                 guard let imageBuffer = imageBuffer else {
+                     //print("Frame not decoded")
+                     return
+diff --git a/ALVRClient/VideoHandler.swift b/ALVRClient/VideoHandler.swift
+index 0c32bfd..58614fd 100644
+--- a/ALVRClient/VideoHandler.swift
++++ b/ALVRClient/VideoHandler.swift
+@@ -602,7 +602,9 @@ struct VideoHandler {
+         err = VTDecompressionSessionDecodeFrame(decompressionSession, sampleBuffer: sampleBuffer, flags: VTDecodeFrameFlags.init(rawValue: 0), infoFlagsOut: nil) { (status: OSStatus, infoFlags: VTDecodeInfoFlags, imageBuffer: CVImageBuffer?, taggedBuffers: [CMTaggedBuffer]?, presentationTimeStamp: CMTime, presentationDuration: CMTime) in
+         
+             if status < 0 {
+-                //print("Error while decoding:", status, infoFlags, imageBuffer, taggedBuffers, presentationTimeStamp, presentationDuration)
++                print("VideoToolbox decode callback error status=\(status) info_flags=\(infoFlags.rawValue) image_ready=\(imageBuffer != nil) bytes=\(nals.count) timestamp_ns=\(timestamp)")
++            } else if imageBuffer == nil {
++                print("VideoToolbox decode callback returned no image info_flags=\(infoFlags.rawValue) bytes=\(nals.count) timestamp_ns=\(timestamp)")
+             }
+             //print("status: \(status), image_nil?: \(imageBuffer == nil), infoFlags: \(infoFlags)")
+             
+@@ -620,7 +622,7 @@ struct VideoHandler {
+             callback(imageBuffer)
+         }
+         if err != 0 {
+-            //fatalError("VTDecompressionSessionDecodeFrame")
++            print("VideoToolbox decode submission error status=\(err) bytes=\(nals.count) timestamp_ns=\(timestamp)")
+         }
+     }
+     
+diff --git a/ALVRClient/WorldTracker.swift b/ALVRClient/WorldTracker.swift
+index df77b73..2622503 100644
+--- a/ALVRClient/WorldTracker.swift
++++ b/ALVRClient/WorldTracker.swift
+@@ -3097,14 +3097,16 @@ class WorldTracker {
+         
+         var trackingMotions:[AlvrDeviceMotion] = []
+         
+-        let dummyPoseView = AlvrPose()
+-        let dummyPoseHeadset = AlvrPose(orientation: AlvrQuat(simd_quatf()), position: (0.0, 1.2, 0.0)) // keep the dummy at a reasonable height for both seated/standing entry
++        let identityOrientation = AlvrQuat(x: 0.0, y: 0.0, z: 0.0, w: 1.0)
++        let dummyPoseLeftView = AlvrPose(orientation: identityOrientation, position: (-0.032, 0.0, 0.0))
++        let dummyPoseRightView = AlvrPose(orientation: identityOrientation, position: (0.032, 0.0, 0.0))
++        let dummyPoseHeadset = AlvrPose(orientation: identityOrientation, position: (0.0, 1.2, 0.0)) // keep the dummy at a reasonable height for both seated/standing entry
+         let targetTimestampNS = UInt64(targetTimestamp * Double(NSEC_PER_SEC))
+         
+         let viewFovsPtr = UnsafeMutablePointer<AlvrViewParams>.allocate(capacity: 2)
+         defer { viewFovsPtr.deallocate() }
+-        viewFovsPtr[0] = AlvrViewParams(pose: dummyPoseView, fov: viewFovs[0])
+-        viewFovsPtr[1] = AlvrViewParams(pose: dummyPoseView, fov: viewFovs[1])
++        viewFovsPtr[0] = AlvrViewParams(pose: dummyPoseLeftView, fov: viewFovs[0])
++        viewFovsPtr[1] = AlvrViewParams(pose: dummyPoseRightView, fov: viewFovs[1])
+         
+         let headLinVel: (Float, Float, Float) = (0,0,0)
+         let headAngVel: (Float, Float, Float) = (0,0,0)

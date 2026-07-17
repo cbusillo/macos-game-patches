@@ -1,0 +1,7 @@
+MODULE = alvr_iosurface_bridge.dll
+UNIXLIB = alvr_iosurface_bridge.so
+UNIX_LIBS = -framework IOSurface -framework CoreFoundation
+
+SOURCES = \
+	bridge.c \
+	unixlib.c

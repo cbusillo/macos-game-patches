@@ -1,0 +1,7 @@
+@ stdcall alvr_iosurface_scalar(int64 ptr)
+@ stdcall alvr_iosurface_attach(int64 ptr ptr ptr)
+@ stdcall alvr_iosurface_release_port(long)
+@ stdcall alvr_iosurface_import_probe(str int64 ptr)
+@ stdcall alvr_iosurface_import_bind(int64 str int64 ptr)
+@ stdcall alvr_iosurface_signal_ready(str int64 ptr long)
+@ stdcall alvr_iosurface_frame_ready(str int64 ptr ptr)

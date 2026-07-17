@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 jobs:
   repo-hygiene:
@@ -33,10 +31,13 @@ jobs:
             patches/**/*.md
 
       - name: Lint GitHub Actions workflows
-        uses: reviewdog/action-actionlint@v1
-        with:
-          fail_level: error
-          reporter: github-check
+        env:
+          ACTIONLINT_VERSION: "v1.7.12"
+        run: |
+          package="github.com/rhysd/actionlint/cmd/actionlint"
+          go run "${package}@${ACTIONLINT_VERSION}" \
+            -config-file .github/actionlint.yaml \
+            .github/workflows/ci.yml
 
       - name: Validate Python tools
         run: python3 -m py_compile tools/vr_stack_cleanup.py
