@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev2"
+    "version": "1.0.0-dev3"
   },
   "artifacts": [
     {
@@ -332,7 +332,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "229e8ced76be9b62307fe79690229c5e6bc020d5"
+      "revision": "f59bfca6350f3bff27551f072cd403d2ee72ef42"
     },
     {
       "cleanPolicy": "all",
@@ -701,7 +701,7 @@
     {
       "id": "dxvk_submit_source",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
-      "sha256": "5056047da85771c37dce8d4a29378c6a7c918cd3257b8c697f6e9c1f6c3124d5",
+      "sha256": "91a1e29a3a5215da33e84878afa4848b78fef06405c489da89394fb683dd2fab",
       "supplyClass": "repo-source"
     },
     {

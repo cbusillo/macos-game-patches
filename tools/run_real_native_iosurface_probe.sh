@@ -102,6 +102,7 @@ moltenvk_signature_cdhash=
 moltenvk_prewarm_seconds=
 native_frames=${ALVR_NATIVE_PROBE_FRAMES:-300}
 native_connect=${ALVR_NATIVE_PROBE_CONNECT:-false}
+require_visible_content=${ALVR_NATIVE_PROBE_REQUIRE_VISIBLE_CONTENT:-false}
 pressure_pause_ms=${ALVR_NATIVE_PROBE_PRESSURE_PAUSE_MS:-0}
 fake_wait_get_poses_sleep_ms=${ALVR_FAKE_WAIT_GET_POSES_SLEEP_MS:-}
 expected_source_transition=${ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITION:-}
@@ -248,6 +249,13 @@ case "$native_connect" in
 true | false) ;;
 *)
 	echo "ALVR_NATIVE_PROBE_CONNECT must be true or false" >&2
+	exit 1
+	;;
+esac
+case "$require_visible_content" in
+true | false) ;;
+*)
+	echo "ALVR_NATIVE_PROBE_REQUIRE_VISIBLE_CONTENT must be true or false" >&2
 	exit 1
 	;;
 esac
@@ -2058,6 +2066,7 @@ write_launch_agent_plist
 	printf 'desktop_explorer_pid=%s\n' "$desktop_explorer_pid"
 	printf 'native_frames=%s\n' "$native_frames"
 	printf 'native_connect=%s\n' "$native_connect"
+	printf 'require_visible_content=%s\n' "$require_visible_content"
 	printf 'pressure_pause_ms=%s\n' "$pressure_pause_ms"
 	printf 'fake_pacing_mode=%s\n' "$fake_pacing_mode"
 	printf 'fake_wait_get_poses_sleep_ms=%s\n' "$fake_wait_get_poses_sleep_ms"
@@ -2549,7 +2558,7 @@ read -r producer_pressure_recovery_releases producer_pressure_recovery_slots < <
 	' "$run_dir/openvr-submit-shim.log" 2>/dev/null
 )
 nonblack_releases=$(awk '
-	/iosurface pool release/ && /result=(pass|closed|dropped)/ {
+	/iosurface pool release/ && /result=(pass|closed)/ {
 		for (field = 1; field <= NF; field++) {
 			if ($field ~ /^actual_bgra=/) {
 				sub(/^actual_bgra=/, "", $field)
@@ -2666,6 +2675,8 @@ native_video_span_ms=$(summary_value video_span_ms)
 native_dropped=$(summary_value dropped)
 native_not_ready_drops=$(summary_value not_ready_drops)
 native_pool_exhausted_drops=$(summary_value pool_exhausted_drops)
+native_black_consumer_samples=$(summary_value black_consumer_samples)
+native_visible_consumer_samples=$(summary_value visible_consumer_samples)
 native_pose_paired=$(summary_value pose_paired)
 native_pose_fallback=$(summary_value pose_fallback)
 native_pose_bootstrap=$(summary_value pose_bootstrap)
@@ -2693,6 +2704,8 @@ native_video_span_ms=${native_video_span_ms:-0}
 native_dropped=${native_dropped:-0}
 native_not_ready_drops=${native_not_ready_drops:-0}
 native_pool_exhausted_drops=${native_pool_exhausted_drops:-0}
+native_black_consumer_samples=${native_black_consumer_samples:-0}
+native_visible_consumer_samples=${native_visible_consumer_samples:-0}
 native_pose_paired=${native_pose_paired:-0}
 native_pose_fallback=${native_pose_fallback:-0}
 native_pose_bootstrap=${native_pose_bootstrap:-0}
@@ -2787,6 +2800,12 @@ else
 		pacing_pass=1
 	fi
 fi
+visible_content_pass=1
+if [[ $require_visible_content == true ]] &&
+	! [[ $consumer_validated -gt 0 && $nonblack_releases -gt 0 &&
+		$native_visible_consumer_samples -gt 0 ]]; then
+	visible_content_pass=0
+fi
 {
 	printf 'bridge_finished=%d\n' "$bridge_finished"
 	printf 'bridge_status=%d\n' "$bridge_status"
@@ -2844,7 +2863,8 @@ fi
 	printf 'producer_expected_resize_submissions=%s\n' "$producer_expected_resize_submissions"
 	printf 'resize_expectation_pass=%s\n' "$resize_expectation_pass"
 	printf 'consumer_validated=%s\n' "$consumer_validated"
-	printf 'production_content_gate=visual-required\n'
+	printf 'production_content_gate=%s\n' "$require_visible_content"
+	printf 'visible_content_pass=%s\n' "$visible_content_pass"
 	printf 'released=%s\n' "$released"
 	printf 'closed=%s\n' "$closed"
 	printf 'release_drops=%s\n' "$release_drops"
@@ -2877,6 +2897,8 @@ fi
 	printf 'native_dropped=%s\n' "$native_dropped"
 	printf 'native_not_ready_drops=%s\n' "$native_not_ready_drops"
 	printf 'native_pool_exhausted_drops=%s\n' "$native_pool_exhausted_drops"
+	printf 'native_black_consumer_samples=%s\n' "$native_black_consumer_samples"
+	printf 'native_visible_consumer_samples=%s\n' "$native_visible_consumer_samples"
 	printf 'native_pose_paired=%s\n' "$native_pose_paired"
 	printf 'native_pose_fallback=%s\n' "$native_pose_fallback"
 	printf 'native_pose_bootstrap=%s\n' "$native_pose_bootstrap"
@@ -2962,6 +2984,7 @@ if [[ $bridge_finished -eq 1 && $bridge_status -eq 0 &&
 	[[ $producer_source_overflow -eq 0 ]] &&
 	[[ $producer_disallowed_source_transitions -eq 0 ]] &&
 	[[ $resize_expectation_pass -eq 1 ]] &&
+	[[ $visible_content_pass -eq 1 ]] &&
 	[[ $native_self_tests -eq 3 && $native_submitted -eq $native_frames && $native_encoded -eq $native_frames ]] &&
 	[[ $native_report_kind == summary && $native_producer_handshake -eq 1 &&
 		$native_startup_self_tests -eq 1 && $native_exact_pose_timeout -eq 0 ]] &&

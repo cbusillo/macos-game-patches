@@ -1050,6 +1050,7 @@ def preflight(
         "ALVR_NATIVE_PROBE_PROCESS_PATTERN": profile["launch"]["processPattern"],
         "ALVR_NATIVE_PROBE_PROFILE_ID": profile["id"],
         "ALVR_NATIVE_PROBE_PROFILE_SHA256": loaded.sha256,
+        "ALVR_NATIVE_PROBE_REQUIRE_VISIBLE_CONTENT": "false" if mode == "smoke" else "true",
         "ALVR_NATIVE_PROBE_SOURCE_HEIGHT": str(geometry["maximumStereo"]["height"]),
         "ALVR_NATIVE_PROBE_SOURCE_MODE": geometry["sourceMode"],
         "ALVR_NATIVE_PROBE_SOURCE_WIDTH": str(geometry["maximumStereo"]["width"]),

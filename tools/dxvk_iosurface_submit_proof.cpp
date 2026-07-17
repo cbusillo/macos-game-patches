@@ -163,13 +163,28 @@ constexpr uint32_t kPoolSlotCount = 3;
 constexpr uint32_t kFrameFlagConsumerSample = 1u << 1;
 constexpr uint32_t kFrameFlagFallbackPose = 1u << 2;
 constexpr uint32_t kFrameFlagStartupBarrier = 1u << 3;
+constexpr uint64_t kFirstConsumerSampleFrame = 450;
+constexpr uint64_t kConsumerSampleInterval = 450;
 constexpr uint64_t kResizeConsumerSampleFrame = 450;
 constexpr uint64_t kSeparateEyeConsumerSampleFrame = 30;
+constexpr uint32_t kVisibleColorThreshold = 96;
 constexpr uint64_t kPoolFenceTimeoutNanoseconds = UINT64_C(5000000000);
 constexpr auto kPoolAcquireTimeout = std::chrono::milliseconds(100);
 constexpr auto kPoolWorkerOrderTimeout = std::chrono::seconds(40);
 constexpr DWORD kPoolShutdownTimeoutMilliseconds = 40000;
 const int kModuleAnchor = 0;
+
+constexpr bool periodicConsumerSampleDue(uint64_t submittedFrames) {
+    return submittedFrames >= kFirstConsumerSampleFrame &&
+           (submittedFrames - kFirstConsumerSampleFrame) %
+                   kConsumerSampleInterval ==
+               0;
+}
+
+static_assert(!periodicConsumerSampleDue(449));
+static_assert(periodicConsumerSampleDue(450));
+static_assert(!periodicConsumerSampleDue(899));
+static_assert(periodicConsumerSampleDue(900));
 
 std::string environmentValue(const char *name) {
     const DWORD required = GetEnvironmentVariableA(name, nullptr, 0);
@@ -483,8 +498,13 @@ struct DxvkIosurfaceSubmitProof::PoolState {
     uint64_t nearestBlitFrames = 0;
     uint64_t separateEyeFrames = 0;
     uint64_t resizedFramesSinceTransition = 0;
+    uint64_t consumerSamples = 0;
+    uint64_t directConsumerSamples = 0;
     uint64_t resizedConsumerSamples = 0;
     uint64_t separateEyeConsumerSamples = 0;
+    uint64_t blackConsumerSamples = 0;
+    uint64_t visibleConsumerSamples = 0;
+    bool visibleContentValidated = false;
     uint32_t activeWorkers = 0;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1484,7 +1504,10 @@ void DxvkIosurfaceSubmitProof::shutdown() {
             "iosurface pool summary submitted=%llu released=%llu dropped=%llu "
             "source_transitions=%llu copy_frames=%llu linear_blit_frames=%llu "
             "nearest_blit_frames=%llu separate_eye_frames=%llu "
+            "consumer_samples=%llu direct_consumer_samples=%llu "
             "resized_consumer_samples=%llu separate_eye_consumer_samples=%llu "
+            "black_consumer_samples=%llu visible_consumer_samples=%llu "
+            "visible_content_validated=%u "
             "last_source=%ux%u output=%ux%u",
             static_cast<unsigned long long>(state->submittedFrames),
             static_cast<unsigned long long>(state->releasedFrames),
@@ -1494,9 +1517,14 @@ void DxvkIosurfaceSubmitProof::shutdown() {
             static_cast<unsigned long long>(state->linearBlitFrames),
             static_cast<unsigned long long>(state->nearestBlitFrames),
             static_cast<unsigned long long>(state->separateEyeFrames),
+            static_cast<unsigned long long>(state->consumerSamples),
+            static_cast<unsigned long long>(state->directConsumerSamples),
             static_cast<unsigned long long>(state->resizedConsumerSamples),
             static_cast<unsigned long long>(
                 state->separateEyeConsumerSamples),
+            static_cast<unsigned long long>(state->blackConsumerSamples),
+            static_cast<unsigned long long>(state->visibleConsumerSamples),
+            state->visibleContentValidated ? 1u : 0u,
             state->lastSourceWidth,
             state->lastSourceHeight,
             state->width,
@@ -2968,18 +2996,34 @@ void DxvkIosurfaceSubmitProof::capturePoolSources(
                     ++state->separateEyeFrames;
                     break;
             }
-            if ((transfer.mode == PoolTransferMode::StereoLinearBlit ||
+            const bool retryConsumerSample =
+                !state->visibleContentValidated &&
+                periodicConsumerSampleDue(state->submittedFrames);
+            const bool resizedConsumerSample =
+                (transfer.mode == PoolTransferMode::StereoLinearBlit ||
                  transfer.mode == PoolTransferMode::StereoNearestBlit) &&
                 state->resizedFramesSinceTransition ==
-                    kResizeConsumerSampleFrame) {
-                workerContext->consumerSample = true;
-                ++state->resizedConsumerSamples;
-            } else if (
+                    kResizeConsumerSampleFrame;
+            const bool separateEyeConsumerSample =
                 transfer.mode == PoolTransferMode::SeparateEyeBlit &&
                 state->separateEyeFrames ==
-                    kSeparateEyeConsumerSampleFrame) {
+                    kSeparateEyeConsumerSampleFrame;
+            if (retryConsumerSample || resizedConsumerSample ||
+                separateEyeConsumerSample) {
                 workerContext->consumerSample = true;
-                ++state->separateEyeConsumerSamples;
+                ++state->consumerSamples;
+                switch (transfer.mode) {
+                    case PoolTransferMode::DirectCopy:
+                        ++state->directConsumerSamples;
+                        break;
+                    case PoolTransferMode::StereoLinearBlit:
+                    case PoolTransferMode::StereoNearestBlit:
+                        ++state->resizedConsumerSamples;
+                        break;
+                    case PoolTransferMode::SeparateEyeBlit:
+                        ++state->separateEyeConsumerSamples;
+                        break;
+                }
             }
         }
     }
@@ -3172,6 +3216,18 @@ void DxvkIosurfaceSubmitProof::runPoolWorker(PoolWorkerContext *context) {
             released = true;
             recycled = releasePass || releaseDropped;
             closed = releaseClosed;
+            if (context->consumerSample && (releasePass || releaseClosed)) {
+                const uint32_t visibleColor =
+                    static_cast<uint32_t>(release.actualBgra[0]) +
+                    static_cast<uint32_t>(release.actualBgra[1]) +
+                    static_cast<uint32_t>(release.actualBgra[2]);
+                if (visibleColor >= kVisibleColorThreshold) {
+                    ++state->visibleConsumerSamples;
+                    state->visibleContentValidated = true;
+                } else {
+                    ++state->blackConsumerSamples;
+                }
+            }
             if (closed) {
                 state->closing = true;
             }

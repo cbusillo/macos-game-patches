@@ -112,7 +112,7 @@
       "name": "ALVR",
       "repo": "cbusillo/ALVR",
       "localPath": "../alvr",
-      "baselineCommit": "229e8ced76be9b62307fe79690229c5e6bc020d5",
+      "baselineCommit": "f59bfca6350f3bff27551f072cd403d2ee72ef42",
       "purpose": "Physically qualified macOS bridge host; client core is pinned separately by alvr-visionos"
     }
   ],
