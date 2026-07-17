@@ -701,7 +701,7 @@
     {
       "id": "dxvk_submit_source",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
-      "sha256": "8b1d2c99e97cb8003ed28e18a2611a17b6f86ecfc691a5df64ed09a77cdf7993",
+      "sha256": "5056047da85771c37dce8d4a29378c6a7c918cd3257b8c697f6e9c1f6c3124d5",
       "supplyClass": "repo-source"
     },
     {

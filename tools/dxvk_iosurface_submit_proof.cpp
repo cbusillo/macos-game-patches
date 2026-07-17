@@ -693,9 +693,7 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
         Slot &slot = slots[slotIndex];
         const bool supportedSourceFormat =
             sourceInfo.format == VK_FORMAT_R8G8B8A8_UNORM ||
-            sourceInfo.format == VK_FORMAT_R8G8B8A8_SRGB ||
-            sourceInfo.format == VK_FORMAT_B8G8R8A8_UNORM ||
-            sourceInfo.format == VK_FORMAT_B8G8R8A8_SRGB;
+            sourceInfo.format == VK_FORMAT_B8G8R8A8_UNORM;
         if (FAILED(result) || sourceImage == VK_NULL_HANDLE ||
             resizeSourceLayout == VK_IMAGE_LAYOUT_UNDEFINED ||
             slot.layout == VK_IMAGE_LAYOUT_UNDEFINED ||
@@ -1049,9 +1047,7 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitSeparateEyeTransfer(
 
     const auto supportedSourceFormat = [](VkFormat format) {
         return format == VK_FORMAT_R8G8B8A8_UNORM ||
-               format == VK_FORMAT_R8G8B8A8_SRGB ||
-               format == VK_FORMAT_B8G8R8A8_UNORM ||
-               format == VK_FORMAT_B8G8R8A8_SRGB;
+               format == VK_FORMAT_B8G8R8A8_UNORM;
     };
     Slot &slot = slots[slotIndex];
     if (!supportedSourceFormat(leftSource.info.format) ||
