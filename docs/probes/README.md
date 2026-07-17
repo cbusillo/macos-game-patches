@@ -64,12 +64,14 @@ encoded frame contract view_params ...
 
 Route plan updates to the owning issue before moving on:
 
+- #59 for the second-title packaged-runtime generality gate.
+- #56 for parent-level runtime direction or product-boundary changes.
 - #38 for submitted-frame contract facts.
 - #39 for native macOS encode surface facts.
 - #40 for the completed CrossOver/GPTK texture-handoff discovery record.
 - #53 for production handoff-pool implementation facts.
 - #41 for AVP validation and human-observation rules.
-- #36 only for parent-level recovery state or direction changes.
+- #36 for historical GPU-resident bridge context.
 
 If a run changes the plan, update the owning GitHub issue's `Current Status`
 before starting another experiment.
@@ -83,7 +85,7 @@ Use this shape:
 - Verdict: `alive`, `dead`, or `blocked`
 - Next action
 
-## Active Probes
+## Probe Index
 
 - [001 - ALVR v21 visionOS compatibility](001-alvr-v21-visionos-compatibility.md)
 - [002 - ALVR v21 AVP runtime gate](002-alvr-v21-avp-runtime-gate.md)

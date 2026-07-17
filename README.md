@@ -3,11 +3,17 @@
 Workspace for reproducible experiments around getting PC VR and game rendering
 working well on Apple hardware.
 
-The near-term target is SteamVR through CrossOver/GPTK on macOS, paired with an
-ALVR visionOS client on Apple Vision Pro. D3DMetal performance is central to the
-plan; the first gate is proving that the AVP client can speak the same ALVR v21
-protocol as the streamer before investing in the CrossOver-to-native frame
-bridge.
+The proven baseline runs unmodified Windows OpenVR games through CrossOver,
+captures D3D11 frames through a custom OpenVR/DXVK IOSurface path, encodes them
+with VideoToolbox, and transports them through ALVR to Apple Vision Pro with
+PS VR2 Sense controls. The current workstream is turning that owner-operated
+research harness into a reproducible local runtime.
+
+The v1 boundary, exact support matrix, component ownership, frozen contracts,
+and second-title decision are recorded in
+`docs/reproducible-mac-alvr-runtime-v1.md`. Execution is tracked by GitHub
+issue #56 and its native sub-issues. Real SteamVR compositor operation is not
+part of the current accepted architecture.
 
 ## Working Style
 
@@ -31,9 +37,11 @@ visionOS client work.
 
 ## Starting New Work
 
-Start with the probe ledger:
+Start with the active GitHub plan and the frozen runtime boundary. For new live
+experiments, add or update the probe ledger before adding scripts:
 
 ```text
+docs/reproducible-mac-alvr-runtime-v1.md
 docs/probes/README.md
 ```
 
@@ -45,7 +53,7 @@ Include:
 - evidence to collect
 - cleanup or rollback steps
 
-Before live SteamVR or ALVR runs, clear stale runtime state:
+Before live OpenVR/CrossOver or ALVR runs, clear stale runtime state:
 
 ```bash
 python3 tools/vr_stack_cleanup.py

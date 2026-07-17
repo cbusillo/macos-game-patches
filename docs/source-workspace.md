@@ -18,33 +18,44 @@ visionOS app. Use the standalone `alvr/` checkout when working on the streamer,
 server, dashboard, or CrossOver bridge experiments that need a full ALVR source
 tree outside the visionOS client checkout.
 
-## Current Baseline
+## Qualified Runtime Baseline
 
-- `alvr-org/alvr-visionos`: `301b9285073949033727baab2d556fe9e8620612`
-- `alvr-org/ALVR` for v21 client-core work:
-  `d9f2b19d2b98b9d70411439fef83300c84ed171d`
-- ALVR version: `21.0.0-dev12`
+- Host: `cbusillo/ALVR`, branch `diagnostic/bgra-nv12-probe`, commit
+  `4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819`
+- visionOS client: `cbusillo/alvr-visionos`, branch `main`, commit
+  `171cd9dca5ef85c9dfd9f35c565c265c08e8ce82`
+- visionOS client core: `cbusillo/ALVR`, branch
+  `visionos-client-mdns-c5d8bd26`, commit
+  `109643c88e402b36766020b8f6a99ea48aa8d55f`
+- Protocol/version: `21.0.0-dev12`
+
+These commits are the physically qualified owner-runtime baseline. The earlier
+upstream commits in patch READMEs remain provenance for individual patches, not
+the complete current runtime.
 
 ## Setup
 
 ```bash
 cd ~/Developer
-git clone https://github.com/alvr-org/alvr-visionos.git alvr-visionos
-git clone https://github.com/alvr-org/ALVR.git alvr
+git clone https://github.com/cbusillo/alvr-visionos.git alvr-visionos
+git clone https://github.com/cbusillo/ALVR.git alvr
 
 cd ~/Developer/alvr-visionos
+git checkout 171cd9dca5ef85c9dfd9f35c565c265c08e8ce82
 git submodule update --init ALVR
-git -C ALVR fetch --tags origin master
-git -C ALVR checkout d9f2b19d2b98b9d70411439fef83300c84ed171d
+git -C ALVR fetch \
+  https://github.com/cbusillo/ALVR.git visionos-client-mdns-c5d8bd26
+git -C ALVR checkout 109643c88e402b36766020b8f6a99ea48aa8d55f
 git -C ALVR submodule update --init --recursive
+
+cd ~/Developer/alvr
+git checkout 4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819
 ```
 
-Apply patch artifacts from this repo to the sibling source checkout:
-
-```bash
-cd ~/Developer/alvr-visionos
-git apply ~/Developer/macos-game-patches/patches/alvr-visionos/alvr-v21-client-core-abi.patch
-```
+Add `alvr-org` remotes when comparing or preparing upstream work. Do not apply
+the repository patch artifacts on top of these qualified fork commits; those
+commits already contain the runtime changes. The patch files remain the durable
+review and reconstruction record for their documented upstream bases.
 
 ## Why Not Submodules Here
 
