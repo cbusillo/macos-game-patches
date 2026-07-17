@@ -894,7 +894,7 @@ private:
         }
 
         if (same_texture) {
-            if (!is_bgra_format(desc.Format)) {
+            if (!is_bgra_format(desc.Format) && !is_rgba_format(desc.Format)) {
                 return;
             }
             m_iosurface_proof.capturePoolFrame(

@@ -689,7 +689,7 @@
     {
       "id": "openvr_shim_source",
       "path": "${REPO_ROOT}/tools/openvr_submit_shim.cpp",
-      "sha256": "b1880c3637d4031c782946fa95366068e5966e92219b185852f19bb6998f40fe",
+      "sha256": "d068a1b6f8d9a6e43f38971ade6359b191f314431c930f96d29d6855dadb095a",
       "supplyClass": "repo-source"
     },
     {
