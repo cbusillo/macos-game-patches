@@ -34,7 +34,7 @@
     },
     {
       "id": "custom_openvr_runtime",
-      "sha256": "74a15f37b0907603029ea1c8449b1d2808254e080741ad6820d36554a5c84c5d"
+      "sha256": "cfba18355d1c2838fd4ff582385157ed193e97bf4bdf47c7a3dd74081f5201c7"
     },
     {
       "id": "wine_bridge_windows",
@@ -45,6 +45,6 @@
       "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
     }
   ],
-  "manifestSha256": "9648ea80a213f567976fd2dfacd5dbae4b1b6a1e27ba467d8b36a086562a7be6",
+  "manifestSha256": "e7c1fb5b6510c3bdb32fae4cf18a7b87f93cb971f25acd3a6940c9803369de06",
   "schemaVersion": 1
 }

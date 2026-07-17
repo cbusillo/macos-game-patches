@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev3"
+    "version": "1.0.0-dev4"
   },
   "artifacts": [
     {
@@ -695,7 +695,7 @@
     {
       "id": "custom_openvr_runtime_source",
       "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
-      "sha256": "6a1a9d2438f36bd8f27044be6374bf78f3ab59f78492232581f0821a3d440687",
+      "sha256": "f25726fb7210b94f7b47832b2b8af5851b310806d1412ca21476ed2631b0b212",
       "supplyClass": "repo-source"
     },
     {

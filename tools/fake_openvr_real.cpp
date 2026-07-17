@@ -29,6 +29,7 @@ namespace {
 constexpr size_t kSystemSlots = 46;
 constexpr size_t kLegacySystem011Slots = 46;
 constexpr size_t kLegacySystem019Slots = 47;
+constexpr size_t kLegacySystem020Slots = 48;
 constexpr size_t kCompositorSlots = 51;
 constexpr size_t kLegacyCompositor013Slots = 27;
 constexpr size_t kLegacyCompositor014Slots = 29;
@@ -37,12 +38,14 @@ constexpr size_t kChaperoneSlots = 9;
 constexpr size_t kChaperoneSetupSlots = 20;
 constexpr size_t kOverlaySlots = 90;
 constexpr size_t kLegacyOverlay013Slots = 72;
+constexpr size_t kLegacyOverlay020Slots = 80;
 constexpr size_t kRenderModelsSlots = 19;
 constexpr size_t kScreenshotsSlots = 7;
 constexpr size_t kApplicationsSlots = 30;
 constexpr size_t kLegacyApplications004Slots = 23;
 constexpr size_t kSettingsSlots = 11;
 constexpr size_t kLegacySettings001Slots = 12;
+constexpr size_t kLegacySettings002Slots = 12;
 constexpr size_t kLegacyInput005Slots = 25;
 constexpr size_t kLegacyInput006Slots = 26;
 constexpr uint32_t kVREventPrefixSize = offsetof(vr::VREvent_t, data);
@@ -50,6 +53,7 @@ constexpr const char* kFnTablePrefix = "FnTable:";
 constexpr const char* kLegacySystem011 = "IVRSystem_011";
 constexpr const char* kLegacySystem012 = "IVRSystem_012";
 constexpr const char* kLegacySystem019 = "IVRSystem_019";
+constexpr const char* kLegacySystem020 = "IVRSystem_020";
 constexpr const char* kLegacyCompositor013 = "IVRCompositor_013";
 constexpr const char* kLegacyCompositor014 = "IVRCompositor_014";
 constexpr const char* kLegacyCompositor016 = "IVRCompositor_016";
@@ -60,12 +64,14 @@ constexpr const char* kLegacyOverlay010 = "IVROverlay_010";
 constexpr const char* kLegacyOverlay013 = "IVROverlay_013";
 constexpr const char* kLegacyOverlay018 = "IVROverlay_018";
 constexpr const char* kLegacyOverlay019 = "IVROverlay_019";
+constexpr const char* kLegacyOverlay020 = "IVROverlay_020";
 constexpr const char* kLegacyRenderModels004 = "IVRRenderModels_004";
 constexpr const char* kLegacyRenderModels006 = "IVRRenderModels_006";
 constexpr const char* kLegacyScreenshots001 = "IVRScreenshots_001";
 constexpr const char* kLegacyApplications004 = "IVRApplications_004";
 constexpr const char* kLegacyApplications005 = "IVRApplications_005";
 constexpr const char* kLegacySettings001 = "IVRSettings_001";
+constexpr const char* kLegacySettings002 = "IVRSettings_002";
 constexpr const char* kLegacyInput005 = "IVRInput_005";
 constexpr const char* kLegacyInput006 = "IVRInput_006";
 constexpr uint64_t kFakeRefreshRate = 90;
@@ -1073,7 +1079,8 @@ bool is_system_interface(const char* version) {
         && (std::strcmp(version, vr::IVRSystem_Version) == 0
             || std::strcmp(version, kLegacySystem011) == 0
             || std::strcmp(version, kLegacySystem012) == 0
-            || std::strcmp(version, kLegacySystem019) == 0);
+            || std::strcmp(version, kLegacySystem019) == 0
+            || std::strcmp(version, kLegacySystem020) == 0);
 }
 
 bool is_legacy_system011_or_012_interface(const char* version) {
@@ -1082,6 +1089,10 @@ bool is_legacy_system011_or_012_interface(const char* version) {
 
 bool is_legacy_system019_interface(const char* version) {
     return version && std::strcmp(version, kLegacySystem019) == 0;
+}
+
+bool is_legacy_system020_interface(const char* version) {
+    return version && std::strcmp(version, kLegacySystem020) == 0;
 }
 
 bool is_compositor_interface(const char* version) {
@@ -1127,11 +1138,16 @@ bool is_overlay_interface(const char* version) {
             || std::strcmp(version, kLegacyOverlay010) == 0
             || std::strcmp(version, kLegacyOverlay013) == 0
             || std::strcmp(version, kLegacyOverlay018) == 0
-            || std::strcmp(version, kLegacyOverlay019) == 0);
+            || std::strcmp(version, kLegacyOverlay019) == 0
+            || std::strcmp(version, kLegacyOverlay020) == 0);
 }
 
 bool is_legacy_overlay013_interface(const char* version) {
     return version && std::strcmp(version, kLegacyOverlay013) == 0;
+}
+
+bool is_legacy_overlay020_interface(const char* version) {
+    return version && std::strcmp(version, kLegacyOverlay020) == 0;
 }
 
 bool is_legacy_input005_interface(const char* version) {
@@ -1170,11 +1186,16 @@ bool is_legacy_applications004_or_005_interface(const char* version) {
 bool is_settings_interface(const char* version) {
     return version
         && (std::strcmp(version, vr::IVRSettings_Version) == 0
-            || std::strcmp(version, kLegacySettings001) == 0);
+            || std::strcmp(version, kLegacySettings001) == 0
+            || std::strcmp(version, kLegacySettings002) == 0);
 }
 
 bool is_legacy_settings001_interface(const char* version) {
     return version && std::strcmp(version, kLegacySettings001) == 0;
+}
+
+bool is_legacy_settings002_interface(const char* version) {
+    return version && std::strcmp(version, kLegacySettings002) == 0;
 }
 
 void log_line(const char* text) {
@@ -4708,6 +4729,8 @@ void* g_system011_vtable[kLegacySystem011Slots] = {};
 void* g_system011_fntable[kLegacySystem011Slots] = {};
 void* g_system019_vtable[kLegacySystem019Slots] = {};
 void* g_system019_fntable[kLegacySystem019Slots] = {};
+void* g_system020_vtable[kLegacySystem020Slots] = {};
+void* g_system020_fntable[kLegacySystem020Slots] = {};
 void* g_compositor_vtable[kCompositorSlots] = {};
 void* g_compositor_fntable[kCompositorSlots] = {};
 void* g_compositor013_vtable[kLegacyCompositor013Slots] = {};
@@ -4726,6 +4749,8 @@ void* g_overlay_vtable[kOverlaySlots] = {};
 void* g_overlay_fntable[kOverlaySlots] = {};
 void* g_overlay013_vtable[kLegacyOverlay013Slots] = {};
 void* g_overlay013_fntable[kLegacyOverlay013Slots] = {};
+void* g_overlay020_vtable[kLegacyOverlay020Slots] = {};
+void* g_overlay020_fntable[kLegacyOverlay020Slots] = {};
 void* g_render_models_fntable[kRenderModelsSlots] = {};
 void* g_screenshots_fntable[kScreenshotsSlots] = {};
 void* g_applications_vtable[kApplicationsSlots] = {};
@@ -4736,6 +4761,8 @@ void* g_settings_vtable[kSettingsSlots] = {};
 void* g_settings_fntable[kSettingsSlots] = {};
 void* g_settings001_vtable[kLegacySettings001Slots] = {};
 void* g_settings001_fntable[kLegacySettings001Slots] = {};
+void* g_settings002_vtable[kLegacySettings002Slots] = {};
+void* g_settings002_fntable[kLegacySettings002Slots] = {};
 void* g_input005_fntable[kLegacyInput005Slots] = {};
 void* g_input006_vtable[kLegacyInput006Slots] = {};
 void* g_input006_fntable[kLegacyInput006Slots] = {};
@@ -4776,6 +4803,7 @@ struct FakeInputObject {
 FakeSystemObject g_system = { g_system_vtable };
 FakeSystemObject g_system011 = { g_system011_vtable };
 FakeSystemObject g_system019 = { g_system019_vtable };
+FakeSystemObject g_system020 = { g_system020_vtable };
 FakeCompositorObject g_compositor = { g_compositor_vtable };
 FakeCompositorObject g_compositor013 = { g_compositor013_vtable };
 FakeCompositorObject g_compositor014 = { g_compositor014_vtable };
@@ -4785,10 +4813,12 @@ FakeChaperoneSetupObject g_chaperone_setup = { g_chaperone_setup_vtable };
 FakeChaperoneSetupObject g_chaperone_setup005 = { g_chaperone_setup005_vtable };
 FakeOverlayObject g_overlay = { g_overlay_vtable };
 FakeOverlayObject g_overlay013 = { g_overlay013_vtable };
+FakeOverlayObject g_overlay020 = { g_overlay020_vtable };
 FakeApplicationsObject g_applications = { g_applications_vtable };
 FakeApplicationsObject g_applications004 = { g_applications004_vtable };
 FakeSettingsObject g_settings = { g_settings_vtable };
 FakeSettingsObject g_settings001 = { g_settings001_vtable };
+FakeSettingsObject g_settings002 = { g_settings002_vtable };
 FakeInputObject g_input006 = { g_input006_vtable };
 
 void ensure_tables_initialized() {
@@ -5087,6 +5117,26 @@ void ensure_tables_initialized() {
     g_system019_fntable[44] = reinterpret_cast<void*>(&fake_c_firmware_update);
     g_system019_fntable[45] = reinterpret_cast<void*>(&fake_c_acknowledge_quit);
     g_system019_fntable[46] = reinterpret_cast<void*>(&fake_c_acknowledge_quit);
+
+    for (size_t index = 0; index < kLegacySystem020Slots; ++index) {
+        g_system020_vtable[index] = reinterpret_cast<void*>(&fake_ret0);
+        g_system020_fntable[index] = reinterpret_cast<void*>(&fake_c_ret0);
+    }
+    for (size_t index = 0; index < 43; ++index) {
+        g_system020_vtable[index] = g_system019_vtable[index];
+        g_system020_fntable[index] = g_system019_fntable[index];
+    }
+    g_system020_vtable[43] = reinterpret_cast<void*>(&fake_firmware_update);
+    g_system020_vtable[44] = reinterpret_cast<void*>(&fake_acknowledge_quit);
+    g_system020_vtable[45] = reinterpret_cast<void*>(&fake_acknowledge_quit);
+    g_system020_vtable[46] = reinterpret_cast<void*>(&fake_get_app_container_file_paths);
+    g_system020_vtable[47] = reinterpret_cast<void*>(&fake_get_runtime_version);
+
+    g_system020_fntable[43] = reinterpret_cast<void*>(&fake_c_firmware_update);
+    g_system020_fntable[44] = reinterpret_cast<void*>(&fake_c_acknowledge_quit);
+    g_system020_fntable[45] = reinterpret_cast<void*>(&fake_c_acknowledge_quit);
+    g_system020_fntable[46] = reinterpret_cast<void*>(&fake_c_get_app_container_file_paths);
+    g_system020_fntable[47] = reinterpret_cast<void*>(&fake_c_get_runtime_version);
 
     for (size_t index = 0; index < kCompositorSlots; ++index) {
         g_compositor_vtable[index] = reinterpret_cast<void*>(&fake_ret0);
@@ -5584,6 +5634,54 @@ void ensure_tables_initialized() {
     g_overlay013_fntable[70] = reinterpret_cast<void*>(&fake_c_noop_void);
     g_overlay013_fntable[71] = reinterpret_cast<void*>(&fake_c_noop_void);
 
+    for (size_t index = 0; index < kLegacyOverlay020Slots; ++index) {
+        g_overlay020_vtable[index] = reinterpret_cast<void*>(&fake_overlay_error);
+        g_overlay020_fntable[index] = reinterpret_cast<void*>(&fake_c_overlay_error);
+    }
+    g_overlay020_vtable[0] = reinterpret_cast<void*>(&fake_overlay_find);
+    g_overlay020_vtable[1] = reinterpret_cast<void*>(&fake_overlay_create);
+    g_overlay020_vtable[3] = reinterpret_cast<void*>(&fake_overlay_string);
+    g_overlay020_vtable[4] = reinterpret_cast<void*>(&fake_overlay_string);
+    g_overlay020_vtable[7] = reinterpret_cast<void*>(&fake_overlay_error_name);
+    g_overlay020_vtable[9] = reinterpret_cast<void*>(&fake_overlay_pid);
+    g_overlay020_vtable[41] = reinterpret_cast<void*>(&fake_overlay_visible);
+    g_overlay020_vtable[43] = reinterpret_cast<void*>(&fake_overlay_poll);
+    g_overlay020_vtable[48] = reinterpret_cast<void*>(&fake_overlay_visible);
+    g_overlay020_vtable[49] = reinterpret_cast<void*>(&fake_overlay_visible);
+    g_overlay020_vtable[50] = reinterpret_cast<void*>(&fake_overlay_handle);
+    g_overlay020_vtable[64] = reinterpret_cast<void*>(&fake_overlay_visible);
+    g_overlay020_vtable[65] = reinterpret_cast<void*>(&fake_overlay_visible);
+    g_overlay020_vtable[68] = reinterpret_cast<void*>(&fake_noop_void);
+    g_overlay020_vtable[69] = reinterpret_cast<void*>(&fake_overlay_handle);
+    g_overlay020_vtable[72] = reinterpret_cast<void*>(&fake_ret0);
+    g_overlay020_vtable[73] = reinterpret_cast<void*>(&fake_noop_void);
+    g_overlay020_vtable[74] = reinterpret_cast<void*>(&fake_noop_void);
+    g_overlay020_vtable[75] = reinterpret_cast<void*>(&fake_noop_void);
+    g_overlay020_vtable[78] = reinterpret_cast<void*>(&fake_ret0);
+    g_overlay020_vtable[79] = reinterpret_cast<void*>(&fake_noop_void);
+
+    g_overlay020_fntable[0] = reinterpret_cast<void*>(&fake_c_overlay_find);
+    g_overlay020_fntable[1] = reinterpret_cast<void*>(&fake_c_overlay_create);
+    g_overlay020_fntable[3] = reinterpret_cast<void*>(&fake_c_overlay_string);
+    g_overlay020_fntable[4] = reinterpret_cast<void*>(&fake_c_overlay_string);
+    g_overlay020_fntable[7] = reinterpret_cast<void*>(&fake_c_overlay_error_name);
+    g_overlay020_fntable[9] = reinterpret_cast<void*>(&fake_c_overlay_pid);
+    g_overlay020_fntable[41] = reinterpret_cast<void*>(&fake_c_overlay_visible);
+    g_overlay020_fntable[43] = reinterpret_cast<void*>(&fake_c_overlay_poll);
+    g_overlay020_fntable[48] = reinterpret_cast<void*>(&fake_c_overlay_visible);
+    g_overlay020_fntable[49] = reinterpret_cast<void*>(&fake_c_overlay_visible);
+    g_overlay020_fntable[50] = reinterpret_cast<void*>(&fake_c_overlay_handle);
+    g_overlay020_fntable[64] = reinterpret_cast<void*>(&fake_c_overlay_visible);
+    g_overlay020_fntable[65] = reinterpret_cast<void*>(&fake_c_overlay_visible);
+    g_overlay020_fntable[68] = reinterpret_cast<void*>(&fake_c_noop_void);
+    g_overlay020_fntable[69] = reinterpret_cast<void*>(&fake_c_overlay_handle);
+    g_overlay020_fntable[72] = reinterpret_cast<void*>(&fake_c_ret0);
+    g_overlay020_fntable[73] = reinterpret_cast<void*>(&fake_c_noop_void);
+    g_overlay020_fntable[74] = reinterpret_cast<void*>(&fake_c_noop_void);
+    g_overlay020_fntable[75] = reinterpret_cast<void*>(&fake_c_noop_void);
+    g_overlay020_fntable[78] = reinterpret_cast<void*>(&fake_c_ret0);
+    g_overlay020_fntable[79] = reinterpret_cast<void*>(&fake_c_noop_void);
+
     for (size_t index = 0; index < kRenderModelsSlots; ++index) {
         g_render_models_fntable[index] = reinterpret_cast<void*>(&fake_c_ret0);
     }
@@ -5794,6 +5892,36 @@ void ensure_tables_initialized() {
     g_settings001_fntable[10] = reinterpret_cast<void*>(&fake_c_settings_remove_section);
     g_settings001_fntable[11] = reinterpret_cast<void*>(&fake_c_settings_remove_key);
 
+    for (size_t index = 0; index < kLegacySettings002Slots; ++index) {
+        g_settings002_vtable[index] = reinterpret_cast<void*>(&fake_noop_void);
+        g_settings002_fntable[index] = reinterpret_cast<void*>(&fake_c_noop_void);
+    }
+    g_settings002_vtable[0] = reinterpret_cast<void*>(&fake_settings_error_name);
+    g_settings002_vtable[1] = reinterpret_cast<void*>(&fake_legacy_settings_sync);
+    g_settings002_vtable[2] = reinterpret_cast<void*>(&fake_settings_set_bool);
+    g_settings002_vtable[3] = reinterpret_cast<void*>(&fake_settings_set_int);
+    g_settings002_vtable[4] = reinterpret_cast<void*>(&fake_settings_set_float);
+    g_settings002_vtable[5] = reinterpret_cast<void*>(&fake_settings_set_string);
+    g_settings002_vtable[6] = reinterpret_cast<void*>(&fake_settings_get_bool);
+    g_settings002_vtable[7] = reinterpret_cast<void*>(&fake_settings_get_int);
+    g_settings002_vtable[8] = reinterpret_cast<void*>(&fake_settings_get_float);
+    g_settings002_vtable[9] = reinterpret_cast<void*>(&fake_settings_get_string);
+    g_settings002_vtable[10] = reinterpret_cast<void*>(&fake_settings_remove_section);
+    g_settings002_vtable[11] = reinterpret_cast<void*>(&fake_settings_remove_key);
+
+    g_settings002_fntable[0] = reinterpret_cast<void*>(&fake_c_settings_error_name);
+    g_settings002_fntable[1] = reinterpret_cast<void*>(&fake_c_legacy_settings_sync);
+    g_settings002_fntable[2] = reinterpret_cast<void*>(&fake_c_settings_set_bool);
+    g_settings002_fntable[3] = reinterpret_cast<void*>(&fake_c_settings_set_int);
+    g_settings002_fntable[4] = reinterpret_cast<void*>(&fake_c_settings_set_float);
+    g_settings002_fntable[5] = reinterpret_cast<void*>(&fake_c_settings_set_string);
+    g_settings002_fntable[6] = reinterpret_cast<void*>(&fake_c_settings_get_bool);
+    g_settings002_fntable[7] = reinterpret_cast<void*>(&fake_c_settings_get_int);
+    g_settings002_fntable[8] = reinterpret_cast<void*>(&fake_c_settings_get_float);
+    g_settings002_fntable[9] = reinterpret_cast<void*>(&fake_c_settings_get_string);
+    g_settings002_fntable[10] = reinterpret_cast<void*>(&fake_c_settings_remove_section);
+    g_settings002_fntable[11] = reinterpret_cast<void*>(&fake_c_settings_remove_key);
+
     for (size_t index = 0; index < kLegacyInput005Slots; ++index) {
         g_input005_fntable[index] = reinterpret_cast<void*>(&fake_c_input_update_action_state);
     }
@@ -5971,6 +6099,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         log_interface("IVRSystem", interface_version);
         return &g_system019;
     }
+    if (is_legacy_system020_interface(interface_version)) {
+        log_interface("IVRSystem", interface_version);
+        return &g_system020;
+    }
     if (is_system_interface(interface_version)) {
         log_interface("IVRSystem", interface_version);
         return &g_system;
@@ -6007,6 +6139,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         log_interface("IVROverlay", interface_version);
         return &g_overlay013;
     }
+    if (is_legacy_overlay020_interface(interface_version)) {
+        log_interface("IVROverlay", interface_version);
+        return &g_overlay020;
+    }
     if (is_overlay_interface(interface_version)) {
         log_interface("IVROverlay", interface_version);
         return &g_overlay;
@@ -6022,6 +6158,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
     if (is_legacy_settings001_interface(interface_version)) {
         log_interface("IVRSettings", interface_version);
         return &g_settings001;
+    }
+    if (is_legacy_settings002_interface(interface_version)) {
+        log_interface("IVRSettings", interface_version);
+        return &g_settings002;
     }
     if (is_settings_interface(interface_version)) {
         log_interface("IVRSettings", interface_version);
@@ -6041,6 +6181,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         if (is_legacy_system019_interface(version)) {
             log_interface("FnTable IVRSystem", interface_version);
             return g_system019_fntable;
+        }
+        if (is_legacy_system020_interface(version)) {
+            log_interface("FnTable IVRSystem", interface_version);
+            return g_system020_fntable;
         }
         if (is_system_interface(version)) {
             log_interface("FnTable IVRSystem", interface_version);
@@ -6078,6 +6222,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
             log_interface("FnTable IVROverlay", interface_version);
             return g_overlay013_fntable;
         }
+        if (is_legacy_overlay020_interface(version)) {
+            log_interface("FnTable IVROverlay", interface_version);
+            return g_overlay020_fntable;
+        }
         if (is_overlay_interface(version)) {
             log_interface("FnTable IVROverlay", interface_version);
             return g_overlay_fntable;
@@ -6101,6 +6249,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         if (is_legacy_settings001_interface(version)) {
             log_interface("FnTable IVRSettings", interface_version);
             return g_settings001_fntable;
+        }
+        if (is_legacy_settings002_interface(version)) {
+            log_interface("FnTable IVRSettings", interface_version);
+            return g_settings002_fntable;
         }
         if (is_settings_interface(version)) {
             log_interface("FnTable IVRSettings", interface_version);
