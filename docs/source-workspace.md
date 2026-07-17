@@ -70,3 +70,21 @@ review and reconstruction record for their documented upstream bases.
 
 If CI eventually needs to reproduce a full source tree, prefer a manifest and
 setup script before adding submodules to this repository.
+
+## Runtime Artifact Bindings
+
+The runtime artifact keeps machine-specific paths outside Git. Copy
+`runtime/bindings.example.json` to the ignored
+`.code/runtime-bindings.json`, then replace only the three local build-output
+roots for MoltenVK, DXVK, and the OpenVR/Wine bridge outputs.
+
+The checked-in manifest still pins every consumed byte by SHA-256. ALVR inputs
+also require exact clean commits and remotes. CrossOver, DXVK, and MoltenVK
+build trees remain external prerequisites rather than vendored source; their
+qualified product versions, patch recipes, binary formats, architectures,
+signatures, and output hashes define the honest opaque-output boundary.
+
+Run `python3 tools/build_runtime_artifact.py validate --bindings
+.code/runtime-bindings.json` before building. Unknown bindings, missing files,
+dirty or wrong Git checkouts, mismatched hashes, unsupported architectures, and
+signature drift fail closed.

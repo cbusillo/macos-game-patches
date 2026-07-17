@@ -26,6 +26,10 @@
     "environment": "docs/environment.md",
     "sourceWorkspace": "docs/source-workspace.md",
     "runtimeV1Scope": "docs/reproducible-mac-alvr-runtime-v1.md",
+    "runtimeArtifactContract": "docs/reproducible-runtime-artifact.md",
+    "runtimeArtifactManifest": "runtime/manifest.json",
+    "runtimeArtifactLock": "runtime/manifest.lock.json",
+    "runtimeArtifactBindings": "runtime/bindings.example.json",
     "activeRuntimePlan": "GitHub issue #56: Plan: Reproducible Mac ALVR Runtime",
     "historicalAlvrPlan": "GitHub issue #36: Plan: GPU-resident Mac ALVR bridge",
     "historicalTextureHandoffPlan": "GitHub issue #53: Plan: Production DXVK IOSurface handoff pool",
@@ -47,17 +51,27 @@
   },
   "qualityGate": {
     "json": {
-      "metadata": "jq empty .github/github.json"
+      "metadata": "jq empty .github/github.json runtime/bindings.example.json runtime/manifest.json runtime/manifest.lock.json"
     },
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py",
       "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
       "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
       "gitleaksVersion": "8.30.1"
+    },
+    "runtimeArtifact": {
+      "contract": "python3 tools/build_runtime_artifact.py check",
+      "fixtures": "python3 tools/build_runtime_artifact.py self-test",
+      "validate": "python3 tools/build_runtime_artifact.py validate --bindings .code/runtime-bindings.json",
+      "buildA": "python3 tools/build_runtime_artifact.py build --bindings .code/runtime-bindings.json --output-root .code/runtime-build-a",
+      "buildB": "python3 tools/build_runtime_artifact.py build --bindings .code/runtime-bindings.json --output-root .code/runtime-build-b",
+      "verify": "python3 tools/build_runtime_artifact.py verify --artifact <artifact-a>",
+      "compare": "python3 tools/build_runtime_artifact.py compare <artifact-a> <artifact-b>",
+      "plan": "python3 tools/build_runtime_artifact.py plan --artifact <artifact-a> --bindings .code/runtime-bindings.json"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
@@ -96,7 +110,10 @@
       "purpose": "Physically qualified macOS bridge host; client core is pinned separately by alvr-visionos"
     }
   ],
-  "validatedThrough": [],
+  "validatedThrough": [
+    "2026-07-17: issue #58 hardware-free gates passed: JSON, Python compile, contract check, self-test, Markdown, actionlint, tracked-index gitleaks, and changed-files JetBrains inspection",
+    "2026-07-17: issue #58 qualified local gate passed on the frozen Mac16,9/macOS 27.0/Xcode 27.0/CrossOver 26.2 matrix: validate, two independent builds, verify, compare, and complete read-only ownership/mutable-state plan; the pre-artifact bridge bundle is intentionally reported as unowned"
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,

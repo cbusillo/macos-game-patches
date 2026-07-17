@@ -38,13 +38,16 @@ requires explicit requalification. Public distribution is not implied.
 
 ### Planned Operator Journey
 
-The following is intended v1 behavior. These CLI verbs do not exist as a
-supported product interface yet; the current research runner performs the
-equivalent orchestration.
+The artifact `check`, `validate`, `build`, `verify`, `compare`, and read-only
+`plan` verbs now exist as the issue #58 implementation documented in
+`reproducible-runtime-artifact.md`. Installation, doctor, lifecycle, and
+uninstallation remain planned product verbs; the current research runner
+performs their equivalent orchestration.
 
 1. Install the user-owned prerequisites and restore the exact pinned source
    checkouts.
-2. Build and seal the runtime artifact from a manifest.
+2. Validate and build the immutable unsigned runtime payload from the checked-in
+   manifest and lock, then seal it as a separate signing step.
 3. Run `install` and `doctor`; no mutable game or bottle state is committed
    unless every preflight passes.
 4. Open ALVR on Vision Pro when prompted.

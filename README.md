@@ -35,6 +35,23 @@ Each patch directory includes its own apply notes and tested upstream commits.
 Use the sibling source layout in `docs/source-workspace.md` for active ALVR and
 visionOS client work.
 
+## Runtime Artifact
+
+Issue #58 defines the first reproducible runtime artifact. The checked-in
+manifest and lock enumerate the exact source commits, repository inputs, opaque
+local build outputs, signatures, configuration, support matrix, and ownership
+plan without vendoring third-party binaries:
+
+```bash
+python3 tools/build_runtime_artifact.py check
+python3 tools/build_runtime_artifact.py self-test
+```
+
+Qualified local validation and builds use ignored bindings documented in
+`runtime/bindings.example.json`. See
+`docs/reproducible-runtime-artifact.md` for the deterministic payload,
+provenance, sealing boundary, and read-only install/uninstall plan contract.
+
 ## Starting New Work
 
 Start with the active GitHub plan and the frozen runtime boundary. For new live

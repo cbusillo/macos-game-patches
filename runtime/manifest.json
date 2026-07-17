@@ -1,0 +1,919 @@
+{
+  "allowedTargetRoots": [
+    "${REPO_ROOT}/.code",
+    "${HOME}/Library/Application Support/alvr",
+    "${CROSSOVER_APP}",
+    "${STEAM_BOTTLE}"
+  ],
+  "artifact": {
+    "buildCommand": [
+      "python3",
+      "tools/build_runtime_artifact.py",
+      "build",
+      "--bindings",
+      ".code/runtime-bindings.json"
+    ],
+    "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
+    "id": "mac-alvr-runtime",
+    "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
+    "version": "1.0.0-dev1"
+  },
+  "artifacts": [
+    {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/MacOS/alvr_macos_bridge",
+      "binary": {
+        "architectures": ["arm64"],
+        "format": "mach-o",
+        "kind": "executable"
+      },
+      "id": "native_bridge",
+      "mode": "0555",
+      "path": "${ALVR_CHECKOUT}/target/release/alvr_macos_bridge",
+      "recipe": "cargo build --manifest-path ../alvr/Cargo.toml -p alvr_macos_bridge --release",
+      "signature": "require-lock",
+      "supplyClass": "pinned-git-build"
+    },
+    {
+      "artifactPath": "payload/macos/libMoltenVK.dylib",
+      "binary": {
+        "architectures": ["arm64", "x86_64"],
+        "format": "mach-o",
+        "kind": "dynamic-library"
+      },
+      "id": "patched_moltenvk",
+      "mode": "0555",
+      "path": "${MOLTENVK_BUILD_ROOT}/libMoltenVK.dylib",
+      "recipe": "patches/crossover-moltenvk/README.md",
+      "signature": "require-lock",
+      "supplyClass": "opaque-local-build"
+    },
+    {
+      "artifactPath": "payload/windows/d3d11.dll",
+      "binary": {
+        "architectures": ["x86_64"],
+        "authenticode": "absent",
+        "format": "pe",
+        "kind": "dll"
+      },
+      "id": "dxvk_d3d11",
+      "mode": "0444",
+      "path": "${DXVK_BUILD_ROOT}/d3d11/d3d11.dll",
+      "recipe": "patches/crossover-dxvk/README.md",
+      "signature": "none",
+      "supplyClass": "opaque-local-build"
+    },
+    {
+      "artifactPath": "payload/windows/dxgi.dll",
+      "binary": {
+        "architectures": ["x86_64"],
+        "authenticode": "absent",
+        "format": "pe",
+        "kind": "dll"
+      },
+      "id": "dxvk_dxgi",
+      "mode": "0444",
+      "path": "${DXVK_BUILD_ROOT}/dxgi/dxgi.dll",
+      "recipe": "patches/crossover-dxvk/README.md",
+      "signature": "none",
+      "supplyClass": "opaque-local-build"
+    },
+    {
+      "artifactPath": "payload/windows/openvr_api.dll",
+      "binary": {
+        "architectures": ["x86_64"],
+        "authenticode": "absent",
+        "format": "pe",
+        "kind": "dll"
+      },
+      "id": "openvr_shim",
+      "mode": "0444",
+      "path": "${RUNTIME_BUILD_ROOT}/openvr_api.dll",
+      "recipe": "tools/run_real_native_iosurface_probe.sh: openvr shim build",
+      "signature": "none",
+      "supplyClass": "repo-source-build"
+    },
+    {
+      "artifactPath": "payload/windows/openvr_api.real.dll",
+      "binary": {
+        "architectures": ["x86_64"],
+        "authenticode": "absent",
+        "format": "pe",
+        "kind": "dll"
+      },
+      "id": "custom_openvr_runtime",
+      "mode": "0444",
+      "path": "${RUNTIME_BUILD_ROOT}/openvr_api.real.dll",
+      "recipe": "tools/run_real_native_iosurface_probe.sh: custom OpenVR runtime build",
+      "signature": "none",
+      "supplyClass": "repo-source-build"
+    },
+    {
+      "artifactPath": "payload/windows/alvr_iosurface_bridge.dll",
+      "binary": {
+        "architectures": ["x86_64"],
+        "authenticode": "absent",
+        "format": "pe",
+        "kind": "dll"
+      },
+      "id": "wine_bridge_windows",
+      "mode": "0444",
+      "path": "${RUNTIME_BUILD_ROOT}/bridge/x86_64-windows/alvr_iosurface_bridge.dll",
+      "recipe": "tools/alvr_iosurface_bridge and the CrossOver 26.2 Wine build tree",
+      "signature": "none",
+      "supplyClass": "opaque-local-build"
+    },
+    {
+      "artifactPath": "payload/unix/alvr_iosurface_bridge.so",
+      "binary": {
+        "architectures": ["x86_64"],
+        "format": "mach-o",
+        "kind": "dynamic-library"
+      },
+      "id": "wine_bridge_unix",
+      "mode": "0555",
+      "path": "${RUNTIME_BUILD_ROOT}/bridge/x86_64-unix/alvr_iosurface_bridge.so",
+      "recipe": "tools/alvr_iosurface_bridge and the CrossOver 26.2 Wine build tree",
+      "signature": "none",
+      "supplyClass": "opaque-local-build"
+    }
+  ],
+  "bindings": [
+    {
+      "default": "${REPO_ROOT}/../alvr",
+      "name": "ALVR_CHECKOUT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "default": "${REPO_ROOT}/../alvr-visionos",
+      "name": "ALVR_VISIONOS_CHECKOUT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "default": "${ALVR_VISIONOS_CHECKOUT}/ALVR",
+      "name": "ALVR_CLIENT_CORE_CHECKOUT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "name": "MOLTENVK_BUILD_ROOT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "name": "DXVK_BUILD_ROOT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "name": "RUNTIME_BUILD_ROOT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
+    {
+      "default": "/Applications/CrossOver.app",
+      "name": "CROSSOVER_APP",
+      "phases": ["validate", "build", "plan"],
+      "required": true
+    },
+    {
+      "default": "${HOME}/Library/Application Support/CrossOver/Bottles/Steam",
+      "name": "STEAM_BOTTLE",
+      "phases": ["plan"],
+      "required": true
+    },
+    {
+      "default": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR/FreedomLocomotion/Binaries/Win64",
+      "name": "FREEDOM_GAME_DIR",
+      "phases": ["plan"],
+      "required": true
+    },
+    {
+      "default": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR/Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_2/Win64",
+      "name": "FREEDOM_OPENVR_DIR",
+      "phases": ["plan"],
+      "required": true
+    },
+    {
+      "default": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app",
+      "name": "NATIVE_BRIDGE_BUNDLE",
+      "phases": ["plan"],
+      "required": true
+    },
+    {
+      "default": "${HOME}/Library/Application Support/alvr/macos_bridge",
+      "name": "RUNTIME_STATE_ROOT",
+      "phases": ["plan"],
+      "required": true
+    },
+    {
+      "default": "${REPO_ROOT}/.code/runtime-backups/plan",
+      "name": "BACKUP_ROOT",
+      "phases": ["plan"],
+      "required": true
+    }
+  ],
+  "generatedFiles": [
+    {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Info.plist",
+      "content": {
+        "CFBundleDisplayName": "ALVR macOS Bridge",
+        "CFBundleExecutable": "alvr_macos_bridge",
+        "CFBundleIdentifier": "com.alvr.macos-bridge.iosurface",
+        "CFBundleName": "ALVRMacOSBridge",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "LSBackgroundOnly": true,
+        "NSBonjourServices": ["_alvr._tcp"],
+        "NSLocalNetworkUsageDescription": "Connect to the ALVR client on the local network."
+      },
+      "format": "plist",
+      "id": "bridge_info_plist",
+      "mode": "0444"
+    },
+    {
+      "artifactPath": "config/runtime-defaults.json",
+      "content": {
+        "bitrateBps": 50000000,
+        "bufferCount": 6,
+        "bundleId": "com.alvr.macos-bridge.iosurface",
+        "cadence": {
+          "maxFps": 90.5,
+          "minFps": 89.5,
+          "targetFps": 90
+        },
+        "iosurfacePoolSlots": 3,
+        "output": {
+          "height": 1792,
+          "width": 2880
+        },
+        "service": "com.alvr.macos-bridge.iosurface",
+        "sourceMaximum": {
+          "height": 1800,
+          "width": 3240
+        },
+        "teamId": "MM5YXC7T6E",
+        "telemetryIntervalFrames": 10
+      },
+      "format": "json",
+      "id": "runtime_defaults",
+      "mode": "0444"
+    },
+    {
+      "artifactPath": "config/launch-agent.plist.template",
+      "content": {
+        "AssociatedBundleIdentifiers": ["com.alvr.macos-bridge.iosurface"],
+        "EnvironmentVariables": {
+          "ALVR_BRIDGE_BITRATE_BPS": "50000000",
+          "ALVR_BRIDGE_BUFFER_COUNT": "6",
+          "ALVR_BRIDGE_CONNECT": "${ALVR_BRIDGE_CONNECT}",
+          "ALVR_BRIDGE_FPS": "90",
+          "ALVR_BRIDGE_FRAMES": "${ALVR_BRIDGE_FRAMES}",
+          "ALVR_BRIDGE_HEIGHT": "1792",
+          "ALVR_BRIDGE_INPUT": "iosurface",
+          "ALVR_BRIDGE_ROOT": "${ALVR_BRIDGE_ROOT}",
+          "ALVR_BRIDGE_TELEMETRY_INTERVAL": "10",
+          "ALVR_BRIDGE_WIDTH": "2880",
+          "ALVR_IOSURFACE_POOL_NONCE": "${ALVR_IOSURFACE_POOL_NONCE}",
+          "ALVR_IOSURFACE_POOL_SERVICE": "com.alvr.macos-bridge.iosurface",
+          "ALVR_IOSURFACE_SOURCE_HEIGHT": "1800",
+          "ALVR_IOSURFACE_SOURCE_WIDTH": "3240"
+        },
+        "Label": "com.alvr.macos-bridge.iosurface",
+        "MachServices": {
+          "com.alvr.macos-bridge.iosurface": true
+        },
+        "ProcessType": "Interactive",
+        "ProgramArguments": ["${NATIVE_BRIDGE_PROGRAM}"],
+        "StandardErrorPath": "${NATIVE_BRIDGE_LOG}",
+        "StandardOutPath": "${NATIVE_BRIDGE_LOG}"
+      },
+      "format": "plist",
+      "id": "launch_agent_template",
+      "mode": "0444"
+    },
+    {
+      "artifactPath": "config/sealing.json",
+      "content": {
+        "bundleId": "com.alvr.macos-bridge.iosurface",
+        "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
+        "performedBy": "macOS integration issue #62",
+        "teamId": "MM5YXC7T6E",
+        "timestamp": false
+      },
+      "format": "json",
+      "id": "sealing_boundary",
+      "mode": "0444"
+    },
+    {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json",
+      "content": {
+        "artifactId": "mac-alvr-runtime",
+        "bundleId": "com.alvr.macos-bridge.iosurface",
+        "ownershipSchemaVersion": 1
+      },
+      "format": "json",
+      "id": "native_bundle_owner",
+      "mode": "0444"
+    }
+  ],
+  "gitSources": [
+    {
+      "cleanPolicy": "tracked",
+      "id": "macos_game_patches",
+      "path": "${REPO_ROOT}",
+      "remote": "https://github.com/cbusillo/macos-game-patches.git",
+      "revision": "self"
+    },
+    {
+      "cleanPolicy": "all",
+      "id": "alvr_host",
+      "path": "${ALVR_CHECKOUT}",
+      "remote": "https://github.com/cbusillo/ALVR.git",
+      "revision": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819"
+    },
+    {
+      "cleanPolicy": "all",
+      "id": "alvr_visionos",
+      "path": "${ALVR_VISIONOS_CHECKOUT}",
+      "remote": "https://github.com/cbusillo/alvr-visionos.git",
+      "revision": "171cd9dca5ef85c9dfd9f35c565c265c08e8ce82"
+    },
+    {
+      "cleanPolicy": "all",
+      "id": "alvr_client_core",
+      "path": "${ALVR_CLIENT_CORE_CHECKOUT}",
+      "remote": "https://github.com/alvr-org/ALVR.git",
+      "revision": "109643c88e402b36766020b8f6a99ea48aa8d55f"
+    }
+  ],
+  "installPlan": [
+    {
+      "action": "assert_sha256",
+      "expectedSha256": "5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056",
+      "id": "verify_stock_moltenvk",
+      "resource": "crossover_moltenvk",
+      "target": "${CROSSOVER_APP}/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
+    },
+    {
+      "action": "backup",
+      "backup": "${BACKUP_ROOT}/libMoltenVK.dylib",
+      "id": "backup_stock_moltenvk",
+      "resource": "crossover_moltenvk",
+      "target": "${CROSSOVER_APP}/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
+    },
+    {
+      "action": "replace_file",
+      "atomic": true,
+      "id": "install_patched_moltenvk",
+      "resource": "crossover_moltenvk",
+      "source": "payload/macos/libMoltenVK.dylib",
+      "target": "${CROSSOVER_APP}/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
+    },
+    {
+      "action": "assert_sha256",
+      "expectedSha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c",
+      "id": "verify_stock_openvr",
+      "resource": "game_openvr",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.dll"
+    },
+    {
+      "action": "backup",
+      "backup": "${BACKUP_ROOT}/openvr_api.dll",
+      "id": "backup_stock_openvr",
+      "resource": "game_openvr",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.dll"
+    },
+    {
+      "action": "replace_file",
+      "atomic": true,
+      "id": "install_openvr_shim",
+      "resource": "game_openvr",
+      "source": "payload/windows/openvr_api.dll",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.dll"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_fake_runtime_absent",
+      "resource": "custom_openvr_runtime",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.real.dll"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_fake_runtime",
+      "resource": "custom_openvr_runtime",
+      "source": "payload/windows/openvr_api.real.dll",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.real.dll"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_d3d11_absent",
+      "resource": "dxvk_d3d11",
+      "target": "${FREEDOM_GAME_DIR}/d3d11.dll"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_d3d11",
+      "resource": "dxvk_d3d11",
+      "source": "payload/windows/d3d11.dll",
+      "target": "${FREEDOM_GAME_DIR}/d3d11.dll"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_dxgi_absent",
+      "resource": "dxvk_dxgi",
+      "target": "${FREEDOM_GAME_DIR}/dxgi.dll"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_dxgi",
+      "resource": "dxvk_dxgi",
+      "source": "payload/windows/dxgi.dll",
+      "target": "${FREEDOM_GAME_DIR}/dxgi.dll"
+    },
+    {
+      "action": "assert_absent_or_owned",
+      "id": "verify_native_bridge_owned",
+      "marker": "Contents/Resources/runtime-owner.json",
+      "resource": "native_bridge_bundle",
+      "source": "payload/macos/ALVRMacOSBridge.app",
+      "target": "${NATIVE_BRIDGE_BUNDLE}"
+    },
+    {
+      "action": "replace_tree",
+      "atomic": true,
+      "id": "install_native_bridge_bundle",
+      "resource": "native_bridge_bundle",
+      "source": "payload/macos/ALVRMacOSBridge.app",
+      "target": "${NATIVE_BRIDGE_BUNDLE}"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_game_wine_bridge_windows_absent",
+      "resource": "game_wine_bridge_windows",
+      "target": "${FREEDOM_GAME_DIR}/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_game_wine_bridge_windows",
+      "resource": "game_wine_bridge_windows",
+      "source": "payload/windows/alvr_iosurface_bridge.dll",
+      "target": "${FREEDOM_GAME_DIR}/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_wine_bridge_windows_absent",
+      "resource": "wine_bridge_windows",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-windows/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_wine_bridge_windows",
+      "resource": "wine_bridge_windows",
+      "source": "payload/windows/alvr_iosurface_bridge.dll",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-windows/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_wine_bridge_unix_absent",
+      "resource": "wine_bridge_unix",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-unix/alvr_iosurface_bridge.so"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_wine_bridge_unix",
+      "resource": "wine_bridge_unix",
+      "source": "payload/unix/alvr_iosurface_bridge.so",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-unix/alvr_iosurface_bridge.so"
+    },
+    {
+      "action": "assert_absent",
+      "id": "verify_launch_template_absent",
+      "resource": "launch_agent_template",
+      "target": "${RUNTIME_STATE_ROOT}/com.alvr.macos-bridge.iosurface.plist.template"
+    },
+    {
+      "action": "create_file",
+      "atomic": true,
+      "id": "install_launch_agent_template",
+      "resource": "launch_agent_template",
+      "source": "config/launch-agent.plist.template",
+      "target": "${RUNTIME_STATE_ROOT}/com.alvr.macos-bridge.iosurface.plist.template"
+    },
+    {
+      "action": "retain",
+      "id": "retain_stock_moltenvk_backup",
+      "resource": "crossover_moltenvk",
+      "target": "${BACKUP_ROOT}/libMoltenVK.dylib"
+    },
+    {
+      "action": "retain",
+      "id": "retain_stock_openvr_backup",
+      "resource": "game_openvr",
+      "target": "${BACKUP_ROOT}/openvr_api.dll"
+    },
+    {
+      "action": "retain",
+      "id": "retain_crossover_application",
+      "resource": "user_crossover",
+      "target": "${CROSSOVER_APP}"
+    },
+    {
+      "action": "retain",
+      "id": "retain_steam_bottle",
+      "resource": "user_steam_bottle",
+      "target": "${STEAM_BOTTLE}"
+    },
+    {
+      "action": "retain",
+      "id": "retain_alvr_session_state",
+      "resource": "user_alvr_state",
+      "target": "${REPO_ROOT}/.code/state/alvr-native-runtime"
+    }
+  ],
+  "mutableState": [
+    {
+      "id": "alvr_session_state",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${REPO_ROOT}/.code/state/alvr-native-runtime",
+      "owner": "user"
+    },
+    {
+      "id": "backup_root",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${BACKUP_ROOT}",
+      "owner": "runtime"
+    },
+    {
+      "id": "bridge_bundle",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${NATIVE_BRIDGE_BUNDLE}",
+      "owner": "runtime"
+    },
+    {
+      "id": "launch_agent_plist",
+      "kind": "file",
+      "lifecycle": "transient",
+      "location": "${RUNTIME_STATE_ROOT}/com.alvr.macos-bridge.iosurface.plist",
+      "owner": "runtime"
+    },
+    {
+      "id": "launch_services_registration",
+      "kind": "launch-services",
+      "lifecycle": "retained",
+      "location": "${NATIVE_BRIDGE_BUNDLE}",
+      "owner": "shared"
+    },
+    {
+      "id": "launchd_job",
+      "kind": "launchd-job",
+      "lifecycle": "transient",
+      "location": "gui/<uid>/com.alvr.macos-bridge.iosurface",
+      "owner": "runtime"
+    },
+    {
+      "id": "mach_service",
+      "kind": "mach-service",
+      "lifecycle": "transient",
+      "location": "com.alvr.macos-bridge.iosurface",
+      "owner": "runtime"
+    },
+    {
+      "id": "runtime_lock",
+      "kind": "directory",
+      "lifecycle": "transient",
+      "location": "${RUNTIME_STATE_ROOT}/native-probe.lock",
+      "owner": "runtime"
+    },
+    {
+      "id": "runtime_state",
+      "kind": "directory",
+      "lifecycle": "transient",
+      "location": "${RUNTIME_STATE_ROOT}",
+      "owner": "runtime"
+    },
+    {
+      "id": "game_wine_bridge",
+      "kind": "file",
+      "lifecycle": "restored",
+      "location": "${FREEDOM_GAME_DIR}/alvr_iosurface_bridge.dll",
+      "owner": "shared"
+    },
+    {
+      "id": "crossover_installation",
+      "kind": "directory",
+      "lifecycle": "restored",
+      "location": "${CROSSOVER_APP}",
+      "owner": "user"
+    },
+    {
+      "id": "steam_bottle",
+      "kind": "directory",
+      "lifecycle": "restored",
+      "location": "${STEAM_BOTTLE}",
+      "owner": "user"
+    }
+  ],
+  "prerequisites": [
+    {
+      "argv": ["/usr/bin/uname", "-m"],
+      "equals": "arm64",
+      "id": "host_architecture",
+      "kind": "command"
+    },
+    {
+      "argv": ["/usr/sbin/sysctl", "-n", "hw.model"],
+      "equals": "Mac16,9",
+      "id": "host_model",
+      "kind": "command"
+    },
+    {
+      "argv": ["/usr/bin/sw_vers", "-productVersion"],
+      "equals": "27.0",
+      "id": "macos_version",
+      "kind": "command"
+    },
+    {
+      "argv": ["/usr/bin/sw_vers", "-buildVersion"],
+      "equals": "26A5378n",
+      "id": "macos_build",
+      "kind": "command"
+    },
+    {
+      "argv": ["/usr/bin/xcodebuild", "-version"],
+      "contains": "Build version 27A5194q",
+      "id": "xcode_build",
+      "kind": "command"
+    },
+    {
+      "equals": "26.2",
+      "id": "crossover_short_version",
+      "key": "CFBundleShortVersionString",
+      "kind": "plist",
+      "path": "${CROSSOVER_APP}/Contents/Info.plist"
+    },
+    {
+      "equals": "26.2.0.39821",
+      "id": "crossover_build_version",
+      "key": "CFBundleVersion",
+      "kind": "plist",
+      "path": "${CROSSOVER_APP}/Contents/Info.plist"
+    }
+  ],
+  "schemaVersion": 1,
+  "sealing": {
+    "bundleId": "com.alvr.macos-bridge.iosurface",
+    "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
+    "mode": "separate-step",
+    "teamId": "MM5YXC7T6E",
+    "timestamp": false
+  },
+  "sourceFiles": [
+    {
+      "id": "scope_record",
+      "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
+      "sha256": "0dbe8d76d0262dbb8f4581f2996e798d95df521f45b01334ae5fa333c336b1e1",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "openvr_shim_source",
+      "path": "${REPO_ROOT}/tools/openvr_submit_shim.cpp",
+      "sha256": "b1880c3637d4031c782946fa95366068e5966e92219b185852f19bb6998f40fe",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "custom_openvr_runtime_source",
+      "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
+      "sha256": "6a1a9d2438f36bd8f27044be6374bf78f3ab59f78492232581f0821a3d440687",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "dxvk_submit_source",
+      "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
+      "sha256": "1c6aedaabc81d9b118bc315cdf95ce551659af2452c05415015465b5955c5bb1",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "dxvk_submit_header",
+      "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.h",
+      "sha256": "8c9e0bda131ba7d2c3fd11a3d58acabb03a967fe7d95d3ea178432bb0dbb2bde",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "shared_protocol",
+      "path": "${REPO_ROOT}/tools/shared/alvr_shm_protocol.h",
+      "sha256": "e427989902b3e2db01b6e36698f9d953bafe9c6f0d02f1be530a5e3b86fe93af",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "wine_bridge_makefile",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/Makefile.in",
+      "sha256": "4afe16158208aa81b1864666414b9438d605a5e1ca9468c4b684dbb1dec18c9e",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "wine_bridge_spec",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/alvr_iosurface_bridge.spec",
+      "sha256": "35e34ac0126b18b4d3355bd5730f8c80a5f1735b013342a695ffdcfb8497d5c9",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "wine_bridge_windows_source",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/bridge.c",
+      "sha256": "55a1e6cf566317fffd01c189ed0d36e975552a75e8a598e707412e4734749eb3",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "wine_bridge_unix_source",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/unixlib.c",
+      "sha256": "d73c9bb55fc58fe9e5b71d2d761dbfddee22547d9f7171404c94336242b13f93",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "wine_bridge_unix_header",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/unixlib.h",
+      "sha256": "2459ed383479ecc608cffb9fdc7f5644e1b7cdc21e454cd4e9993bc7827e5dd0",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "iosurface_protocol",
+      "path": "${REPO_ROOT}/tools/alvr_iosurface_bridge/iosurface_handoff_protocol.h",
+      "sha256": "a43d15629bd94a8c76d1f0dda7d63b6be1b4be274dac5675cfe4a8430d990644",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "dxvk_patch",
+      "path": "${REPO_ROOT}/patches/crossover-dxvk/dxvk-1.10.3-freedom-macos.patch",
+      "sha256": "06be780bd80241a8a682a907ef15f98b5034fab428510c38b525934727d7c497",
+      "supplyClass": "repo-patch"
+    },
+    {
+      "id": "moltenvk_patch",
+      "path": "${REPO_ROOT}/patches/crossover-moltenvk/moltenvk-freedom-geometry-mesh.patch",
+      "sha256": "f02212a4fcc2f077e33961cc22ee09efb846f8cf8ab9ef1fed67f630ddb9df43",
+      "supplyClass": "repo-patch"
+    },
+    {
+      "id": "visionos_abi_patch",
+      "path": "${REPO_ROOT}/patches/alvr-visionos/alvr-v21-client-core-abi.patch",
+      "sha256": "17ef018b90b8658d74fb36d4e7be8585009cc23c65352cb37c7d83c18085f01d",
+      "supplyClass": "repo-patch"
+    },
+    {
+      "id": "visionos_liveness_patch",
+      "path": "${REPO_ROOT}/patches/alvr-visionos/alvr-open-brush-startup-liveness.patch",
+      "sha256": "3ce4ee530ab52c049d3d494970106c24e42fcbab0c4bbfcd9c4bd76f64983b5c",
+      "supplyClass": "repo-patch"
+    },
+    {
+      "id": "artifact_contract",
+      "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
+      "sha256": "af643c9944dafc26d22a2308c7dbda9a1519950b3b5d0f5b85b35648968e9a0f",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "artifact_builder",
+      "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
+      "sha256": "5ac3115d6a1c45e77d361f03d8d92e7afbf560b5880a3ead7438bf8d9904569b",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "production_runner",
+      "path": "${REPO_ROOT}/tools/run_real_native_iosurface_probe.sh",
+      "sha256": "c6e906da5246402be2cef4637fc693fcf27e54318a4e7dc061c80c17e36e64fb",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "dxvk_recipe",
+      "path": "${REPO_ROOT}/patches/crossover-dxvk/README.md",
+      "sha256": "3d0f03835e33268c3d6b7b6d52e6e86d6c943550e10829d58851f077a1edb4be",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "moltenvk_recipe",
+      "path": "${REPO_ROOT}/patches/crossover-moltenvk/README.md",
+      "sha256": "2c20eed6c5a309910ac0ab9a306903d25c0bf3c5eb8e65d3eb27410c94cbfa21",
+      "supplyClass": "repo-source"
+    }
+  ],
+  "uninstallPlan": [
+    {
+      "action": "restore",
+      "atomic": true,
+      "backup": "${BACKUP_ROOT}/libMoltenVK.dylib",
+      "expectedSha256": "5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056",
+      "id": "restore_stock_moltenvk",
+      "resource": "crossover_moltenvk",
+      "source": "payload/macos/libMoltenVK.dylib",
+      "target": "${CROSSOVER_APP}/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
+    },
+    {
+      "action": "restore",
+      "atomic": true,
+      "backup": "${BACKUP_ROOT}/openvr_api.dll",
+      "expectedSha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c",
+      "id": "restore_stock_openvr",
+      "resource": "game_openvr",
+      "source": "payload/windows/openvr_api.dll",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.dll"
+    },
+    {
+      "action": "remove",
+      "id": "remove_fake_runtime",
+      "resource": "custom_openvr_runtime",
+      "source": "payload/windows/openvr_api.real.dll",
+      "target": "${FREEDOM_OPENVR_DIR}/openvr_api.real.dll"
+    },
+    {
+      "action": "remove",
+      "id": "remove_d3d11",
+      "resource": "dxvk_d3d11",
+      "source": "payload/windows/d3d11.dll",
+      "target": "${FREEDOM_GAME_DIR}/d3d11.dll"
+    },
+    {
+      "action": "remove",
+      "id": "remove_dxgi",
+      "resource": "dxvk_dxgi",
+      "source": "payload/windows/dxgi.dll",
+      "target": "${FREEDOM_GAME_DIR}/dxgi.dll"
+    },
+    {
+      "action": "remove_tree",
+      "id": "remove_native_bridge_bundle",
+      "marker": "Contents/Resources/runtime-owner.json",
+      "resource": "native_bridge_bundle",
+      "source": "payload/macos/ALVRMacOSBridge.app",
+      "target": "${NATIVE_BRIDGE_BUNDLE}"
+    },
+    {
+      "action": "remove",
+      "id": "remove_game_wine_bridge_windows",
+      "resource": "game_wine_bridge_windows",
+      "source": "payload/windows/alvr_iosurface_bridge.dll",
+      "target": "${FREEDOM_GAME_DIR}/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "remove",
+      "id": "remove_wine_bridge_windows",
+      "resource": "wine_bridge_windows",
+      "source": "payload/windows/alvr_iosurface_bridge.dll",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-windows/alvr_iosurface_bridge.dll"
+    },
+    {
+      "action": "remove",
+      "id": "remove_wine_bridge_unix",
+      "resource": "wine_bridge_unix",
+      "source": "payload/unix/alvr_iosurface_bridge.so",
+      "target": "${RUNTIME_STATE_ROOT}/bridge/x86_64-unix/alvr_iosurface_bridge.so"
+    },
+    {
+      "action": "remove",
+      "id": "remove_launch_agent_template",
+      "resource": "launch_agent_template",
+      "source": "config/launch-agent.plist.template",
+      "target": "${RUNTIME_STATE_ROOT}/com.alvr.macos-bridge.iosurface.plist.template"
+    },
+    {
+      "action": "retain",
+      "id": "retain_stock_moltenvk_backup_after_restore",
+      "resource": "crossover_moltenvk",
+      "target": "${BACKUP_ROOT}/libMoltenVK.dylib"
+    },
+    {
+      "action": "retain",
+      "id": "retain_stock_openvr_backup_after_restore",
+      "resource": "game_openvr",
+      "target": "${BACKUP_ROOT}/openvr_api.dll"
+    },
+    {
+      "action": "retain",
+      "id": "retain_crossover_application_after_uninstall",
+      "resource": "user_crossover",
+      "target": "${CROSSOVER_APP}"
+    },
+    {
+      "action": "retain",
+      "id": "retain_steam_bottle_after_uninstall",
+      "resource": "user_steam_bottle",
+      "target": "${STEAM_BOTTLE}"
+    },
+    {
+      "action": "retain",
+      "id": "retain_alvr_session_state_after_uninstall",
+      "resource": "user_alvr_state",
+      "target": "${REPO_ROOT}/.code/state/alvr-native-runtime"
+    }
+  ]
+}
