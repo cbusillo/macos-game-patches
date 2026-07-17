@@ -72,7 +72,7 @@ pin, not a minimum-version promise.
 | Xcode           | 27.0 build `27A5194q`                                             | Build/install prerequisite, not a steady-state runtime dependency |
 | visionOS        | 27.0 beta, build `24M5316k`                                       | One physical Apple Vision Pro                                     |
 | ALVR protocol   | `21.0.0-dev12`                                                    | Exact host/client protocol pin                                    |
-| ALVR host       | `cbusillo/ALVR@4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819`          | Branch `diagnostic/bgra-nv12-probe`                               |
+| ALVR host       | `cbusillo/ALVR@229e8ced76be9b62307fe79690229c5e6bc020d5`          | Production native IOSurface lifecycle                             |
 | visionOS client | `cbusillo/alvr-visionos@171cd9dca5ef85c9dfd9f35c565c265c08e8ce82` | Locally signed device build                                       |
 | Client core     | `cbusillo/ALVR@109643c88e402b36766020b8f6a99ea48aa8d55f`          | Branch `visionos-client-mdns-c5d8bd26`                            |
 | DXVK            | CrossOver DXVK 1.10.3 plus `dxvk-1.10.3-freedom-macos.patch`      | Local build; binary is not committed                              |

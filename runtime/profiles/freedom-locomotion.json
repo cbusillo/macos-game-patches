@@ -1,0 +1,143 @@
+{
+  "controller": {
+    "gameplayChecks": [
+      "activate trigger and button input",
+      "change both thumbsticks",
+      "move a tracked in-game controller"
+    ],
+    "profile": "PSVR2Sense",
+    "requiredInputs": [
+      "button",
+      "grip",
+      "pose",
+      "thumbstick",
+      "trigger"
+    ],
+    "trackedRoles": [
+      "left",
+      "right"
+    ]
+  },
+  "geometry": {
+    "adaptiveViewport": {
+      "enabled": false,
+      "fillRateStepPercent": 0,
+      "maximumDimension": 1800,
+      "maximumScale": 1.0,
+      "minimumScale": 1.0
+    },
+    "allowedStereoTransitions": [
+      {
+        "height": 1560,
+        "width": 2808
+      }
+    ],
+    "eyeMappings": [
+      "side-by-side-left-first"
+    ],
+    "maximumStereo": {
+      "height": 1800,
+      "width": 3240
+    },
+    "recommendedPerEye": {
+      "height": 720,
+      "width": 1280
+    },
+    "sourceMode": "fixed-with-transitions",
+    "targetStereo": {
+      "height": 1792,
+      "width": 2880
+    }
+  },
+  "id": "freedom-locomotion",
+  "launch": {
+    "arguments": [],
+    "entrypointTarget": "game",
+    "environment": {},
+    "installRoot": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR",
+    "processPattern": "[F]reedomLocomotion",
+    "startupTimeoutSeconds": 100,
+    "transitionTimeoutSeconds": 100
+  },
+  "name": "Freedom Locomotion VR",
+  "runtime": {
+    "graphicsApi": "d3d11",
+    "openvrRuntime": "custom-openvr-sidecar",
+    "targets": [
+      {
+        "executable": "FreedomLocomotion.exe",
+        "graphicsDirectory": "FreedomLocomotion/Binaries/Win64",
+        "id": "game",
+        "openvrDirectory": "Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_2/Win64",
+        "processPattern": "[F]reedomLocomotion",
+        "role": "game",
+        "stockOpenvrSha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c",
+        "workingDirectory": "."
+      }
+    ]
+  },
+  "schemaVersion": 1,
+  "source": {
+    "appId": "584170",
+    "buildId": "1797135",
+    "depots": [
+      {
+        "id": "584171",
+        "manifest": "8237929659893907304",
+        "sizeBytes": 3050499339
+      }
+    ],
+    "installedSizeBytes": 3050499339,
+    "officialUnmodified": true,
+    "payload": {
+      "criticalFiles": [
+        {
+          "path": "FreedomLocomotion.exe",
+          "sha256": "66cdf48a1386966b1e497169704d42efc2247a71a414fd33908369885bdf72d3"
+        },
+        {
+          "path": "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe",
+          "sha256": "3886f2b5fa65f806ce9741eb96930756e2a892e1b666fc43972c74285fdbc405"
+        },
+        {
+          "path": "Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_2/Win64/openvr_api.dll",
+          "sha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c"
+        }
+      ],
+      "fileCount": 770,
+      "treeSha256": "3e08fa11703fa6e26ef8dea52716d47d8a72c90a1e1e387ab62492c9f2011b5b"
+    },
+    "provider": "steam"
+  },
+  "validation": {
+    "cadence": {
+      "maximumFps": 90.5,
+      "minimumFps": 89.5,
+      "targetFps": 90.0
+    },
+    "cleanup": {
+      "requireNoOwnedState": true,
+      "requireStockHashes": true
+    },
+    "drops": {
+      "native": 0,
+      "producer": 0
+    },
+    "frameCounts": {
+      "disconnected": 5400,
+      "physical": 81000,
+      "smoke": 300
+    },
+    "human": {
+      "clearAndSmooth": true
+    },
+    "pose": {
+      "exactPairing": true,
+      "maximumGenerationGaps": 0
+    },
+    "recovery": {
+      "clientRelaunch": true,
+      "headsetReentry": true
+    }
+  }
+}

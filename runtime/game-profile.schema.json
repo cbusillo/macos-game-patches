@@ -1,0 +1,537 @@
+{
+  "$id": "https://github.com/cbusillo/macos-game-patches/runtime/game-profile.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "controller": {
+      "additionalProperties": false,
+      "properties": {
+        "gameplayChecks": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "profile": {
+          "const": "PSVR2Sense"
+        },
+        "requiredInputs": {
+          "items": {
+            "enum": [
+              "button",
+              "grip",
+              "pose",
+              "thumbstick",
+              "trigger"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trackedRoles": {
+          "items": {
+            "enum": [
+              "left",
+              "right"
+            ]
+          },
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "profile",
+        "trackedRoles",
+        "requiredInputs",
+        "gameplayChecks"
+      ],
+      "type": "object"
+    },
+    "geometry": {
+      "additionalProperties": false,
+      "properties": {
+        "adaptiveViewport": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "fillRateStepPercent": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maximumDimension": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maximumScale": {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            "minimumScale": {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "enabled",
+            "minimumScale",
+            "maximumScale",
+            "fillRateStepPercent",
+            "maximumDimension"
+          ],
+          "type": "object"
+        },
+        "allowedStereoTransitions": {
+          "items": {
+            "$ref": "#/$defs/dimensions"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "eyeMappings": {
+          "items": {
+            "enum": [
+              "separate-textures",
+              "side-by-side-left-first"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "maximumStereo": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "recommendedPerEye": {
+          "$ref": "#/$defs/dimensions"
+        },
+        "sourceMode": {
+          "enum": [
+            "bounded-adaptive",
+            "fixed-with-transitions"
+          ]
+        },
+        "targetStereo": {
+          "$ref": "#/$defs/dimensions"
+        }
+      },
+      "required": [
+        "sourceMode",
+        "recommendedPerEye",
+        "maximumStereo",
+        "allowedStereoTransitions",
+        "adaptiveViewport",
+        "eyeMappings",
+        "targetStereo"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "launch": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entrypointTarget": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          },
+          "type": "object"
+        },
+        "installRoot": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "processPattern": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "startupTimeoutSeconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transitionTimeoutSeconds": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "installRoot",
+        "entrypointTarget",
+        "arguments",
+        "environment",
+        "processPattern",
+        "startupTimeoutSeconds",
+        "transitionTimeoutSeconds"
+      ],
+      "type": "object"
+    },
+    "name": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "runtime": {
+      "additionalProperties": false,
+      "properties": {
+        "graphicsApi": {
+          "const": "d3d11"
+        },
+        "openvrRuntime": {
+          "const": "custom-openvr-sidecar"
+        },
+        "targets": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "executable": {
+                "$ref": "#/$defs/relativePath"
+              },
+              "graphicsDirectory": {
+                "$ref": "#/$defs/relativePath"
+              },
+              "id": {
+                "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "type": "string"
+              },
+              "openvrDirectory": {
+                "$ref": "#/$defs/relativePath"
+              },
+              "processPattern": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "experience",
+                  "game",
+                  "hub"
+                ]
+              },
+              "stockOpenvrSha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "workingDirectory": {
+                "$ref": "#/$defs/relativePath"
+              }
+            },
+            "required": [
+              "id",
+              "role",
+              "executable",
+              "workingDirectory",
+              "openvrDirectory",
+              "graphicsDirectory",
+              "stockOpenvrSha256",
+              "processPattern"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "openvrRuntime",
+        "graphicsApi",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "appId": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "buildId": {
+          "pattern": "^[1-9][0-9]*$",
+          "type": "string"
+        },
+        "depots": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              "manifest": {
+                "pattern": "^[1-9][0-9]*$",
+                "type": "string"
+              },
+              "sizeBytes": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "manifest",
+              "sizeBytes"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "installedSizeBytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "officialUnmodified": {
+          "const": true
+        },
+        "payload": {
+          "additionalProperties": false,
+          "properties": {
+            "criticalFiles": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "$ref": "#/$defs/relativePath"
+                  },
+                  "sha256": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "sha256"
+                ],
+                "type": "object"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "fileCount": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "treeSha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileCount",
+            "treeSha256",
+            "criticalFiles"
+          ],
+          "type": "object"
+        },
+        "provider": {
+          "const": "steam"
+        }
+      },
+      "required": [
+        "provider",
+        "appId",
+        "buildId",
+        "depots",
+        "installedSizeBytes",
+        "officialUnmodified",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "validation": {
+      "additionalProperties": false,
+      "properties": {
+        "cadence": {
+          "additionalProperties": false,
+          "properties": {
+            "maximumFps": {
+              "type": "number"
+            },
+            "minimumFps": {
+              "type": "number"
+            },
+            "targetFps": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "targetFps",
+            "minimumFps",
+            "maximumFps"
+          ],
+          "type": "object"
+        },
+        "cleanup": {
+          "additionalProperties": false,
+          "properties": {
+            "requireNoOwnedState": {
+              "const": true
+            },
+            "requireStockHashes": {
+              "const": true
+            }
+          },
+          "required": [
+            "requireStockHashes",
+            "requireNoOwnedState"
+          ],
+          "type": "object"
+        },
+        "drops": {
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "const": 0
+            },
+            "producer": {
+              "const": 0
+            }
+          },
+          "required": [
+            "producer",
+            "native"
+          ],
+          "type": "object"
+        },
+        "frameCounts": {
+          "additionalProperties": false,
+          "properties": {
+            "disconnected": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "physical": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "smoke": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "smoke",
+            "disconnected",
+            "physical"
+          ],
+          "type": "object"
+        },
+        "human": {
+          "additionalProperties": false,
+          "properties": {
+            "clearAndSmooth": {
+              "const": true
+            }
+          },
+          "required": [
+            "clearAndSmooth"
+          ],
+          "type": "object"
+        },
+        "pose": {
+          "additionalProperties": false,
+          "properties": {
+            "exactPairing": {
+              "const": true
+            },
+            "maximumGenerationGaps": {
+              "const": 0
+            }
+          },
+          "required": [
+            "maximumGenerationGaps",
+            "exactPairing"
+          ],
+          "type": "object"
+        },
+        "recovery": {
+          "additionalProperties": false,
+          "properties": {
+            "clientRelaunch": {
+              "const": true
+            },
+            "headsetReentry": {
+              "const": true
+            }
+          },
+          "required": [
+            "clientRelaunch",
+            "headsetReentry"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "frameCounts",
+        "cadence",
+        "drops",
+        "pose",
+        "recovery",
+        "cleanup",
+        "human"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "source",
+    "launch",
+    "runtime",
+    "geometry",
+    "controller",
+    "validation"
+  ],
+  "title": "Mac ALVR curated OpenVR game profile",
+  "type": "object",
+  "$defs": {
+    "dimensions": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "width": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "relativePath": {
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*:).+$",
+      "type": "string"
+    }
+  }
+}

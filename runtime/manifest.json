@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev1"
+    "version": "1.0.0-dev2"
   },
   "artifacts": [
     {
@@ -332,7 +332,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819"
+      "revision": "229e8ced76be9b62307fe79690229c5e6bc020d5"
     },
     {
       "cleanPolicy": "all",
@@ -683,7 +683,7 @@
     {
       "id": "scope_record",
       "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
-      "sha256": "0dbe8d76d0262dbb8f4581f2996e798d95df521f45b01334ae5fa333c336b1e1",
+      "sha256": "6b48c46d69c6733dbf9d67aa896a279d64f25f050f009ff229d9e83478e2bd38",
       "supplyClass": "repo-source"
     },
     {
@@ -786,12 +786,6 @@
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
       "sha256": "5ac3115d6a1c45e77d361f03d8d92e7afbf560b5880a3ead7438bf8d9904569b",
-      "supplyClass": "repo-source"
-    },
-    {
-      "id": "production_runner",
-      "path": "${REPO_ROOT}/tools/run_real_native_iosurface_probe.sh",
-      "sha256": "c6e906da5246402be2cef4637fc693fcf27e54318a4e7dc061c80c17e36e64fb",
       "supplyClass": "repo-source"
     },
     {

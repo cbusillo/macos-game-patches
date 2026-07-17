@@ -17,7 +17,7 @@ This repo targets reproducible VR experiments on Apple hardware.
 ## Qualified Source Baseline
 
 - ALVR protocol/version: `21.0.0-dev12`
-- Host fork: `cbusillo/ALVR@4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819`
+- Host fork: `cbusillo/ALVR@229e8ced76be9b62307fe79690229c5e6bc020d5`
   on `diagnostic/bgra-nv12-probe`
 - visionOS client fork:
   `cbusillo/alvr-visionos@171cd9dca5ef85c9dfd9f35c565c265c08e8ce82`

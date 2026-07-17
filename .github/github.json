@@ -51,12 +51,12 @@
   },
   "qualityGate": {
     "json": {
-      "metadata": "jq empty .github/github.json runtime/bindings.example.json runtime/manifest.json runtime/manifest.lock.json"
+      "metadata": "jq empty .github/github.json runtime/bindings.example.json runtime/game-profile.schema.json runtime/manifest.json runtime/manifest.lock.json runtime/profiles/*.json"
     },
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py",
       "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
@@ -72,6 +72,12 @@
       "verify": "python3 tools/build_runtime_artifact.py verify --artifact <artifact-a>",
       "compare": "python3 tools/build_runtime_artifact.py compare <artifact-a> <artifact-b>",
       "plan": "python3 tools/build_runtime_artifact.py plan --artifact <artifact-a> --bindings .code/runtime-bindings.json"
+    },
+    "runtimeProfile": {
+      "check": "python3 tools/runtime_profile.py check",
+      "fixtures": "python3 tools/runtime_profile.py self-test",
+      "preflight": "python3 tools/runtime_profile.py preflight --profile <profile> --artifact <artifact> --mode smoke",
+      "probe": "python3 tools/runtime_profile.py probe --profile <profile> --artifact <artifact> --mode <smoke|disconnected|physical>"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
@@ -106,7 +112,7 @@
       "name": "ALVR",
       "repo": "cbusillo/ALVR",
       "localPath": "../alvr",
-      "baselineCommit": "4bd8ad054a30c3b045f2235ed94b0a4f3cd2b819",
+      "baselineCommit": "229e8ced76be9b62307fe79690229c5e6bc020d5",
       "purpose": "Physically qualified macOS bridge host; client core is pinned separately by alvr-visionos"
     }
   ],
