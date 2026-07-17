@@ -30,6 +30,8 @@ openvr_dirs_text=${ALVR_NATIVE_PROBE_OPENVR_DIRS:-}
 stock_openvr_hashes_text=${ALVR_NATIVE_PROBE_STOCK_OPENVR_HASHES:-}
 target_ids_text=${ALVR_NATIVE_PROBE_TARGET_IDS:-}
 target_process_patterns_text=${ALVR_NATIVE_PROBE_TARGET_PROCESS_PATTERNS:-}
+target_workdirs_text=${ALVR_NATIVE_PROBE_TARGET_WORKDIRS:-}
+allowed_source_transitions_text=${ALVR_NATIVE_PROBE_ALLOWED_SOURCE_TRANSITIONS:-}
 expected_source_transitions_text=${ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS:-}
 startup_timeout_seconds=${ALVR_NATIVE_PROBE_STARTUP_TIMEOUT_SECONDS:-300}
 transition_timeout_seconds=${ALVR_NATIVE_PROBE_TRANSITION_TIMEOUT_SECONDS:-300}
@@ -171,8 +173,10 @@ openvr_dirs=()
 stock_openvr_hashes=()
 target_ids=()
 target_process_patterns=()
+target_workdirs=()
 target_process_seen=()
 target_first_seen_epoch=()
+allowed_source_transitions=()
 expected_source_transitions=()
 
 stock_moltenvk_hash=5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056
@@ -203,14 +207,23 @@ if [[ -n $target_process_patterns_text ]]; then
 else
 	target_process_patterns+=("$probe_process_pattern")
 fi
+if [[ -n $target_workdirs_text ]]; then
+	IFS=: read -r -a target_workdirs <<<"$target_workdirs_text"
+else
+	target_workdirs+=("$game_workdir")
+fi
 game_dir=${game_dirs[0]}
 engine_dir=${openvr_dirs[0]}
 stock_openvr_hash=${stock_openvr_hashes[0]}
+game_workdir=${target_workdirs[0]}
 
 if [[ -n $expected_source_transitions_text ]]; then
 	IFS=, read -r -a expected_source_transitions <<<"$expected_source_transitions_text"
 elif [[ -n $expected_source_transition ]]; then
 	expected_source_transitions+=("$expected_source_transition")
+fi
+if [[ -n $allowed_source_transitions_text ]]; then
+	IFS=, read -r -a allowed_source_transitions <<<"$allowed_source_transitions_text"
 fi
 
 if [[ -n $probe_arguments_text && -n $legacy_probe_argument ]]; then
@@ -272,12 +285,14 @@ fi
 if [[ ${#game_dirs[@]} -eq 0 || ${#game_dirs[@]} -ne ${#openvr_dirs[@]} ||
 	${#openvr_dirs[@]} -ne ${#stock_openvr_hashes[@]} ||
 	${#stock_openvr_hashes[@]} -ne ${#target_ids[@]} ||
-	${#target_ids[@]} -ne ${#target_process_patterns[@]} ]]; then
-	echo "game, OpenVR, and stock-hash target lists must be nonempty and equal length" >&2
+	${#target_ids[@]} -ne ${#target_process_patterns[@]} ||
+	${#target_process_patterns[@]} -ne ${#target_workdirs[@]} ]]; then
+	echo "game, OpenVR, workdir, and stock-hash target lists must be nonempty and equal length" >&2
 	exit 1
 fi
 for ((index = 0; index < ${#game_dirs[@]}; index++)); do
-	[[ -n ${game_dirs[$index]} && -n ${openvr_dirs[$index]} ]] || {
+	[[ -n ${game_dirs[$index]} && -n ${openvr_dirs[$index]} &&
+		-n ${target_workdirs[$index]} ]] || {
 		echo "runtime target paths must not be empty" >&2
 		exit 1
 	}
@@ -303,6 +318,12 @@ done
 for transition in "${expected_source_transitions[@]}"; do
 	[[ $transition =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || {
 		echo "ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS must be comma-separated WIDTHxHEIGHT values" >&2
+		exit 1
+	}
+done
+for transition in "${allowed_source_transitions[@]}"; do
+	[[ $transition =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || {
+		echo "ALVR_NATIVE_PROBE_ALLOWED_SOURCE_TRANSITIONS must be comma-separated WIDTHxHEIGHT values" >&2
 		exit 1
 	}
 done
@@ -1463,6 +1484,14 @@ archive_logs() {
 		for log in "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log; do
 			[[ -f $log ]] && cp -p "$log" "$run_dir/${target_ids[$index]}-${log##*/}"
 		done
+		if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
+			for log in \
+				"${target_workdirs[$index]}"/*_d3d11.log \
+				"${target_workdirs[$index]}"/*_dxgi.log; do
+				[[ -f $log ]] &&
+					cp -p "$log" "$run_dir/${target_ids[$index]}-workdir-${log##*/}"
+			done
+		fi
 	done
 	if [[ -f $avp_console_log ]]; then
 		cp -p "$avp_console_log" "$run_dir/avp-client-console.raw.log"
@@ -1518,6 +1547,11 @@ restore() {
 				"${game_dirs[$index]}/dxgi.dll" \
 				"${game_dirs[$index]}/alvr_iosurface_bridge.dll"
 			rm -f "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log
+			if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
+				rm -f \
+					"${target_workdirs[$index]}"/*_d3d11.log \
+					"${target_workdirs[$index]}"/*_dxgi.log
+			fi
 		done
 		rm -f /tmp/alvr_openvr_submit_shim.log /tmp/fake_openvr_real.log /tmp/alvr_frame_buffer.shm
 		rm -f "$probe_dir"/real_submit_iosurface_{ready,ready.tmp,done,done.tmp}.txt
@@ -1531,7 +1565,11 @@ restore() {
 					"${openvr_dirs[$index]}/openvr_api.real.dll" \
 					"${game_dirs[$index]}/d3d11.dll" \
 					"${game_dirs[$index]}/dxgi.dll" \
-					"${game_dirs[$index]}/alvr_iosurface_bridge.dll"; do
+					"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
+					"${game_dirs[$index]}"/*_d3d11.log \
+					"${game_dirs[$index]}"/*_dxgi.log \
+					"${target_workdirs[$index]}"/*_d3d11.log \
+					"${target_workdirs[$index]}"/*_dxgi.log; do
 					if [[ -e $path ]]; then
 						printf 'unexpected-present=%s\n' "$path"
 						cleanup_failed=1
@@ -1691,7 +1729,9 @@ for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
 		"${game_dirs[$index]}/dxgi.dll" \
 		"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
 		"${game_dirs[$index]}"/*_d3d11.log \
-		"${game_dirs[$index]}"/*_dxgi.log; do
+		"${game_dirs[$index]}"/*_dxgi.log \
+		"${target_workdirs[$index]}"/*_d3d11.log \
+		"${target_workdirs[$index]}"/*_dxgi.log; do
 		[[ ! -e $path ]] || {
 			echo "staging target exists: $path" >&2
 			exit 1
@@ -1983,6 +2023,7 @@ write_launch_agent_plist
 	for ((index = 0; index < ${#game_dirs[@]}; index++)); do
 		printf 'target[%d].game_dir=%s\n' "$index" "${game_dirs[$index]}"
 		printf 'target[%d].openvr_dir=%s\n' "$index" "${openvr_dirs[$index]}"
+		printf 'target[%d].workdir=%s\n' "$index" "${target_workdirs[$index]}"
 		printf 'target[%d].stock_openvr_sha256=%s\n' \
 			"$index" "${stock_openvr_hashes[$index]}"
 	done
@@ -2022,6 +2063,7 @@ write_launch_agent_plist
 	printf 'fake_wait_get_poses_sleep_ms=%s\n' "$fake_wait_get_poses_sleep_ms"
 	printf 'expected_source_transition=%s\n' "$expected_source_transition"
 	printf 'expected_source_transitions=%s\n' "$expected_source_transitions_text"
+	printf 'allowed_source_transitions=%s\n' "$allowed_source_transitions_text"
 	printf 'startup_timeout_seconds=%s\n' "$startup_timeout_seconds"
 	printf 'transition_timeout_seconds=%s\n' "$transition_timeout_seconds"
 	printf 'producer_min_fps=%s\n' "$producer_min_fps"
@@ -2406,6 +2448,27 @@ producer_source_overflow=$(awk -v maximum_width="$source_width" -v maximum_heigh
 	END { print count + 0 }
 ' "$run_dir/openvr-submit-shim.log" 2>/dev/null || printf '0\n')
 producer_source_overflow=${producer_source_overflow:-0}
+producer_disallowed_source_transitions=0
+if [[ $profile_source_mode == fixed-with-transitions ]]; then
+	while IFS= read -r transition; do
+		transition=${transition#new=}
+		transition_allowed=0
+		if [[ $transition == "${source_width}x${source_height}" ]]; then
+			transition_allowed=1
+		else
+			for allowed_transition in "${allowed_source_transitions[@]}"; do
+				if [[ $transition == "$allowed_transition" ]]; then
+					transition_allowed=1
+					break
+				fi
+			done
+		fi
+		if [[ $transition_allowed -ne 1 ]]; then
+			producer_disallowed_source_transitions=$((producer_disallowed_source_transitions + 1))
+		fi
+	done < <(rg -o 'iosurface pool source geometry transition .*new=[1-9][0-9]*x[1-9][0-9]*' \
+		"$run_dir/openvr-submit-shim.log" 2>/dev/null | sed -E 's/.*(new=[0-9]+x[0-9]+).*/\1/' || true)
+fi
 producer_resized_submissions=$(count_matches \
 	'iosurface pool submitted .*transfer=stereo-(linear-clamped|nearest)' \
 	"$run_dir/openvr-submit-shim.log")
@@ -2774,6 +2837,8 @@ fi
 	printf 'producer_pressure_recovery_slots=%s\n' "$producer_pressure_recovery_slots"
 	printf 'producer_source_transitions=%s\n' "$producer_source_transitions"
 	printf 'producer_source_overflow=%s\n' "$producer_source_overflow"
+	printf 'producer_disallowed_source_transitions=%s\n' \
+		"$producer_disallowed_source_transitions"
 	printf 'producer_resized_submissions=%s\n' "$producer_resized_submissions"
 	printf 'producer_separate_eye_submissions=%s\n' "$producer_separate_eye_submissions"
 	printf 'producer_expected_resize_submissions=%s\n' "$producer_expected_resize_submissions"
@@ -2895,6 +2960,7 @@ if [[ $bridge_finished -eq 1 && $bridge_status -eq 0 &&
 	[[ $producer_source_transitions -eq 0 || $producer_resized_submissions -gt 0 ||
 		$producer_separate_eye_submissions -gt 0 ]] &&
 	[[ $producer_source_overflow -eq 0 ]] &&
+	[[ $producer_disallowed_source_transitions -eq 0 ]] &&
 	[[ $resize_expectation_pass -eq 1 ]] &&
 	[[ $native_self_tests -eq 3 && $native_submitted -eq $native_frames && $native_encoded -eq $native_frames ]] &&
 	[[ $native_report_kind == summary && $native_producer_handshake -eq 1 &&

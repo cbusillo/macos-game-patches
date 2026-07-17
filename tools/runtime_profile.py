@@ -958,7 +958,17 @@ def preflight(
             graphics_directory / "dxgi.dll",
             graphics_directory / "alvr_iosurface_bridge.dll",
         ]
+        log_directories = {graphics_directory, working_directory}
+        runtime_logs = sorted(
+            {
+                path
+                for directory in log_directories
+                for pattern in ("*_d3d11.log", "*_dxgi.log")
+                for path in directory.glob(pattern)
+            }
+        )
         unexpected = [str(path) for path in staging_targets if path.exists()]
+        unexpected.extend(str(path) for path in runtime_logs)
         if unexpected:
             raise ProfileError(
                 "preflight.staged",
@@ -976,6 +986,7 @@ def preflight(
                 "graphicsDirectory": str(graphics_directory),
                 "stockOpenvrSha256": actual_openvr_hash,
                 "processPattern": target["processPattern"],
+                "runtimeLogDirectories": sorted(str(path) for path in log_directories),
                 "stagingTargets": [str(path) for path in staging_targets],
             }
         )
@@ -1014,6 +1025,10 @@ def preflight(
     environment = {
         "ALVR_NATIVE_RUNTIME_ARTIFACT": str(artifact_path),
         "ALVR_NATIVE_PROBE_APP_NAME": profile["name"],
+        "ALVR_NATIVE_PROBE_ALLOWED_SOURCE_TRANSITIONS": ",".join(
+            f"{transition['width']}x{transition['height']}"
+            for transition in geometry["allowedStereoTransitions"]
+        ),
         "ALVR_NATIVE_PROBE_ARGUMENTS": " ".join(profile["launch"]["arguments"]),
         "ALVR_NATIVE_PROBE_CONNECT": "true" if mode == "physical" else "false",
         "ALVR_NATIVE_PROBE_CONTROLLER_PROFILE": profile["controller"]["profile"],
@@ -1047,17 +1062,13 @@ def preflight(
         "ALVR_NATIVE_PROBE_TARGET_PROCESS_PATTERNS": ":".join(
             target["processPattern"] for target in resolved_targets
         ),
+        "ALVR_NATIVE_PROBE_TARGET_WORKDIRS": ":".join(
+            target["workingDirectory"] for target in resolved_targets
+        ),
         "ALVR_NATIVE_PROBE_TRANSITION_TIMEOUT_SECONDS": str(profile["launch"]["transitionTimeoutSeconds"]),
         "ALVR_NATIVE_PROBE_WORKDIR": entrypoint["workingDirectory"],
     }
-    transitions = geometry["allowedStereoTransitions"]
-    environment["ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS"] = ",".join(
-        f"{transition['width']}x{transition['height']}" for transition in transitions
-    )
-    if len(transitions) == 1:
-        environment["ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITION"] = environment[
-            "ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS"
-        ]
+    environment["ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS"] = ""
 
     return {
         "artifact": {
