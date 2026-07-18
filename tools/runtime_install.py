@@ -2,24 +2,26 @@
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Literal, Sequence, cast
+from typing import Any, Callable, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
 import runtime_transaction
 from runtime_control import (
+    LIVE_STATES,
     ControlError,
     RuntimeContext,
     doctor_runtime,
+    global_lifecycle_lock,
     load_runtime_contract,
+    status_runtime,
     stop_runtime,
     verify_artifact_reference,
 )
@@ -29,6 +31,8 @@ MutationKind = Literal["install", "uninstall"]
 CAPACITY_OVERHEAD_BYTES = 1024 * 1024
 CAPACITY_ENTRY_BYTES = 4096
 INCOMPLETE_TRANSACTION_STATES = frozenset({"prepared", "running", "rolling-back"})
+TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 INSTALL_CONTAINER_IDS = (
     "backup_root",
     "runtime_state",
@@ -237,53 +241,6 @@ def _validate_private_file(path: pathlib.Path, mode: int) -> None:
             path=str(path),
             mode=f"{actual_mode:04o}",
         )
-
-
-@contextlib.contextmanager
-def _global_lifecycle_lock(
-    lock_path: pathlib.Path,
-    allowed_roots: Sequence[pathlib.Path],
-) -> Iterator[None]:
-    _ensure_allowed(lock_path, allowed_roots, "transaction_lock")
-    try:
-        with runtime_descriptor.DescriptorSession([lock_path.parent]) as session:
-            bound = session.bind(lock_path)
-            existed = bound.exists()
-            descriptor, _ = bound.open_read_write_create(0o600)
-            if not existed:
-                os.fchmod(descriptor, 0o600)
-                os.fsync(descriptor)
-                bound.fsync_parent()
-            with os.fdopen(descriptor, "r+") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise RuntimeInstallError(
-                        "transaction.lock_unsafe",
-                        "Global lifecycle lock has unsafe ownership or type",
-                        path=str(lock_path),
-                    )
-                mode = stat.S_IMODE(metadata.st_mode)
-                if mode != 0o600:
-                    raise RuntimeInstallError(
-                        "transaction.mode_unsafe",
-                        "Global lifecycle lock must use mode 0600",
-                        path=str(lock_path),
-                        mode=f"{mode:04o}",
-                    )
-                try:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    raise RuntimeInstallError(
-                        "transaction.busy",
-                        "Another runtime lifecycle command owns the global lock",
-                        path=str(lock_path),
-                    ) from error
-                try:
-                    yield
-                finally:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-    except runtime_descriptor.DescriptorError as error:
-        raise _descriptor_error(error) from error
 
 
 def _mutable_state_index(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -560,6 +517,133 @@ def _archive_terminal_journal(
 ) -> pathlib.Path:
     ensure_private_directory(paths.history_root, paths.allowed_roots, "transaction_history")
     destination = executor.archive_terminal(paths.history_root)
+    _validate_private_file(destination, 0o600)
+    return destination
+
+
+def _archive_prior_committed_journal(
+    paths: LifecyclePaths,
+    journal: dict[str, Any],
+) -> pathlib.Path:
+    expected_keys = {
+        "schemaVersion",
+        "transactionId",
+        "kind",
+        "planDigest",
+        "state",
+        "createdAt",
+        "updatedAt",
+        "currentStep",
+        "undoRoot",
+        "steps",
+        "failure",
+        "rollbackFailures",
+        "cleanupFailures",
+        "cleanupInProgress",
+    }
+    transaction_id = journal.get("transactionId")
+    plan_digest = journal.get("planDigest")
+    steps = journal.get("steps")
+    if (
+        set(journal) != expected_keys
+        or journal.get("schemaVersion") != 2
+        or journal.get("kind") not in {"install", "uninstall"}
+        or journal.get("state") != "committed"
+        or not isinstance(transaction_id, str)
+        or TRANSACTION_ID_PATTERN.fullmatch(transaction_id) is None
+        or not isinstance(plan_digest, str)
+        or SHA256_PATTERN.fullmatch(plan_digest) is None
+        or not isinstance(journal.get("createdAt"), str)
+        or not journal["createdAt"]
+        or not isinstance(journal.get("updatedAt"), str)
+        or not journal["updatedAt"]
+        or journal.get("currentStep") is not None
+        or journal.get("failure") is not None
+        or journal.get("rollbackFailures") != []
+        or journal.get("cleanupFailures") != []
+        or journal.get("cleanupInProgress") != {}
+        or not isinstance(steps, list)
+        or not steps
+    ):
+        raise RuntimeInstallError(
+            "transaction.journal_mismatch",
+            "Prior-plan journal is not an exact clean committed transaction",
+            path=str(paths.journal),
+        )
+    expected_undo_root = paths.journal.with_name(f"{paths.journal.name}.undo")
+    if journal.get("undoRoot") != str(expected_undo_root):
+        raise RuntimeInstallError(
+            "transaction.journal_invalid",
+            "Prior-plan journal has an unexpected rollback root",
+            path=str(paths.journal),
+        )
+    cleanup_paths: set[pathlib.Path] = set()
+    for index, step in enumerate(steps):
+        if (
+            not isinstance(step, dict)
+            or set(step) != {"id", "action", "target", "status", "undo"}
+            or not isinstance(step.get("id"), str)
+            or not step["id"]
+            or not isinstance(step.get("action"), str)
+            or not step["action"]
+            or not isinstance(step.get("target"), str)
+            or not pathlib.Path(step["target"]).is_absolute()
+            or step.get("status") != "applied"
+            or not isinstance(step.get("undo"), dict)
+        ):
+            raise RuntimeInstallError(
+                "transaction.journal_invalid",
+                "Prior-plan committed journal step is invalid",
+                path=str(paths.journal),
+                index=index,
+            )
+        undo = step["undo"]
+        commit_cleanup_paths = undo.get("commitCleanupPaths")
+        if not isinstance(commit_cleanup_paths, list) or not all(
+            isinstance(value, str) and pathlib.Path(value).is_absolute()
+            for value in commit_cleanup_paths
+        ):
+            raise RuntimeInstallError(
+                "transaction.journal_invalid",
+                "Prior-plan committed journal cleanup paths are invalid",
+                path=str(paths.journal),
+                index=index,
+            )
+        cleanup_paths.update(pathlib.Path(value) for value in commit_cleanup_paths)
+        if undo.get("kind") == "remove-backup" and isinstance(undo.get("path"), str):
+            cleanup_paths.add(pathlib.Path(undo["path"]))
+        if undo.get("kind") == "remove-created-file" and isinstance(undo.get("target"), str):
+            cleanup_paths.add(pathlib.Path(undo["target"]))
+    for cleanup_path in sorted(cleanup_paths):
+        _ensure_allowed(cleanup_path, paths.allowed_roots, "prior_transaction_cleanup")
+        if runtime_transaction.path_lexists(cleanup_path):
+            raise RuntimeInstallError(
+                "transaction.cleanup_failed",
+                "Prior-plan committed journal still has cleanup residue",
+                path=str(cleanup_path),
+            )
+    if runtime_transaction.path_lexists(expected_undo_root):
+        raise RuntimeInstallError(
+            "transaction.journal_inconsistent",
+            "Prior-plan committed journal still has rollback payloads",
+            path=str(expected_undo_root),
+        )
+    ensure_private_directory(paths.history_root, paths.allowed_roots, "transaction_history")
+    destination = paths.history_root / (
+        f"{transaction_id}-{journal['kind']}-{journal['state']}.json"
+    )
+    _ensure_allowed(destination, paths.allowed_roots, "transaction_history")
+    if runtime_transaction.path_lexists(destination):
+        raise RuntimeInstallError(
+            "transaction.history_collision",
+            "Prior-plan transaction archive already exists",
+            path=str(destination),
+        )
+    with runtime_transaction.descriptor_scope(
+        [paths.transaction_root, paths.history_root, *paths.allowed_roots]
+    ):
+        runtime_transaction.rename_exclusive(paths.journal, destination)
+        runtime_transaction.fsync_directory(paths.history_root)
     _validate_private_file(destination, 0o600)
     return destination
 
@@ -1224,6 +1308,26 @@ def _mutate_runtime(
                 blockers=stable_blockers,
                 journal=admission_paths.journal,
             )
+        live_status = status_runtime(context, verify_live_artifact=False)
+        live_record = live_status.control_state.get("record")
+        if (
+            live_status.ok
+            and live_status.state in LIVE_STATES
+            and isinstance(live_record, dict)
+            and live_record.get("schemaVersion") == 2
+        ):
+            pre_lock_stop = stop_runtime(context)
+            stop_actions = pre_lock_stop.actions
+            if not pre_lock_stop.ok:
+                return MutationReport(
+                    command=command,
+                    ok=False,
+                    state="blocked",
+                    reason_code=pre_lock_stop.reason_code,
+                    message=pre_lock_stop.message,
+                    artifact=artifact,
+                    stop_actions=stop_actions,
+                )
         global_lock = _absolute(context.lifecycle_lock_path)
         global_lock_root = global_lock.parent
         ensure_private_directory(
@@ -1231,7 +1335,7 @@ def _mutate_runtime(
             (global_lock_root,),
             "transaction_lock_root",
         )
-        with _global_lifecycle_lock(global_lock, (global_lock_root,)):
+        with global_lifecycle_lock(global_lock, (global_lock_root,)):
             plan = _qualify_stable_bundles(
                 _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
                 manifest,
@@ -1271,7 +1375,7 @@ def _mutate_runtime(
             }
             plan_digest = executors[command].plan_digest
             active_journal = _read_active_journal(paths)
-            recovery_stop_actions: tuple[str, ...] = ()
+            recovery_stop_actions = stop_actions
             if active_journal is not None:
                 ensure_private_directory(
                     paths.transaction_root,
@@ -1286,37 +1390,43 @@ def _mutate_runtime(
                         kind=existing_kind,
                     )
                 existing_executor = executors[cast(MutationKind, existing_kind)]
-                validated_journal = existing_executor.inspect()
-                if validated_journal is None:
-                    raise RuntimeInstallError(
-                        "transaction.journal_missing",
-                        "Active lifecycle journal disappeared during inspection",
-                        path=str(paths.journal),
-                    )
-                if validated_journal["state"] in INCOMPLETE_TRANSACTION_STATES:
-                    recovery_stop = stop_runtime(context)
-                    recovery_stop_actions = recovery_stop.actions
-                    stop_actions = recovery_stop_actions
-                    if not recovery_stop.ok:
-                        return MutationReport(
-                            command=command,
-                            ok=False,
-                            state="blocked",
-                            reason_code=recovery_stop.reason_code,
-                            message=recovery_stop.message,
-                            artifact=artifact,
-                            plan_digest=plan_digest,
-                            journal=paths.journal,
-                            stop_actions=recovery_stop_actions,
+                if active_journal.get("planDigest") != existing_executor.plan_digest:
+                    archived_journal = _archive_prior_committed_journal(paths, active_journal)
+                    active_journal = None
+                else:
+                    validated_journal = existing_executor.inspect()
+                    if validated_journal is None:
+                        raise RuntimeInstallError(
+                            "transaction.journal_missing",
+                            "Active lifecycle journal disappeared during inspection",
+                            path=str(paths.journal),
                         )
-                    _ensure_paths_closed(context, _journal_paths(validated_journal))
-            settled, archived_journal = _settle_active_journal(
+                    if validated_journal["state"] in INCOMPLETE_TRANSACTION_STATES:
+                        recovery_stop = stop_runtime(context)
+                        recovery_stop_actions = (*stop_actions, *recovery_stop.actions)
+                        stop_actions = recovery_stop_actions
+                        if not recovery_stop.ok:
+                            return MutationReport(
+                                command=command,
+                                ok=False,
+                                state="blocked",
+                                reason_code=recovery_stop.reason_code,
+                                message=recovery_stop.message,
+                                artifact=artifact,
+                                plan_digest=plan_digest,
+                                journal=paths.journal,
+                                stop_actions=recovery_stop_actions,
+                            )
+                        _ensure_paths_closed(context, _journal_paths(validated_journal))
+            settled, settled_archive = _settle_active_journal(
                 command,
                 artifact,
                 executors,
                 paths,
                 stop_actions=recovery_stop_actions,
             )
+            if settled_archive is not None:
+                archived_journal = settled_archive
             if settled is not None:
                 return settled
             initial_blockers = _admission_blockers(plan, command)
@@ -1359,7 +1469,7 @@ def _mutate_runtime(
                         archived_journal=archived_journal,
                     )
             stop = stop_runtime(context)
-            stop_actions = stop.actions
+            stop_actions = (*stop_actions, *stop.actions)
             if not stop.ok:
                 return MutationReport(
                     command=command,

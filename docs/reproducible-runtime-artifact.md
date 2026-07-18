@@ -50,6 +50,9 @@ runtime/
   manifest.lock.json
 tools/
   build_runtime_artifact.py
+  runtime_control.py
+  runtime_start.py
+  runtime_cli.py
   runtime_install.py
   runtime_transaction.py
 .code/

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import pathlib
 import plistlib
 import re
+import socket
+import stat
 import subprocess
 import time
-from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Iterator, Literal, Protocol, Sequence
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
@@ -30,9 +34,15 @@ DEFAULT_LIFECYCLE_LOCK = (
     / "runtime.lock"
 )
 CONTROL_STATE_NAME = "runtime-state.json"
-LIVE_STATES = frozenset({"waiting", "connected", "streaming", "recovering"})
+CONTROL_SOCKET_NAME = "c.sock"
+MAX_RUNTIME_GENERATION = (1 << 63) - 1
+LEGACY_LIVE_STATES = frozenset({"waiting", "connected", "streaming", "recovering"})
+LIVE_STATES = frozenset({"idle", *LEGACY_LIVE_STATES})
 CHECK_STATUSES = frozenset({"pass", "fail", "unknown"})
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+SUPERVISOR_STOP_TIMEOUT_SECONDS = 1.0
+SUPERVISOR_CLEANUP_ATTEMPTS = 50
+SUPERVISOR_CLEANUP_INTERVAL_SECONDS = 0.1
 
 
 class ControlError(Exception):
@@ -305,6 +315,8 @@ class RuntimeContext:
     runner: CommandRunner = field(default_factory=SubprocessRunner)
     pid_alive: Callable[[int], bool] = field(default=lambda pid: process_is_alive(pid))
     sleeper: Callable[[float], None] = time.sleep
+    ping_requester: Callable[[dict[str, Any]], tuple[bool, str | None]] | None = None
+    stop_requester: Callable[[dict[str, Any]], tuple[bool, str | None]] | None = None
 
 
 PREREQUISITE_REMEDIATIONS = {
@@ -406,6 +418,75 @@ def resolve_runtime_paths(manifest: dict[str, Any], bindings: dict[str, str]) ->
     ):
         artifact_contract.ensure_target_allowed(path, allowed_roots, item_id)
     return paths
+
+
+@contextlib.contextmanager
+def global_lifecycle_lock(
+    lock_path: pathlib.Path,
+    allowed_roots: Sequence[pathlib.Path],
+) -> Iterator[None]:
+    try:
+        artifact_contract.ensure_target_allowed(lock_path, list(allowed_roots), "transaction_lock")
+    except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    try:
+        with runtime_descriptor.DescriptorSession([lock_path.parent]) as session:
+            bound = session.bind(lock_path)
+            existed = bound.exists()
+            descriptor, _ = bound.open_read_write_create(0o600)
+            if not existed:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                bound.fsync_parent()
+            with os.fdopen(descriptor, "r+") as stream:
+                metadata = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    raise ControlError(
+                        "transaction.lock_unsafe",
+                        "Global lifecycle lock has unsafe ownership or type",
+                        path=str(lock_path),
+                    )
+                mode = stat.S_IMODE(metadata.st_mode)
+                if mode != 0o600:
+                    raise ControlError(
+                        "transaction.mode_unsafe",
+                        "Global lifecycle lock must use mode 0600",
+                        path=str(lock_path),
+                        mode=f"{mode:04o}",
+                    )
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise ControlError(
+                        "transaction.busy",
+                        "Another runtime lifecycle command owns the global lock",
+                        path=str(lock_path),
+                    ) from error
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except runtime_descriptor.DescriptorError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+
+
+def remove_owned_run_directory(state_root: pathlib.Path, run_dir: pathlib.Path) -> None:
+    if run_dir.parent != state_root:
+        raise ControlError(
+            "state.foreign",
+            "Supervisor run directory is outside the runtime state root",
+            path=str(run_dir),
+        )
+    try:
+        with runtime_descriptor.DescriptorSession([state_root]) as session:
+            bound = session.bind(run_dir)
+            identity = bound.identity()
+            if identity is None:
+                return
+            manifest = bound.tree_cleanup_manifest()
+            bound.remove(identity, manifest, allow_cleanup_modes=True)
+    except runtime_descriptor.DescriptorError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
 
 
 def prerequisite_remediation(item: dict[str, Any]) -> str:
@@ -1062,7 +1143,10 @@ def live_program_for_pid(
 
 
 def process_start_time(pid: int, runner: CommandRunner) -> tuple[str | None, str | None]:
-    result = runner.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], timeout=5.0)
+    result = runner.run(
+        ["/usr/bin/env", "LC_ALL=C", "/bin/ps", "-p", str(pid), "-o", "lstart="],
+        timeout=5.0,
+    )
     if result.error is not None or result.returncode != 0:
         return None, "Owner process start time could not be read"
     started_at = result.stdout.strip()
@@ -1224,7 +1308,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             error_code="state.invalid_json",
             message=f"{error.code}: {error.message}",
         )
-    required = {
+    common_required = {
         "schemaVersion",
         "state",
         "generation",
@@ -1236,17 +1320,44 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
         "artifactSeal",
         "bridgeIdentity",
     }
-    allowed = required | {"updatedAt", "diagnostic"}
-    if not isinstance(record, dict) or set(record) - allowed or required - set(record):
+    if not isinstance(record, dict):
         return ControlStateInspection(
             True,
             False,
             error_code="state.invalid_schema",
-            message="Control state keys do not match schema version 1",
+            message="Control state must be a JSON object",
+        )
+    schema_version = record.get("schemaVersion")
+    if schema_version == 1:
+        required = common_required
+        allowed = required | {"updatedAt", "diagnostic"}
+        valid_state = record.get("state") in LEGACY_LIVE_STATES
+    elif schema_version == 2:
+        required = common_required | {
+            "runDir",
+            "controlSocket",
+            "plistSha256",
+            "bridgeExecutableSha256",
+            "serviceRuns",
+        }
+        allowed = required | {"updatedAt", "diagnostic"}
+        valid_state = record.get("state") in LIVE_STATES
+    else:
+        return ControlStateInspection(
+            True,
+            False,
+            error_code="state.invalid_schema",
+            message="Control state schema version is unsupported",
+        )
+    if set(record) - allowed or required - set(record):
+        return ControlStateInspection(
+            True,
+            False,
+            error_code="state.invalid_schema",
+            message=f"Control state keys do not match schema version {schema_version}",
         )
     valid = (
-        record["schemaVersion"] == 1
-        and record["state"] in LIVE_STATES
+        valid_state
         and isinstance(record["generation"], int)
         and record["generation"] > 0
         and isinstance(record["ownerPid"], int)
@@ -1272,14 +1383,145 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             for value in record["bridgeIdentity"]["cdHashes"]
         )
     )
+    if schema_version == 2:
+        run_dir = pathlib.Path(record["runDir"]) if isinstance(record["runDir"], str) else None
+        control_socket = (
+            pathlib.Path(record["controlSocket"])
+            if isinstance(record["controlSocket"], str)
+            else None
+        )
+        socket_under_run_dir = False
+        if run_dir is not None and control_socket is not None:
+            try:
+                socket_under_run_dir = (
+                    run_dir.is_absolute()
+                    and control_socket.is_absolute()
+                    and control_socket != run_dir
+                    and os.path.commonpath([str(run_dir), str(control_socket)]) == str(run_dir)
+                )
+            except ValueError:
+                socket_under_run_dir = False
+        valid = (
+            valid
+            and record["generation"] <= MAX_RUNTIME_GENERATION
+            and run_dir is not None
+            and socket_under_run_dir
+            and run_dir.name == f"r-{record['generation']:016x}"
+            and isinstance(record["plistSha256"], str)
+            and SHA256_PATTERN.fullmatch(record["plistSha256"]) is not None
+            and isinstance(record["bridgeExecutableSha256"], str)
+            and SHA256_PATTERN.fullmatch(record["bridgeExecutableSha256"]) is not None
+            and isinstance(record["serviceRuns"], int)
+            and not isinstance(record["serviceRuns"], bool)
+            and record["serviceRuns"] == 1
+        )
     if not valid:
         return ControlStateInspection(
             True,
             False,
             error_code="state.invalid_schema",
-            message="Control state values do not match schema version 1",
+            message=f"Control state values do not match schema version {schema_version}",
         )
     return ControlStateInspection(True, True, record=record)
+
+
+def validate_control_socket(record: dict[str, Any]) -> tuple[pathlib.Path | None, str | None]:
+    if record.get("schemaVersion") != 2:
+        return None, "Live control state does not expose a supervisor control socket"
+    socket_value = record.get("controlSocket")
+    run_dir_value = record.get("runDir")
+    if not isinstance(socket_value, str) or not isinstance(run_dir_value, str):
+        return None, "Supervisor control socket identity is missing"
+    socket_path = pathlib.Path(socket_value)
+    run_dir = pathlib.Path(run_dir_value)
+    if (
+        not run_dir.is_absolute()
+        or not socket_path.is_absolute()
+        or ".." in run_dir.parts
+        or ".." in socket_path.parts
+        or socket_path != run_dir / CONTROL_SOCKET_NAME
+    ):
+        return None, "Supervisor control socket path is not the exact generation socket"
+    try:
+        artifact_contract.reject_symlink_components(run_dir)
+    except artifact_contract.ArtifactError as error:
+        return None, f"{error.code}: {error.message}"
+    try:
+        metadata = socket_path.lstat()
+    except FileNotFoundError:
+        return None, "Supervisor control socket is missing"
+    except OSError as error:
+        return None, str(error)
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+        return None, "Supervisor control socket has unsafe ownership or type"
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode != 0o600:
+        return None, f"Supervisor control socket must use mode 0600, found {mode:04o}"
+    return socket_path, None
+
+
+def receive_json_frame(connection: socket.socket, *, limit: int = 4096) -> bytes:
+    payload = bytearray()
+    while len(payload) <= limit:
+        chunk = connection.recv(min(1024, limit + 1 - len(payload)))
+        if not chunk:
+            break
+        payload.extend(chunk)
+        if payload.endswith(b"\n"):
+            return bytes(payload)
+    if len(payload) > limit:
+        raise ValueError("Supervisor control message exceeds the bounded frame size")
+    if not payload.endswith(b"\n"):
+        raise ValueError("Supervisor control message is missing its frame terminator")
+    return bytes(payload)
+
+
+def request_supervisor_command(
+    record: dict[str, Any],
+    command: Literal["ping", "stop"],
+) -> tuple[bool, str | None]:
+    socket_path, socket_error = validate_control_socket(record)
+    if socket_path is None:
+        return False, socket_error
+    request = artifact_contract.canonical_json_bytes(
+        {
+            "schemaVersion": 1,
+            "command": command,
+            "generation": record["generation"],
+            "ownerPid": record["ownerPid"],
+        }
+    )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(SUPERVISOR_STOP_TIMEOUT_SECONDS)
+            connection.connect(str(socket_path))
+            connection.sendall(request)
+            response_bytes = receive_json_frame(connection)
+    except (OSError, ValueError) as error:
+        return False, str(error)
+    try:
+        response = json.loads(
+            response_bytes,
+            object_pairs_hook=artifact_contract.reject_duplicate_keys,
+            parse_constant=artifact_contract.reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, artifact_contract.ArtifactError) as error:
+        return False, f"Supervisor stop response is invalid: {error}"
+    if not isinstance(response, dict) or response != {
+        "schemaVersion": 1,
+        "ok": True,
+        "generation": record["generation"],
+    }:
+        return False, "Supervisor stop response does not match the live generation"
+    return True, None
+
+
+def request_supervisor_ping(record: dict[str, Any]) -> tuple[bool, str | None]:
+    return request_supervisor_command(record, "ping")
+
+
+def request_supervisor_stop(record: dict[str, Any]) -> tuple[bool, str | None]:
+    return request_supervisor_command(record, "stop")
 
 
 def failed_status(
@@ -1331,6 +1573,7 @@ def verify_artifact_reference(
     artifact: pathlib.Path,
     *,
     require_sealed: bool = False,
+    require_current_contract: bool = True,
 ) -> dict[str, Any]:
     _, _, manifest_hash, lock_hash = load_runtime_contract(context)
     artifact_path = pathlib.Path(os.path.abspath(artifact.expanduser()))
@@ -1343,7 +1586,9 @@ def verify_artifact_reference(
             artifactError=artifact_failure_details(error),
             path=str(artifact_path),
         ) from error
-    if metadata["manifestSha256"] != manifest_hash or metadata["lockSha256"] != lock_hash:
+    if require_current_contract and (
+        metadata["manifestSha256"] != manifest_hash or metadata["lockSha256"] != lock_hash
+    ):
         raise ControlError(
             "artifact.contract_mismatch",
             "Runtime state artifact belongs to another manifest or lockfile",
@@ -1369,7 +1614,12 @@ def verify_artifact_reference(
     }
 
 
-def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None) -> StatusReport:
+def status_runtime(
+    context: RuntimeContext,
+    artifact: pathlib.Path | None = None,
+    *,
+    verify_live_artifact: bool = True,
+) -> StatusReport:
     try:
         _, _, paths = resolve_context_paths(context)
     except ControlError as error:
@@ -1454,6 +1704,61 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
                 lock,
                 control_state,
             )
+        if record["schemaVersion"] == 2:
+            run_dir = pathlib.Path(record["runDir"])
+            if (
+                run_dir.parent != paths.state_root
+                or lock.run_dir != record["runDir"]
+                or service.snapshot.runs != record["serviceRuns"]
+            ):
+                return failed_status(
+                    "state.identity_mismatch",
+                    "Control state does not match the live run directory and launchd generation",
+                    service,
+                    lock,
+                    control_state,
+                )
+            try:
+                plist_sha256 = artifact_contract.sha256_file(paths.launch_agent_plist)
+                bridge_sha256 = artifact_contract.sha256_file(paths.bridge_program)
+            except OSError as error:
+                return failed_status(
+                    "state.identity_unreadable",
+                    f"Live control identity could not be hashed: {error}",
+                    service,
+                    lock,
+                    control_state,
+                )
+            if (
+                plist_sha256 != record["plistSha256"]
+                or bridge_sha256 != record["bridgeExecutableSha256"]
+            ):
+                return failed_status(
+                    "state.content_mismatch",
+                    "Control state content hashes do not match the live plist and bridge",
+                    service,
+                    lock,
+                    control_state,
+                )
+            _, socket_error = validate_control_socket(record)
+            if socket_error is not None:
+                return failed_status(
+                    "owner.control_unavailable",
+                    socket_error,
+                    service,
+                    lock,
+                    control_state,
+                )
+            requester = context.ping_requester or request_supervisor_ping
+            responsive, response_error = requester(record)
+            if not responsive:
+                return failed_status(
+                    "owner.unresponsive",
+                    response_error or "Live supervisor did not answer its identity-bound ping",
+                    service,
+                    lock,
+                    control_state,
+                )
         if service.file_identity is None or service.live_identity is None:
             return failed_status(
                 "service.signature_unknown",
@@ -1477,29 +1782,37 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
                 lock,
                 control_state,
             )
-        try:
-            artifact_summary = verify_artifact_reference(
-                context,
-                pathlib.Path(record["artifactPath"]),
-                require_sealed=True,
-            )
-        except ControlError as error:
-            return failed_status(
-                error.code,
-                error.message,
-                service,
-                lock,
-                control_state,
-            )
-        if artifact_summary["sealId"] != record["artifactSeal"]:
-            return failed_status(
-                "state.artifact_mismatch",
-                "Control state artifact seal does not match its verified artifact",
-                service,
-                lock,
-                control_state,
-                artifact=artifact_summary,
-            )
+        if verify_live_artifact:
+            try:
+                artifact_summary = verify_artifact_reference(
+                    context,
+                    pathlib.Path(record["artifactPath"]),
+                    require_sealed=True,
+                    require_current_contract=False,
+                )
+            except ControlError as error:
+                return failed_status(
+                    error.code,
+                    error.message,
+                    service,
+                    lock,
+                    control_state,
+                )
+            if artifact_summary["sealId"] != record["artifactSeal"]:
+                return failed_status(
+                    "state.artifact_mismatch",
+                    "Control state artifact seal does not match its verified artifact",
+                    service,
+                    lock,
+                    control_state,
+                    artifact=artifact_summary,
+                )
+        else:
+            artifact_summary = {
+                "path": record["artifactPath"],
+                "sealId": record["artifactSeal"],
+                "stage": "sealed",
+            }
         if artifact is not None:
             try:
                 requested_artifact = verify_artifact_reference(
@@ -1688,6 +2001,28 @@ def validate_state_removal(path: pathlib.Path) -> tuple[bool, str | None]:
     return True, None
 
 
+def validate_recorded_content(
+    paths: RuntimePaths,
+    control_state: ControlStateInspection,
+) -> tuple[bool, str | None]:
+    if not control_state.valid or control_state.record is None:
+        return True, None
+    record = control_state.record
+    if record.get("schemaVersion") != 2:
+        return True, None
+    try:
+        if path_lexists(paths.launch_agent_plist):
+            plist_sha256 = artifact_contract.sha256_file(paths.launch_agent_plist)
+            if plist_sha256 != record["plistSha256"]:
+                return False, "Launch agent plist does not match synchronized control state"
+        bridge_sha256 = artifact_contract.sha256_file(paths.bridge_program)
+    except OSError as error:
+        return False, f"Synchronized runtime content could not be hashed: {error}"
+    if bridge_sha256 != record["bridgeExecutableSha256"]:
+        return False, "Installed bridge does not match synchronized control state"
+    return True, None
+
+
 def remove_stale_lock(path: pathlib.Path) -> None:
     for name in ("pid", "run-dir"):
         try:
@@ -1730,6 +2065,10 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
 
     service = inspect_service(paths, context.runner)
     lock = inspect_lock(paths.lock_path, context.pid_alive)
+    initial_control_state = load_control_state(paths.state_path)
+    supervisor_stop_requested = False
+    supervisor_run_dir: pathlib.Path | None = None
+    reused_owner_pid: int | None = None
     if service.error_code is not None:
         return stop_failure(
             service.error_code,
@@ -1738,6 +2077,28 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             service,
             lock,
         )
+    content_safe, content_error = validate_recorded_content(paths, initial_control_state)
+    if not content_safe:
+        return stop_failure(
+            "state.content_mismatch",
+            content_error or "Synchronized runtime content does not match",
+            actions,
+            service,
+            lock,
+        )
+    initial_record = initial_control_state.record if initial_control_state.valid else None
+    if (
+        lock.alive
+        and lock.pid is not None
+        and initial_record is not None
+        and initial_record.get("schemaVersion") == 2
+        and initial_record.get("ownerPid") == lock.pid
+    ):
+        actual_started_at, _ = process_start_time(lock.pid, context.runner)
+        if actual_started_at is not None and actual_started_at != initial_record["ownerStartedAt"]:
+            actions.append(f"ignore reused owner pid={lock.pid}")
+            reused_owner_pid = lock.pid
+            lock = replace(lock, alive=False)
 
     service_was_owned = service.snapshot.present and service.owned and service.identity_valid
     if service.snapshot.present:
@@ -1759,6 +2120,36 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
                 service,
                 lock,
             )
+        if lock.alive:
+            live_status = status_runtime(context, verify_live_artifact=False)
+            live_state = initial_control_state
+            record = live_state.record if live_state.valid else None
+            if (
+                not live_status.ok
+                or live_status.state not in LIVE_STATES
+                or record is None
+                or record.get("schemaVersion") != 2
+            ):
+                return stop_failure(
+                    "owner.unresponsive",
+                    "Live runtime owner does not expose a synchronized stop channel",
+                    actions,
+                    service,
+                    lock,
+                )
+            requester = context.stop_requester or request_supervisor_stop
+            requested, request_error = requester(record)
+            if not requested:
+                return stop_failure(
+                    "owner.unresponsive",
+                    request_error or "Live runtime owner did not accept the stop request",
+                    actions,
+                    service,
+                    lock,
+                )
+            supervisor_stop_requested = True
+            supervisor_run_dir = pathlib.Path(record["runDir"])
+            actions.append(f"request supervisor stop generation={record['generation']}")
         result = context.runner.run(
             ["/bin/launchctl", "bootout", paths.service_domain, registered_path],
             timeout=10.0,
@@ -1796,7 +2187,35 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             )
         service = service_after
 
+    if supervisor_stop_requested:
+        for _ in range(SUPERVISOR_CLEANUP_ATTEMPTS):
+            lock = inspect_lock(paths.lock_path, context.pid_alive)
+            if (
+                not lock.exists
+                and not path_lexists(paths.state_path)
+                and not path_lexists(paths.launch_agent_plist)
+                and (supervisor_run_dir is None or not path_lexists(supervisor_run_dir))
+            ):
+                break
+            context.sleeper(SUPERVISOR_CLEANUP_INTERVAL_SECONDS)
+        lock = inspect_lock(paths.lock_path, context.pid_alive)
+        if (
+            lock.exists
+            or path_lexists(paths.state_path)
+            or path_lexists(paths.launch_agent_plist)
+            or (supervisor_run_dir is not None and path_lexists(supervisor_run_dir))
+        ):
+            return stop_failure(
+                "owner.unresponsive",
+                "Live runtime owner did not complete cooperative cleanup",
+                actions,
+                service,
+                lock,
+            )
+
     lock = inspect_lock(paths.lock_path, context.pid_alive)
+    if reused_owner_pid is not None and lock.pid == reused_owner_pid:
+        lock = replace(lock, alive=False)
     lock_safe, lock_error = validate_lock_removal(lock)
     if not lock_safe:
         return stop_failure("lock.active_or_foreign", lock_error or "Runtime lock is not removable", actions, service, lock)
@@ -1820,6 +2239,73 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
         )
 
     cleanup_errors: list[str] = []
+    control_state = load_control_state(paths.state_path)
+    stale_control_socket: pathlib.Path | None = None
+    stale_run_dir: pathlib.Path | None = None
+    if control_state.valid and control_state.record is not None:
+        record = control_state.record
+        if record.get("schemaVersion") == 2 and isinstance(record.get("controlSocket"), str):
+            run_dir = pathlib.Path(record["runDir"])
+            if run_dir.parent != paths.state_root:
+                return stop_failure(
+                    "state.foreign",
+                    "Stale supervisor run directory is outside the runtime state root",
+                    actions,
+                    service,
+                    lock,
+                )
+            if lock.exists and lock.run_dir is not None and lock.run_dir != record["runDir"]:
+                return stop_failure(
+                    "state.foreign",
+                    "Stale owner lock and control state name different run directories",
+                    actions,
+                    service,
+                    lock,
+                )
+            stale_run_dir = run_dir
+            candidate = pathlib.Path(record["controlSocket"])
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                return stop_failure(
+                    "owner.control_foreign",
+                    str(error),
+                    actions,
+                    service,
+                    lock,
+                )
+            else:
+                if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    return stop_failure(
+                        "owner.control_foreign",
+                        "Stale supervisor control socket has unsafe ownership or type",
+                        actions,
+                        service,
+                        lock,
+                    )
+                stale_control_socket = candidate
+    if stale_control_socket is not None:
+        try:
+            stale_control_socket.unlink()
+            actions.append(f"remove {stale_control_socket}")
+        except OSError as error:
+            cleanup_errors.append(f"{stale_control_socket}: {error}")
+    if stale_run_dir is not None:
+        try:
+            remove_owned_run_directory(paths.state_root, stale_run_dir)
+            actions.append(f"remove {stale_run_dir}")
+        except ControlError as error:
+            cleanup_errors.append(f"{stale_run_dir}: {error.message}")
+    if cleanup_errors:
+        return stop_failure(
+            "runtime.cleanup_failed",
+            "Owned runtime state could not be removed: " + "; ".join(cleanup_errors),
+            actions,
+            service,
+            inspect_lock(paths.lock_path, context.pid_alive),
+        )
     if path_lexists(paths.state_path):
         try:
             paths.state_path.unlink()
@@ -1851,17 +2337,19 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     final_lock = inspect_lock(paths.lock_path, context.pid_alive)
     final_state_present = path_lexists(paths.state_path)
     final_plist_present = path_lexists(paths.launch_agent_plist)
+    final_run_dir_present = stale_run_dir is not None and path_lexists(stale_run_dir)
     if (
         final_service.error_code is not None
         or final_service.snapshot.present
         or final_lock.exists
         or final_state_present
         or final_plist_present
+        or final_run_dir_present
     ):
         return stop_failure(
             "runtime.stop_incomplete",
             "Runtime owned state remained after stop"
-            f" (state={final_state_present}, plist={final_plist_present})",
+            f" (state={final_state_present}, plist={final_plist_present}, run={final_run_dir_present})",
             actions,
             final_service,
             final_lock,
