@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import os
 import pathlib
 import shutil
 import tempfile
@@ -19,7 +20,7 @@ from runtime_transaction import TransactionError, TransactionExecutor
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-CODE_ROOT = REPO_ROOT / ".code"
+CODE_ROOT = pathlib.Path(os.environ.get("RUNTIME_FIXTURE_ROOT", REPO_ROOT / ".code"))
 MARKER = "Contents/Resources/runtime-owner.json"
 
 
@@ -130,9 +131,10 @@ class FixtureLayout:
         )
         target_tree = self.tree(
             self.target_root / "Bridge.app",
-            data_payload=b"old tree payload",
+            data_payload=b"new tree payload",
         )
         marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
         operations: list[dict[str, Any]] = [
             {
                 "id": "assert_stock",
@@ -186,6 +188,7 @@ class FixtureLayout:
                 "resource": "bridge",
                 "action": "assert_absent_or_owned",
                 "source": str(source_tree),
+                "sourceTreeSha256": tree_sha256,
                 "marker": MARKER,
                 "sourceMarkerSha256": marker_sha256,
                 "target": str(target_tree),
@@ -198,6 +201,7 @@ class FixtureLayout:
                 "action": "replace_tree",
                 "atomic": True,
                 "source": str(source_tree),
+                "sourceTreeSha256": tree_sha256,
                 "target": str(target_tree),
                 "sourceFiles": 2,
                 "ready": True,
@@ -232,6 +236,7 @@ class FixtureLayout:
         source_tree = self.tree(self.artifact_root / "payload/Remove.app")
         target_tree = self.tree(self.target_root / "Remove.app")
         marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
         operations = [
             {
                 "id": "restore_original",
@@ -259,6 +264,7 @@ class FixtureLayout:
                 "resource": "tree",
                 "action": "remove_tree",
                 "source": str(source_tree),
+                "sourceTreeSha256": tree_sha256,
                 "marker": MARKER,
                 "sourceMarkerSha256": marker_sha256,
                 "target": str(target_tree),
@@ -297,15 +303,17 @@ class FixtureLayout:
         )
         target_tree = self.tree(
             self.target_root / "Crash.app",
-            data_payload=b"old crash tree",
+            data_payload=b"new crash tree",
         )
         marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
         operations: list[dict[str, Any]] = [
             {
                 "id": "assert_crash_tree_owned",
                 "resource": "crash_tree",
                 "action": "assert_absent_or_owned",
                 "source": str(source_tree),
+                "sourceTreeSha256": tree_sha256,
                 "marker": MARKER,
                 "sourceMarkerSha256": marker_sha256,
                 "target": str(target_tree),
@@ -316,6 +324,7 @@ class FixtureLayout:
                 "action": "replace_tree",
                 "atomic": True,
                 "source": str(source_tree),
+                "sourceTreeSha256": tree_sha256,
                 "target": str(target_tree),
             },
         ]
@@ -803,12 +812,14 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(future_raised.exception.code, "transaction.plan_invalid")
 
             tree = fixture.tree(fixture.artifact_root / "payload/Tree.app")
+            tree_sha256 = artifact_contract.canonical_tree_sha256(tree)
             traversal: list[dict[str, Any]] = [
                 {
                     "id": "assert_tree_owned",
                     "resource": "tree",
                     "action": "assert_absent_or_owned",
                     "source": str(tree),
+                    "sourceTreeSha256": tree_sha256,
                     "marker": "../runtime-owner.json",
                     "sourceMarkerSha256": artifact_contract.sha256_file(tree / MARKER),
                     "target": str(fixture.target_root / "Tree.app"),
@@ -819,6 +830,7 @@ class TransactionTests(unittest.TestCase):
                     "action": "replace_tree",
                     "atomic": True,
                     "source": str(tree),
+                    "sourceTreeSha256": tree_sha256,
                     "target": str(fixture.target_root / "Tree.app"),
                 }
             ]
@@ -834,12 +846,14 @@ class TransactionTests(unittest.TestCase):
                 fixture.target_root / "Tree.app",
                 marker_payload=b'{"owner":"foreign"}\n',
             )
+            tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
             tree_operations: list[dict[str, Any]] = [
                 {
                     "id": "assert_tree_owned",
                     "resource": "tree",
                     "action": "assert_absent_or_owned",
                     "source": str(source_tree),
+                    "sourceTreeSha256": tree_sha256,
                     "marker": MARKER,
                     "sourceMarkerSha256": artifact_contract.sha256_file(source_tree / MARKER),
                     "target": str(target_tree),
@@ -850,6 +864,7 @@ class TransactionTests(unittest.TestCase):
                     "action": "replace_tree",
                     "atomic": True,
                     "source": str(source_tree),
+                    "sourceTreeSha256": tree_sha256,
                     "target": str(target_tree),
                 }
             ]
@@ -1049,10 +1064,87 @@ class TransactionTests(unittest.TestCase):
             )
             source_tree = pathlib.Path(replace_operation["source"])
             (source_tree / "Contents/Resources/data.bin").write_bytes(b"updated source")
+            drifted_operations = copy.deepcopy(operations)
+            updated_tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
+            for operation in drifted_operations:
+                if operation["action"] in {"assert_absent_or_owned", "replace_tree"}:
+                    operation["sourceTreeSha256"] = updated_tree_sha256
 
             with self.assertRaises(TransactionError) as source_drift_raised:
-                fixture.executor("install", operations).execute()
+                fixture.executor("install", drifted_operations).execute()
             self.assertEqual(source_drift_raised.exception.code, "transaction.journal_mismatch")
+
+    def test_remove_tree_recovery_rejects_modified_undo_payload(self) -> None:
+        with fixture_layout() as fixture:
+            operations, _ = fixture.prepare_uninstall()
+
+            def crash(step_id: str, phase: str) -> None:
+                if step_id == "remove_tree" and phase == "after-mutation":
+                    raise SimulatedCrash("leave moved tree for recovery")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "uninstall",
+                    operations,
+                    failure_injector=crash,
+                ).execute()
+            journal = json.loads(fixture.journal_path.read_text())
+            remove_step = next(step for step in journal["steps"] if step["id"] == "remove_tree")
+            moved_tree = pathlib.Path(remove_step["undo"]["original"])
+            (moved_tree / "Contents/Resources/data.bin").write_bytes(b"foreign payload")
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("uninstall", operations).recover()
+            self.assertEqual(raised.exception.code, "transaction.rollback_failed")
+            failed = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(failed["state"], "failed")
+            self.assertTrue(moved_tree.is_dir())
+
+    def test_file_rollback_is_noop_when_original_target_is_unchanged(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_install()
+            target_parent = paths["stock"].parent
+
+            def fail_after_intent(step_id: str, phase: str) -> None:
+                if step_id == "replace_stock" and phase == "after-intent":
+                    target_parent.chmod(0o500)
+                    raise RuntimeError("target parent became read-only")
+
+            try:
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.executor(
+                        "install",
+                        operations,
+                        failure_injector=fail_after_intent,
+                    ).execute()
+            finally:
+                target_parent.chmod(0o700)
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            report = raised.exception.context["report"]
+            self.assertEqual(report["state"], "rolled-back")
+            self.assertEqual(paths["stock"].read_bytes(), b"stock payload")
+
+    def test_equivalent_artifact_relocation_preserves_plan_identity(self) -> None:
+        with fixture_layout() as fixture:
+            operations, _ = fixture.prepare_install()
+            original = fixture.executor("install", operations)
+            relocated_root = fixture.root / "relocated-artifact"
+            shutil.copytree(fixture.artifact_root, relocated_root, copy_function=shutil.copy2)
+            relocated_operations = copy.deepcopy(operations)
+            for operation in relocated_operations:
+                source = operation.get("source")
+                if isinstance(source, str):
+                    relative = pathlib.Path(source).relative_to(fixture.artifact_root)
+                    operation["source"] = str(relocated_root / relative)
+            relocated = TransactionExecutor(
+                kind="install",
+                operations=relocated_operations,
+                artifact_root=relocated_root,
+                journal_path=fixture.journal_path,
+                transaction_root=fixture.transaction_root,
+                allowed_roots=[fixture.target_root],
+            )
+            self.assertEqual(relocated.plan_digest, original.plan_digest)
 
 
 if __name__ == "__main__":

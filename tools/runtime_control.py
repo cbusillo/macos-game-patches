@@ -19,6 +19,15 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "runtime" / "manifest.json"
 DEFAULT_LOCK = REPO_ROOT / "runtime" / "manifest.lock.json"
 DEFAULT_BINDINGS = REPO_ROOT / ".code" / "runtime-bindings.json"
+DEFAULT_LIFECYCLE_LOCK = (
+    pathlib.Path.home()
+    / "Library"
+    / "Application Support"
+    / "alvr"
+    / "runtime-state"
+    / "mac-alvr-runtime"
+    / "runtime.lock"
+)
 CONTROL_STATE_NAME = "runtime-state.json"
 LIVE_STATES = frozenset({"waiting", "connected", "streaming", "recovering"})
 CHECK_STATUSES = frozenset({"pass", "fail", "unknown"})
@@ -291,6 +300,7 @@ class RuntimeContext:
     manifest_path: pathlib.Path = DEFAULT_MANIFEST
     lock_path: pathlib.Path = DEFAULT_LOCK
     bindings_path: pathlib.Path = DEFAULT_BINDINGS
+    lifecycle_lock_path: pathlib.Path = DEFAULT_LIFECYCLE_LOCK
     runner: CommandRunner = field(default_factory=SubprocessRunner)
     pid_alive: Callable[[int], bool] = field(default=lambda pid: process_is_alive(pid))
     sleeper: Callable[[float], None] = time.sleep

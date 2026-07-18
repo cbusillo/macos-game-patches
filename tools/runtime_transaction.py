@@ -87,7 +87,6 @@ SEMANTIC_OPERATION_FIELDS = (
     "action",
     "target",
     "atomic",
-    "source",
     "sourceSha256",
     "sourceTreeSha256",
     "marker",
@@ -104,13 +103,18 @@ OBSERVATION_OPERATION_FIELDS = frozenset(
         "exists",
         "ownership",
         "targetMarkerSha256",
+        "targetTreeSha256",
         "backupExists",
         "targetSha256",
         "backupSha256",
         "state",
     }
 )
-KNOWN_OPERATION_FIELDS = frozenset(SEMANTIC_OPERATION_FIELDS) | OBSERVATION_OPERATION_FIELDS
+KNOWN_OPERATION_FIELDS = (
+    frozenset(SEMANTIC_OPERATION_FIELDS)
+    | OBSERVATION_OPERATION_FIELDS
+    | {"source"}
+)
 TREE_PHASES = frozenset(
     {
         "intent",
@@ -263,48 +267,14 @@ def reject_tree_symlinks(root: pathlib.Path) -> None:
 
 
 def tree_sha256(root: pathlib.Path) -> str:
-    reject_tree_symlinks(root)
-    if not root.is_dir():
-        raise TransactionError(
-            "transaction.source_missing",
-            "Tree digest requires a directory",
-            path=str(root),
-        )
-    entries: list[dict[str, Any]] = [
-        {
-            "path": ".",
-            "type": "directory",
-            "mode": stat.S_IMODE(root.lstat().st_mode),
-        }
-    ]
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
-        metadata = path.lstat()
-        relative = path.relative_to(root).as_posix()
-        if stat.S_ISDIR(metadata.st_mode):
-            entries.append(
-                {
-                    "path": relative,
-                    "type": "directory",
-                    "mode": stat.S_IMODE(metadata.st_mode),
-                }
-            )
-        elif stat.S_ISREG(metadata.st_mode):
-            entries.append(
-                {
-                    "path": relative,
-                    "type": "file",
-                    "mode": stat.S_IMODE(metadata.st_mode),
-                    "size": metadata.st_size,
-                    "sha256": artifact_contract.sha256_file(path),
-                }
-            )
-        else:
-            raise TransactionError(
-                "transaction.tree_unsupported",
-                "Tree contains an unsupported filesystem entry",
-                path=str(path),
-            )
-    return artifact_contract.sha256_bytes(artifact_contract.canonical_json_bytes(entries))
+    try:
+        return artifact_contract.canonical_tree_sha256(root)
+    except artifact_contract.ArtifactError as error:
+        code = {
+            "tree.missing": "transaction.source_missing",
+            "tree.unsupported": "transaction.tree_unsupported",
+        }.get(error.code, error.code)
+        raise TransactionError(code, error.message, **error.context) from error
 
 
 def copy_file_atomic(
@@ -354,6 +324,12 @@ def error_payload(error: BaseException) -> dict[str, Any]:
 
 
 def semantic_operation(operation: dict[str, Any]) -> dict[str, Any]:
+    if operation.get("action") == "retain":
+        return {
+            key: operation[key]
+            for key in ("id", "resource", "action")
+            if key in operation
+        }
     return {key: operation[key] for key in SEMANTIC_OPERATION_FIELDS if key in operation}
 
 
@@ -374,21 +350,14 @@ class TransactionExecutor:
         self.journal_path = self._absolute_input_path(journal_path)
         self.transaction_root = self._absolute_input_path(transaction_root)
         self.allowed_roots = [self._absolute_input_path(root) for root in allowed_roots]
-        self.operations: list[dict[str, Any]] = []
+        self.operations = []
         for operation in operations:
             if not isinstance(operation, dict):
                 raise TransactionError(
                     "transaction.plan_invalid",
                     "Transaction operations must be JSON objects",
                 )
-            record = dict(operation)
-            if record.get("action") in TREE_SOURCE_ACTIONS and "sourceTreeSha256" not in record:
-                raw_source = record.get("source")
-                if isinstance(record.get("id"), str) and isinstance(raw_source, str):
-                    source = self._source_path(record)
-                    if source.is_dir():
-                        record["sourceTreeSha256"] = tree_sha256(source)
-            self.operations.append(record)
+            self.operations.append(dict(operation))
         self.failure_injector = failure_injector
         plan = [semantic_operation(operation) for operation in self.operations]
         self.plan_digest = artifact_contract.sha256_bytes(
@@ -843,6 +812,17 @@ class TransactionExecutor:
                 operation=operation["id"],
                 path=str(target),
             )
+        expected_tree = self._required_sha256(contract, "sourceTreeSha256")
+        actual_tree = tree_sha256(target)
+        if actual_tree != expected_tree:
+            raise TransactionError(
+                "transaction.target_foreign",
+                "Tree target content does not match the artifact-owned tree",
+                operation=operation["id"],
+                path=str(target),
+                expected=expected_tree,
+                actual=actual_tree,
+            )
 
     def _preflight_operation(self, operation: dict[str, Any]) -> None:
         action = operation["action"]
@@ -1231,6 +1211,7 @@ class TransactionExecutor:
                     "existed",
                     "marker",
                     "markerSha256",
+                    "expectedTreeSha256",
                     "commitCleanupPaths",
                 }
                 expected = {
@@ -1240,6 +1221,10 @@ class TransactionExecutor:
                     "markerSha256": self._required_sha256(
                         operation,
                         "sourceMarkerSha256",
+                    ),
+                    "expectedTreeSha256": self._required_sha256(
+                        operation,
+                        "sourceTreeSha256",
                     ),
                 }
             if set(undo) != expected_keys or not isinstance(undo.get("existed"), bool):
@@ -1411,6 +1396,17 @@ class TransactionExecutor:
                 error=str(error),
             ) from error
         with os.fdopen(descriptor, "r+") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise TransactionError(
+                    "transaction.lock_unsafe",
+                    "Transaction journal lock has unsafe type, ownership, or mode",
+                    path=str(self.lock_path),
+                )
             try:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
@@ -1473,7 +1469,15 @@ class TransactionExecutor:
                         path=str(target),
                     )
             elif action == "replace_tree":
-                self._validate_owned_tree(operation, target)
+                try:
+                    self._validate_owned_tree(operation, target)
+                except TransactionError as error:
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed tree state does not match the ownership contract",
+                        operation=operation["id"],
+                        path=str(target),
+                    ) from error
                 expected = undo.get("appliedTreeSha256")
                 if (
                     not target.is_dir()
@@ -1561,7 +1565,7 @@ class TransactionExecutor:
             journal = self._new_journal()
             self._save_journal(journal)
             try:
-                self.undo_root.mkdir(parents=False, exist_ok=False)
+                self.undo_root.mkdir(mode=0o700, parents=False, exist_ok=False)
                 fsync_directory(self.undo_root.parent)
                 journal["state"] = "running"
                 self._save_journal(journal)
@@ -1601,6 +1605,63 @@ class TransactionExecutor:
                     message = "Transaction failed and was rolled back"
                 raise TransactionError(code, message, report=report.to_dict()) from error
             return self._finalize_cleanup(journal)
+
+    def inspect(self) -> dict[str, Any] | None:
+        self._validate_structure()
+        with self._locked():
+            return self._load_journal()
+
+    def archive_terminal(self, history_root: pathlib.Path) -> pathlib.Path:
+        self._validate_structure()
+        history_root = self._absolute_input_path(history_root)
+        self._ensure_transaction_path(history_root, "transaction_history")
+        if not history_root.is_dir():
+            raise TransactionError(
+                "transaction.history_missing",
+                "Transaction history directory must already exist",
+                path=str(history_root),
+            )
+        with self._locked():
+            journal = self._load_journal()
+            if journal is None:
+                raise TransactionError(
+                    "transaction.journal_missing",
+                    "No transaction journal exists to archive",
+                    path=str(self.journal_path),
+                )
+            if journal["state"] == "committed":
+                self._verify_committed_state(journal)
+                self._finalize_cleanup(journal)
+            elif journal["state"] == "rolled-back":
+                self._finalize_cleanup(journal)
+            else:
+                raise TransactionError(
+                    "transaction.journal_terminal",
+                    "Only committed or rolled-back journals may be archived",
+                    state=journal["state"],
+                    path=str(self.journal_path),
+                )
+            if path_lexists(self.undo_root):
+                raise TransactionError(
+                    "transaction.journal_inconsistent",
+                    "Terminal transaction still has rollback payloads",
+                    path=str(self.undo_root),
+                )
+            destination = history_root / (
+                f"{journal['transactionId']}-{journal['kind']}-{journal['state']}.json"
+            )
+            self._ensure_transaction_path(destination, "transaction_history")
+            reject_symlink_components(destination, include_leaf=False)
+            if path_lexists(destination):
+                raise TransactionError(
+                    "transaction.history_collision",
+                    "Transaction journal archive already exists",
+                    path=str(destination),
+                )
+            os.replace(self.journal_path, destination)
+            fsync_directory(self.journal_path.parent)
+            fsync_directory(history_root)
+            return destination
 
     def recover(self) -> TransactionReport:
         self._validate_structure()
@@ -1745,6 +1806,10 @@ class TransactionExecutor:
                 "existed": target.is_dir(),
                 "marker": self._marker_relative(operation).as_posix(),
                 "markerSha256": self._required_sha256(operation, "sourceMarkerSha256"),
+                "expectedTreeSha256": self._required_sha256(
+                    operation,
+                    "sourceTreeSha256",
+                ),
                 "commitCleanupPaths": [str(original)],
             }
         raise TransactionError(
@@ -2007,6 +2072,8 @@ class TransactionExecutor:
                         "Rollback refuses to replace a foreign file",
                         path=str(target),
                     )
+                if target_sha256 == undo["originalSha256"]:
+                    return
             copy_file_atomic(original, target, staging)
             if artifact_contract.sha256_file(target) != undo["originalSha256"]:
                 raise TransactionError(
@@ -2175,10 +2242,11 @@ class TransactionExecutor:
                             path=str(original),
                         )
                 else:
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         original,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["expectedTreeSha256"],
                     )
                 if path_lexists(target):
                     raise TransactionError(
@@ -2201,10 +2269,11 @@ class TransactionExecutor:
                             path=str(target),
                         )
                 else:
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         target,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["expectedTreeSha256"],
                     )
                 return
             raise TransactionError(

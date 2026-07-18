@@ -2,7 +2,6 @@
   "ALVR_CHECKOUT": "${REPO_ROOT}/../alvr",
   "ALVR_CLIENT_CORE_CHECKOUT": "${ALVR_VISIONOS_CHECKOUT}/ALVR",
   "ALVR_VISIONOS_CHECKOUT": "${REPO_ROOT}/../alvr-visionos",
-  "BACKUP_ROOT": "${REPO_ROOT}/.code/runtime-backups/plan",
   "CROSSOVER_APP": "/Applications/CrossOver.app",
   "DXVK_BUILD_ROOT": "/path/to/patched/dxvk-build/src",
   "FREEDOM_GAME_DIR": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR/FreedomLocomotion/Binaries/Win64",

@@ -30,8 +30,10 @@ trees automatically.
   signing and the stable installed CDHash remain a separate sealing boundary.
 - Publish artifacts atomically into a content-addressed directory under
   `.code/runtime-artifacts/`.
-- Keep installation and removal read-only in this issue. The tool emits exact
-  operation plans; transactional mutation belongs to issue #61.
+- Keep plan resolution read-only and authoritative. Issue #61 consumes those
+  exact operations through a separate lifecycle coordinator; the current
+  separate-step artifact remains mutation-gated until its post-sign tree can be
+  verified.
 - Never fetch or download dependencies while validating or building.
 - Keep executable prerequisite commands and allowed mutation roots in trusted
   builder policy rather than allowing the manifest to widen its own authority.
@@ -45,6 +47,8 @@ runtime/
   manifest.lock.json
 tools/
   build_runtime_artifact.py
+  runtime_install.py
+  runtime_transaction.py
 .code/
   runtime-bindings.json        # local, ignored
   runtime-artifacts/           # generated, ignored
@@ -68,9 +72,10 @@ must be entirely clean.
 ### Repository Sources
 
 Repo-owned build sources, protocol headers, patch files, recipes, the artifact
-builder, the unchanged production runner, the artifact contract, and the frozen
-v1 scope record are tracked by Git and pinned by SHA-256. A source edit therefore
-invalidates the manifest before an artifact can be produced.
+builder, runtime lifecycle/transaction/control tools, the unchanged production
+runner, the artifact contract, and the frozen v1 scope record are tracked by
+Git and pinned by SHA-256. A source edit therefore invalidates the manifest
+before an artifact can be produced.
 
 ### Opaque Local Build Outputs
 
@@ -218,11 +223,41 @@ python3 tools/build_runtime_artifact.py plan \
 ```
 
 Resolves every source, target, backup, ownership marker, retention, and expected
-precondition to an exact absolute path. It reports complete install/uninstall
-plans, the resolved mutable-state inventory, readiness, and blockers, even when
-the current host is not in an installable state. It rejects an artifact built
-from a different external manifest or lock. The command emits JSON and performs
-no mutation.
+precondition to an exact absolute path. Directory sources include a canonical
+tree digest, and the output carries the complete allowed-root authority needed
+by the transaction executor. It reports complete install/uninstall plans, the
+resolved mutable-state inventory, readiness, and blockers, even when the current
+host is not in an installable state. It rejects an artifact built from a
+different external manifest or lock. The command emits JSON and performs no
+mutation.
+
+### Transactional Lifecycle Commands
+
+```bash
+python3 tools/runtime_cli.py install \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --bindings .code/runtime-bindings.json
+
+python3 tools/runtime_cli.py uninstall \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --bindings .code/runtime-bindings.json
+```
+
+The coordinator accepts no caller-selected plan, journal, backup, target root,
+or lifecycle-state namespace. It verifies the current manifest/lock and uses one
+fixed per-user lock, journal, history, and backup root shared by every checkout
+and bindings file for this runtime id. It settles the shared active journal,
+stops exact-owned runtime state, rejects open targets, checks conservative
+per-filesystem capacity, and passes planner operations unchanged to the durable
+executor. Matching committed work is an idempotent success; interrupted work is
+rolled back and archived before the operator retries the requested direction.
+
+The dev6 manifest declares persistent transaction and content-namespaced backup
+locations, but still uses `separate-step` signing. Both lifecycle commands
+therefore return `artifact.sealing_required` before creating directories,
+stopping services, writing journals, or changing targets. The signing/privacy
+workstream must provide a verified post-sign bundle tree before live mutation is
+eligible.
 
 ### Verify And Compare
 
@@ -282,6 +317,9 @@ classes include:
 - `input.signature` and `prerequisite.mismatch`;
 - `artifact.publish`, `artifact.verify`, and `artifact.compare`;
 - `plan.unresolved` for incomplete or unsafe dry-run plans; and
+- `artifact.sealing_required`, `transaction.busy`, `transaction.retry_required`,
+  `plan.blocked`, `runtime.target_busy`, and `capacity.insufficient` for
+  lifecycle admission failures; and
 - `internal.error` for unexpected failures that are still returned as JSON.
 
 There is no continue-anyway override for integrity, identity, architecture, or
@@ -302,7 +340,8 @@ Issue #58 is complete when:
 
 - rebuilding or downloading CrossOver, DXVK, or MoltenVK source trees;
 - signing or registering the bridge application;
-- installing files into CrossOver or a game;
+- enabling real CrossOver or game mutation before a transaction-compatible
+  signed artifact passes the lifecycle gate;
 - starting ALVR, a game, or the Vision Pro client;
 - defining the reusable per-game profile schema;
 - adding GUI, notarization, updates, or telemetry; and

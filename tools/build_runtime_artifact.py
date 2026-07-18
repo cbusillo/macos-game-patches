@@ -130,6 +130,53 @@ def sha256_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_tree_sha256(root: pathlib.Path) -> str:
+    reject_symlink_components(root)
+    if not root.is_dir():
+        raise ArtifactError(
+            "tree.missing",
+            "Tree digest requires a directory",
+            path=str(root),
+        )
+    entries: list[dict[str, Any]] = [
+        {
+            "path": ".",
+            "type": "directory",
+            "mode": stat.S_IMODE(root.lstat().st_mode),
+        }
+    ]
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        metadata = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ArtifactError("path.symlink", "Tree contains a symlink", path=str(path))
+        if stat.S_ISDIR(metadata.st_mode):
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "directory",
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                }
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "file",
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "size": metadata.st_size,
+                    "sha256": sha256_file(path),
+                }
+            )
+        else:
+            raise ArtifactError(
+                "tree.unsupported",
+                "Tree contains an unsupported filesystem entry",
+                path=str(path),
+            )
+    return sha256_bytes(canonical_json_bytes(entries))
+
+
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1985,6 +2032,7 @@ def resolve_plan_operation(
             result["sourceSha256"] = sha256_file(source)
         else:
             result["sourceFiles"] = sum(1 for path in source.rglob("*") if path.is_file())
+            result["sourceTreeSha256"] = canonical_tree_sha256(source)
     if "marker" in item:
         if source is None or not source.is_dir():
             raise ArtifactError("plan.unresolved", "Tree ownership marker requires a directory source", operation=item["id"])
@@ -2024,7 +2072,14 @@ def resolve_plan_operation(
             actual_marker = sha256_file(target_marker)
             result["targetMarkerSha256"] = actual_marker
             if actual_marker == sha256_file(source_marker):
-                result["ownership"] = "artifact-owned"
+                target_tree_sha256 = canonical_tree_sha256(target)
+                result["targetTreeSha256"] = target_tree_sha256
+                if target_tree_sha256 == result["sourceTreeSha256"]:
+                    result["ownership"] = "artifact-owned"
+                else:
+                    ready = False
+                    reason = "existing tree content differs from the artifact-owned tree"
+                    result["ownership"] = "modified"
             else:
                 ready = False
                 reason = "existing tree has a foreign ownership marker"
@@ -2083,6 +2138,12 @@ def resolve_plan_operation(
                 if marker_hash != sha256_file(source_marker):
                     ready = False
                     reason = "tree removal target has a foreign ownership marker"
+                else:
+                    target_tree_sha256 = canonical_tree_sha256(target)
+                    result["targetTreeSha256"] = target_tree_sha256
+                    if target_tree_sha256 != result["sourceTreeSha256"]:
+                        ready = False
+                        reason = "tree removal target content differs from the artifact-owned tree"
     elif action == "retain":
         result["exists"] = target.exists()
     result["ready"] = ready
@@ -2168,6 +2229,7 @@ def build_plan(
         "uninstallReady": all(item["ready"] for item in uninstall),
         "installBlockers": [item["id"] for item in install if not item["ready"]],
         "uninstallBlockers": [item["id"] for item in uninstall if not item["ready"]],
+        "allowedTargetRoots": [str(root) for root in allowed_roots],
         "mutableState": mutable_state,
         "install": install,
         "uninstall": uninstall,
