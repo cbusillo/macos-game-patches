@@ -1,0 +1,848 @@
+"""Hardware-free fixtures for durable runtime filesystem transactions."""
+
+from __future__ import annotations
+
+import contextlib
+import copy
+import json
+import pathlib
+import shutil
+import tempfile
+import unittest
+from collections.abc import Iterator
+from typing import Any
+
+import build_runtime_artifact as artifact_contract
+from runtime_transaction import TransactionError, TransactionExecutor
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CODE_ROOT = REPO_ROOT / ".code"
+MARKER = "Contents/Resources/runtime-owner.json"
+
+
+class SimulatedCrash(BaseException):
+    pass
+
+
+def snapshot_tree(root: pathlib.Path) -> dict[str, tuple[str, int, bytes | str | None]]:
+    snapshot: dict[str, tuple[str, int, bytes | str | None]] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        mode = metadata.st_mode & 0o7777
+        if path.is_symlink():
+            snapshot[relative] = ("symlink", mode, path.readlink().as_posix())
+        elif path.is_dir():
+            snapshot[relative] = ("directory", mode, None)
+        elif path.is_file():
+            snapshot[relative] = ("file", mode, path.read_bytes())
+        else:
+            snapshot[relative] = ("other", mode, None)
+    return snapshot
+
+
+class FixtureLayout:
+    def __init__(self) -> None:
+        CODE_ROOT.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="runtime-transaction-",
+            dir=CODE_ROOT,
+        )
+        self.root = pathlib.Path(self.temporary.name).resolve()
+        self.artifact_root = self.root / "artifact"
+        self.target_root = self.root / "targets"
+        self.transaction_root = self.root / "transactions"
+        self.journal_path = self.transaction_root / "transaction.json"
+        self.artifact_root.mkdir()
+        self.target_root.mkdir()
+        self.transaction_root.mkdir()
+
+    def cleanup(self) -> None:
+        self.temporary.cleanup()
+
+    def artifact_file(self, relative: str, payload: bytes) -> pathlib.Path:
+        path = self.artifact_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return path
+
+    def target_file(self, relative: str, payload: bytes) -> pathlib.Path:
+        path = self.target_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return path
+
+    def tree(
+        self,
+        root: pathlib.Path,
+        *,
+        marker_payload: bytes = b'{"owner":"fixture"}\n',
+        data_payload: bytes = b"tree payload",
+    ) -> pathlib.Path:
+        marker = root / MARKER
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(marker_payload)
+        data = root / "Contents/Resources/data.bin"
+        data.write_bytes(data_payload)
+        return root
+
+    def executor(
+        self,
+        kind: str,
+        operations: list[dict[str, Any]],
+        *,
+        failure_injector: Any = None,
+        journal_path: pathlib.Path | None = None,
+    ) -> TransactionExecutor:
+        return TransactionExecutor(
+            kind=kind,  # type: ignore[arg-type]
+            operations=operations,
+            artifact_root=self.artifact_root,
+            journal_path=journal_path or self.journal_path,
+            transaction_root=self.transaction_root,
+            allowed_roots=[self.target_root],
+            failure_injector=failure_injector,
+        )
+
+    def transaction_temporary_paths(self) -> list[pathlib.Path]:
+        paths = [
+            path
+            for path in self.target_root.rglob("*")
+            if "runtime-txn-" in path.name
+        ]
+        if self.journal_path.with_name(f"{self.journal_path.name}.undo").exists():
+            paths.append(self.journal_path.with_name(f"{self.journal_path.name}.undo"))
+        return sorted(paths)
+
+    def prepare_install(self) -> tuple[list[dict[str, Any]], dict[str, pathlib.Path]]:
+        stock = self.target_file("game/stock.bin", b"stock payload")
+        patched_source = self.artifact_file("payload/patched.bin", b"patched payload")
+        created_source = self.artifact_file("payload/created.bin", b"created payload")
+        created = self.target_root / "game/created.bin"
+        backup = self.target_root / "backups/stock.bin"
+        backup.parent.mkdir()
+        source_tree = self.tree(
+            self.artifact_root / "payload/Bridge.app",
+            data_payload=b"new tree payload",
+        )
+        target_tree = self.tree(
+            self.target_root / "Bridge.app",
+            data_payload=b"old tree payload",
+        )
+        marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        operations: list[dict[str, Any]] = [
+            {
+                "id": "assert_stock",
+                "resource": "stock",
+                "action": "assert_sha256",
+                "target": str(stock),
+                "expectedSha256": artifact_contract.sha256_file(stock),
+                "actualSha256": artifact_contract.sha256_file(stock),
+                "ready": True,
+            },
+            {
+                "id": "backup_stock",
+                "resource": "stock",
+                "action": "backup",
+                "target": str(stock),
+                "backup": str(backup),
+                "backupExists": False,
+                "ready": True,
+            },
+            {
+                "id": "replace_stock",
+                "resource": "stock",
+                "action": "replace_file",
+                "atomic": True,
+                "source": str(patched_source),
+                "sourceSha256": artifact_contract.sha256_file(patched_source),
+                "target": str(stock),
+                "sourceFiles": 1,
+                "ready": True,
+            },
+            {
+                "id": "assert_created_absent",
+                "resource": "created",
+                "action": "assert_absent",
+                "target": str(created),
+                "exists": False,
+                "ready": True,
+            },
+            {
+                "id": "create_extra",
+                "resource": "created",
+                "action": "create_file",
+                "atomic": True,
+                "source": str(created_source),
+                "sourceSha256": artifact_contract.sha256_file(created_source),
+                "target": str(created),
+                "ready": True,
+            },
+            {
+                "id": "assert_bridge_owned",
+                "resource": "bridge",
+                "action": "assert_absent_or_owned",
+                "source": str(source_tree),
+                "marker": MARKER,
+                "sourceMarkerSha256": marker_sha256,
+                "target": str(target_tree),
+                "ownership": "artifact-owned",
+                "ready": True,
+            },
+            {
+                "id": "replace_bridge",
+                "resource": "bridge",
+                "action": "replace_tree",
+                "atomic": True,
+                "source": str(source_tree),
+                "target": str(target_tree),
+                "sourceFiles": 2,
+                "ready": True,
+            },
+            {
+                "id": "retain_backup",
+                "resource": "stock",
+                "action": "retain",
+                "target": str(backup),
+                "exists": False,
+                "ready": True,
+            },
+        ]
+        return operations, {
+            "stock": stock,
+            "patched_source": patched_source,
+            "created_source": created_source,
+            "created": created,
+            "backup": backup,
+            "source_tree": source_tree,
+            "target_tree": target_tree,
+        }
+
+    def prepare_uninstall(self) -> tuple[list[dict[str, Any]], dict[str, pathlib.Path]]:
+        installed_source = self.artifact_file("payload/installed.bin", b"installed payload")
+        restore_target = self.target_file("game/restore.bin", installed_source.read_bytes())
+        backup = self.target_file("backups/restore.bin", b"original payload")
+        remove_source = self.artifact_file("payload/remove.bin", b"remove payload")
+        remove_target = self.target_file("game/remove.bin", remove_source.read_bytes())
+        absent_source = self.artifact_file("payload/already-absent.bin", b"absent payload")
+        absent_target = self.target_root / "missing/parent/already-absent.bin"
+        source_tree = self.tree(self.artifact_root / "payload/Remove.app")
+        target_tree = self.tree(self.target_root / "Remove.app")
+        marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        operations = [
+            {
+                "id": "restore_original",
+                "resource": "restore",
+                "action": "restore",
+                "atomic": True,
+                "source": str(installed_source),
+                "sourceSha256": artifact_contract.sha256_file(installed_source),
+                "target": str(restore_target),
+                "backup": str(backup),
+                "expectedSha256": artifact_contract.sha256_file(backup),
+                "ready": True,
+            },
+            {
+                "id": "remove_file",
+                "resource": "remove",
+                "action": "remove",
+                "source": str(remove_source),
+                "sourceSha256": artifact_contract.sha256_file(remove_source),
+                "target": str(remove_target),
+                "ready": True,
+            },
+            {
+                "id": "remove_tree",
+                "resource": "tree",
+                "action": "remove_tree",
+                "source": str(source_tree),
+                "marker": MARKER,
+                "sourceMarkerSha256": marker_sha256,
+                "target": str(target_tree),
+                "ready": True,
+            },
+            {
+                "id": "remove_absent",
+                "resource": "absent",
+                "action": "remove",
+                "source": str(absent_source),
+                "sourceSha256": artifact_contract.sha256_file(absent_source),
+                "target": str(absent_target),
+                "exists": False,
+                "ready": True,
+            },
+            {
+                "id": "retain_original_backup",
+                "resource": "restore",
+                "action": "retain",
+                "target": str(backup),
+                "ready": True,
+            },
+        ]
+        return operations, {
+            "restore_target": restore_target,
+            "backup": backup,
+            "remove_target": remove_target,
+            "target_tree": target_tree,
+            "absent_target": absent_target,
+        }
+
+    def prepare_tree_replace(self) -> tuple[list[dict[str, Any]], pathlib.Path]:
+        source_tree = self.tree(
+            self.artifact_root / "payload/Crash.app",
+            data_payload=b"new crash tree",
+        )
+        target_tree = self.tree(
+            self.target_root / "Crash.app",
+            data_payload=b"old crash tree",
+        )
+        marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        operations: list[dict[str, Any]] = [
+            {
+                "id": "assert_crash_tree_owned",
+                "resource": "crash_tree",
+                "action": "assert_absent_or_owned",
+                "source": str(source_tree),
+                "marker": MARKER,
+                "sourceMarkerSha256": marker_sha256,
+                "target": str(target_tree),
+            },
+            {
+                "id": "replace_crash_tree",
+                "resource": "crash_tree",
+                "action": "replace_tree",
+                "atomic": True,
+                "source": str(source_tree),
+                "target": str(target_tree),
+            },
+        ]
+        return operations, target_tree
+
+
+@contextlib.contextmanager
+def fixture_layout() -> Iterator[FixtureLayout]:
+    fixture = FixtureLayout()
+    try:
+        yield fixture
+    finally:
+        fixture.cleanup()
+
+
+class TransactionTests(unittest.TestCase):
+    def test_mixed_install_commits_and_replays_without_live_preflight(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_install()
+            executor = fixture.executor("install", operations)
+            report = executor.execute()
+
+            self.assertTrue(report.ok)
+            self.assertEqual(report.state, "committed")
+            self.assertEqual(paths["stock"].read_bytes(), paths["patched_source"].read_bytes())
+            self.assertEqual(paths["backup"].read_bytes(), b"stock payload")
+            self.assertEqual(paths["created"].read_bytes(), paths["created_source"].read_bytes())
+            self.assertEqual(
+                (paths["target_tree"] / "Contents/Resources/data.bin").read_bytes(),
+                b"new tree payload",
+            )
+            self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+            replay_operations = copy.deepcopy(operations)
+            for operation in replay_operations:
+                operation["ready"] = False
+                operation["blockedReason"] = "dynamic diagnostics changed after commit"
+                operation["exists"] = True
+            paths["patched_source"].unlink()
+            paths["created_source"].unlink()
+            shutil.rmtree(paths["source_tree"])
+
+            replay = fixture.executor("install", replay_operations).execute()
+            self.assertTrue(replay.ok)
+            self.assertEqual(replay.transaction_id, report.transaction_id)
+            self.assertEqual(replay.plan_digest, report.plan_digest)
+            self.assertEqual(paths["backup"].read_bytes(), b"stock payload")
+
+    def test_uninstall_restore_remove_and_absent_remove_commit(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_uninstall()
+            report = fixture.executor("uninstall", operations).execute()
+
+            self.assertTrue(report.ok)
+            self.assertEqual(paths["restore_target"].read_bytes(), b"original payload")
+            self.assertEqual(paths["backup"].read_bytes(), b"original payload")
+            self.assertFalse(paths["remove_target"].exists())
+            self.assertFalse(paths["target_tree"].exists())
+            self.assertFalse(paths["absent_target"].exists())
+            self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_assertion_failure_precedes_journal_and_target_mutation(self) -> None:
+        with fixture_layout() as fixture:
+            target = fixture.target_file("game/stock.bin", b"unexpected")
+            before = snapshot_tree(fixture.target_root)
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_stock",
+                    "resource": "stock",
+                    "action": "assert_sha256",
+                    "target": str(target),
+                    "expectedSha256": artifact_contract.sha256_bytes(b"expected"),
+                }
+            ]
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).execute()
+
+            self.assertEqual(raised.exception.code, "transaction.assertion_failed")
+            self.assertEqual(snapshot_tree(fixture.target_root), before)
+            self.assertFalse(fixture.journal_path.exists())
+
+    def test_each_mutation_rolls_back_exactly(self) -> None:
+        for failure_step in ("backup_stock", "replace_stock", "create_extra", "replace_bridge"):
+            with self.subTest(failure_step=failure_step), fixture_layout() as fixture:
+                operations, _ = fixture.prepare_install()
+                before = snapshot_tree(fixture.target_root)
+
+                def inject(step_id: str, phase: str) -> None:
+                    if step_id == failure_step and phase == "after-mutation":
+                        raise RuntimeError(f"fixture failure after {failure_step}")
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.executor(
+                        "install",
+                        operations,
+                        failure_injector=inject,
+                    ).execute()
+
+                self.assertEqual(raised.exception.code, "transaction.rolled_back")
+                self.assertEqual(snapshot_tree(fixture.target_root), before)
+                journal = json.loads(fixture.journal_path.read_text())
+                self.assertEqual(journal["state"], "rolled-back")
+                self.assertEqual(journal["cleanupFailures"], [])
+                self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+        for failure_step in ("restore_original", "remove_file", "remove_tree"):
+            with self.subTest(failure_step=failure_step), fixture_layout() as fixture:
+                operations, _ = fixture.prepare_uninstall()
+                before = snapshot_tree(fixture.target_root)
+
+                def inject(step_id: str, phase: str) -> None:
+                    if step_id == failure_step and phase == "after-mutation":
+                        raise RuntimeError(f"fixture failure after {failure_step}")
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.executor(
+                        "uninstall",
+                        operations,
+                        failure_injector=inject,
+                    ).execute()
+
+                self.assertEqual(raised.exception.code, "transaction.rolled_back")
+                self.assertEqual(snapshot_tree(fixture.target_root), before)
+                journal = json.loads(fixture.journal_path.read_text())
+                self.assertEqual(journal["state"], "rolled-back")
+                self.assertEqual(journal["cleanupFailures"], [])
+                self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_crash_at_each_tree_boundary_recovers_in_new_executor(self) -> None:
+        for crash_phase in ("after-intent", "after-mutation", "after"):
+            with self.subTest(crash_phase=crash_phase), fixture_layout() as fixture:
+                operations, _ = fixture.prepare_tree_replace()
+                before = snapshot_tree(fixture.target_root)
+
+                def crash(step_id: str, phase: str) -> None:
+                    if step_id == "replace_crash_tree" and phase == crash_phase:
+                        raise SimulatedCrash(crash_phase)
+
+                with self.assertRaises(SimulatedCrash):
+                    fixture.executor(
+                        "install",
+                        operations,
+                        failure_injector=crash,
+                    ).execute()
+
+                journal = json.loads(fixture.journal_path.read_text())
+                self.assertEqual(journal["state"], "running")
+                with self.assertRaises(TransactionError) as execute_raised:
+                    fixture.executor("install", operations).execute()
+                self.assertEqual(execute_raised.exception.code, "transaction.recovery_required")
+
+                report = fixture.executor("install", operations).recover()
+                self.assertFalse(report.ok)
+                self.assertEqual(report.state, "rolled-back")
+                self.assertEqual(snapshot_tree(fixture.target_root), before)
+                self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_crash_during_rollback_resumes_rolling_back_step(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/create.bin", b"create payload")
+            target = fixture.target_root / "create.bin"
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_create_absent",
+                    "resource": "created_file",
+                    "action": "assert_absent",
+                    "target": str(target),
+                },
+                {
+                    "id": "create_file",
+                    "resource": "created_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                }
+            ]
+
+            def crash_rollback(step_id: str, phase: str) -> None:
+                if step_id == "create_file" and phase == "after-mutation":
+                    raise RuntimeError("start rollback")
+                if step_id == "create_file" and phase == "before-rollback":
+                    raise SimulatedCrash("rollback crash")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_rollback,
+                ).execute()
+
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "rolling-back")
+            self.assertEqual(journal["steps"][1]["status"], "rolling-back")
+            report = fixture.executor("install", operations).recover()
+            self.assertEqual(report.state, "rolled-back")
+            self.assertFalse(target.exists())
+            self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_plan_or_kind_drift_refuses_and_preserves_running_journal(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/create.bin", b"create payload")
+            alternate = fixture.artifact_file("payload/alternate.bin", b"alternate payload")
+            target = fixture.target_root / "create.bin"
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_create_absent",
+                    "resource": "created_file",
+                    "action": "assert_absent",
+                    "target": str(target),
+                },
+                {
+                    "id": "create_file",
+                    "resource": "created_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                }
+            ]
+
+            def crash(step_id: str, phase: str) -> None:
+                if step_id == "create_file" and phase == "after-mutation":
+                    raise SimulatedCrash("plan drift fixture")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash,
+                ).execute()
+            journal_before = fixture.journal_path.read_bytes()
+
+            changed = copy.deepcopy(operations)
+            changed[1]["source"] = str(alternate)
+            changed[1]["sourceSha256"] = artifact_contract.sha256_file(alternate)
+            with self.assertRaises(TransactionError) as drift_raised:
+                fixture.executor("install", changed).recover()
+            self.assertEqual(drift_raised.exception.code, "transaction.journal_mismatch")
+            self.assertEqual(fixture.journal_path.read_bytes(), journal_before)
+
+            uninstall_operations: list[dict[str, Any]] = [
+                {
+                    "id": "remove_file",
+                    "resource": "created_file",
+                    "action": "remove",
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                }
+            ]
+            with self.assertRaises(TransactionError) as kind_raised:
+                fixture.executor("uninstall", uninstall_operations).recover()
+            self.assertEqual(kind_raised.exception.code, "transaction.journal_mismatch")
+            self.assertEqual(fixture.journal_path.read_bytes(), journal_before)
+
+            fixture.executor("install", operations).recover()
+            self.assertFalse(target.exists())
+
+    def test_target_source_and_journal_symlinks_fail_closed(self) -> None:
+        for scenario in ("target", "source", "journal"):
+            with self.subTest(scenario=scenario), fixture_layout() as fixture:
+                outside = fixture.root / "outside"
+                outside.mkdir()
+                outside_source = outside / "source.bin"
+                outside_source.write_bytes(b"payload")
+                target = fixture.target_root / "target.bin"
+                source = fixture.artifact_file("payload/source.bin", b"payload")
+                journal_path = fixture.journal_path
+                if scenario == "target":
+                    target_parent = fixture.target_root / "linked"
+                    target_parent.symlink_to(outside, target_is_directory=True)
+                    target = target_parent / "target.bin"
+                elif scenario == "source":
+                    source.unlink()
+                    source.symlink_to(outside_source)
+                else:
+                    journal_path.symlink_to(outside / "journal.json")
+                operations: list[dict[str, Any]] = [
+                    {
+                        "id": "assert_target_absent",
+                        "resource": "created_file",
+                        "action": "assert_absent",
+                        "target": str(target),
+                    },
+                    {
+                        "id": "create_file",
+                        "resource": "created_file",
+                        "action": "create_file",
+                        "atomic": True,
+                        "source": str(source),
+                        "sourceSha256": artifact_contract.sha256_file(outside_source),
+                        "target": str(target),
+                    }
+                ]
+
+                with self.assertRaises(TransactionError) as raised:
+                    fixture.executor(
+                        "install",
+                        operations,
+                        journal_path=journal_path,
+                    ).execute()
+
+                self.assertEqual(raised.exception.code, "path.symlink")
+                self.assertFalse((outside / "target.bin").exists())
+                self.assertFalse((outside / "journal.json").exists())
+
+    def test_escape_unknown_duplicate_and_marker_traversal_fail_before_mutation(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/source.bin", b"payload")
+            outside_target = fixture.root / "outside.bin"
+            escape: list[dict[str, Any]] = [
+                {
+                    "id": "create_file",
+                    "resource": "created_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(outside_target),
+                }
+            ]
+            with self.assertRaises(TransactionError) as escape_raised:
+                fixture.executor("install", escape).execute()
+            self.assertEqual(escape_raised.exception.code, "path.unsafe")
+
+            retain = {
+                "id": "retain_path",
+                "resource": "retained_path",
+                "action": "retain",
+                "target": str(fixture.target_root / "retained"),
+            }
+            with self.assertRaises(TransactionError) as duplicate_raised:
+                fixture.executor("install", [retain, dict(retain)]).execute()
+            self.assertEqual(duplicate_raised.exception.code, "transaction.plan_invalid")
+
+            unknown = dict(retain)
+            unknown["id"] = "unknown_action"
+            unknown["action"] = "delete_everything"
+            with self.assertRaises(TransactionError) as unknown_raised:
+                fixture.executor("install", [unknown]).execute()
+            self.assertEqual(unknown_raised.exception.code, "transaction.action_unsupported")
+
+            tree = fixture.tree(fixture.artifact_root / "payload/Tree.app")
+            traversal: list[dict[str, Any]] = [
+                {
+                    "id": "assert_tree_owned",
+                    "resource": "tree",
+                    "action": "assert_absent_or_owned",
+                    "source": str(tree),
+                    "marker": "../runtime-owner.json",
+                    "sourceMarkerSha256": artifact_contract.sha256_file(tree / MARKER),
+                    "target": str(fixture.target_root / "Tree.app"),
+                },
+                {
+                    "id": "replace_tree",
+                    "resource": "tree",
+                    "action": "replace_tree",
+                    "atomic": True,
+                    "source": str(tree),
+                    "target": str(fixture.target_root / "Tree.app"),
+                }
+            ]
+            with self.assertRaises(TransactionError):
+                fixture.executor("install", traversal).execute()
+            self.assertFalse(outside_target.exists())
+            self.assertFalse(fixture.journal_path.exists())
+
+    def test_foreign_tree_and_mismatched_backup_refuse_preflight(self) -> None:
+        with fixture_layout() as fixture:
+            source_tree = fixture.tree(fixture.artifact_root / "payload/Tree.app")
+            target_tree = fixture.tree(
+                fixture.target_root / "Tree.app",
+                marker_payload=b'{"owner":"foreign"}\n',
+            )
+            tree_operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_tree_owned",
+                    "resource": "tree",
+                    "action": "assert_absent_or_owned",
+                    "source": str(source_tree),
+                    "marker": MARKER,
+                    "sourceMarkerSha256": artifact_contract.sha256_file(source_tree / MARKER),
+                    "target": str(target_tree),
+                },
+                {
+                    "id": "replace_tree",
+                    "resource": "tree",
+                    "action": "replace_tree",
+                    "atomic": True,
+                    "source": str(source_tree),
+                    "target": str(target_tree),
+                }
+            ]
+            before = snapshot_tree(fixture.target_root)
+            with self.assertRaises(TransactionError) as tree_raised:
+                fixture.executor("install", tree_operations).execute()
+            self.assertEqual(tree_raised.exception.code, "transaction.target_foreign")
+            self.assertEqual(snapshot_tree(fixture.target_root), before)
+
+        with fixture_layout() as fixture:
+            target = fixture.target_file("game/stock.bin", b"stock")
+            backup = fixture.target_file("backups/stock.bin", b"foreign")
+            backup_operations: list[dict[str, Any]] = [
+                {
+                    "id": "backup_stock",
+                    "resource": "stock",
+                    "action": "backup",
+                    "target": str(target),
+                    "backup": str(backup),
+                }
+            ]
+            before = snapshot_tree(fixture.target_root)
+            with self.assertRaises(TransactionError) as backup_raised:
+                fixture.executor("install", backup_operations).execute()
+            self.assertEqual(backup_raised.exception.code, "transaction.backup_mismatch")
+            self.assertEqual(snapshot_tree(fixture.target_root), before)
+
+    def test_rollback_failure_is_journaled_and_payloads_are_preserved(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/patched.bin", b"patched")
+            target = fixture.target_file("game/stock.bin", b"stock")
+            backup = fixture.target_root / "backups/stock.bin"
+            backup.parent.mkdir()
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_stock",
+                    "resource": "stock",
+                    "action": "assert_sha256",
+                    "target": str(target),
+                    "expectedSha256": artifact_contract.sha256_file(target),
+                },
+                {
+                    "id": "backup_stock",
+                    "resource": "stock",
+                    "action": "backup",
+                    "target": str(target),
+                    "backup": str(backup),
+                },
+                {
+                    "id": "replace_stock",
+                    "resource": "stock",
+                    "action": "replace_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                }
+            ]
+            executor_holder: dict[str, TransactionExecutor] = {}
+
+            def fail_and_tamper(step_id: str, phase: str) -> None:
+                if step_id == "replace_stock" and phase == "after-mutation":
+                    raise RuntimeError("force rollback")
+                if step_id == "replace_stock" and phase == "before-rollback":
+                    undo_files = list(executor_holder["executor"].undo_root.glob("*.original"))
+                    self.assertEqual(len(undo_files), 1)
+                    undo_files[0].write_bytes(b"tampered undo")
+
+            executor = fixture.executor(
+                "install",
+                operations,
+                failure_injector=fail_and_tamper,
+            )
+            executor_holder["executor"] = executor
+            with self.assertRaises(TransactionError) as raised:
+                executor.execute()
+
+            self.assertEqual(raised.exception.code, "transaction.rollback_failed")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "failed")
+            replace_step = next(step for step in journal["steps"] if step["id"] == "replace_stock")
+            self.assertEqual(replace_step["status"], "rollback-failed")
+            self.assertEqual(len(journal["rollbackFailures"]), 1)
+            self.assertTrue(executor.undo_root.exists())
+            self.assertEqual(target.read_bytes(), b"patched")
+            with self.assertRaises(TransactionError) as recovery_raised:
+                fixture.executor("install", operations).recover()
+            self.assertEqual(recovery_raised.exception.code, "transaction.rollback_failed")
+
+    def test_tampered_journal_undo_path_cannot_touch_external_file(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/create.bin", b"created")
+            target = fixture.target_root / "created.bin"
+            external = fixture.root / "external.bin"
+            external.write_bytes(b"external")
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_created_absent",
+                    "resource": "created_file",
+                    "action": "assert_absent",
+                    "target": str(target),
+                },
+                {
+                    "id": "create_file",
+                    "resource": "created_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                }
+            ]
+
+            def crash(step_id: str, phase: str) -> None:
+                if step_id == "create_file" and phase == "after-mutation":
+                    raise SimulatedCrash("tamper fixture")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash,
+                ).execute()
+            journal = json.loads(fixture.journal_path.read_text())
+            create_step = next(step for step in journal["steps"] if step["id"] == "create_file")
+            create_step["undo"]["target"] = str(external)
+            fixture.journal_path.write_text(json.dumps(journal))
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).recover()
+
+            self.assertEqual(raised.exception.code, "transaction.journal_invalid")
+            self.assertEqual(external.read_bytes(), b"external")
+            self.assertEqual(target.read_bytes(), b"created")
+
+
+if __name__ == "__main__":
+    unittest.main()
