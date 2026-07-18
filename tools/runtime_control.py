@@ -652,9 +652,18 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             CheckResult(
                 "artifact.verify",
                 "fail",
-                "Sealed runtime artifact verification failed",
+                "Runtime artifact verification failed",
                 "Replace the artifact with an exact verified build; do not bypass seal verification.",
                 {"path": str(artifact_path), **artifact_failure_details(error)},
+            )
+        )
+        checks.append(
+            CheckResult(
+                "artifact.stage",
+                "unknown",
+                "Artifact final-sealing stage could not be evaluated",
+                "Verify the artifact before evaluating Developer ID final-stage readiness.",
+                {"path": str(artifact_path)},
             )
         )
         checks.append(
@@ -672,16 +681,37 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             "id": metadata["artifact"]["id"],
             "version": metadata["artifact"]["version"],
             "sealId": metadata["sealId"],
+            "stage": metadata["stage"],
         }
         checks.append(
             CheckResult(
                 "artifact.verify",
                 "pass",
-                "Sealed runtime artifact is exact and immutable",
+                "Runtime artifact is exact and immutable",
                 "Replace the artifact with an exact verified build; do not bypass seal verification.",
                 artifact_summary,
             )
         )
+        if metadata["stage"] == "sealed":
+            checks.append(
+                CheckResult(
+                    "artifact.stage",
+                    "pass",
+                    "Developer ID final-stage artifact is verified",
+                    "Seal the immutable artifact before lifecycle use.",
+                    artifact_summary,
+                )
+            )
+        else:
+            checks.append(
+                CheckResult(
+                    "artifact.stage",
+                    "fail",
+                    "Artifact is immutable but still requires Developer ID final sealing",
+                    "Run the artifact seal command and use the resulting final content address.",
+                    artifact_summary,
+                )
+            )
         if metadata["manifestSha256"] == manifest_hash and metadata["lockSha256"] == lock_hash:
             checks.append(
                 CheckResult(

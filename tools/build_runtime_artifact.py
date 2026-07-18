@@ -919,6 +919,37 @@ def validate_manifest_structure(manifest: Any) -> dict[str, Any]:
             )
         if executable_item["binary"]["format"] != "mach-o":
             raise ArtifactError("manifest.invalid", "Sealed executable must be Mach-O")
+        for item in manifest["artifacts"]:
+            if item["id"] == executable_artifact_id:
+                continue
+            item_path = pathlib.PurePosixPath(item["artifactPath"])
+            try:
+                item_path.relative_to(bundle_path)
+            except ValueError:
+                continue
+            raise ArtifactError(
+                "manifest.invalid",
+                "Nested bundle code is not supported by the sealing contract",
+                id=item["id"],
+            )
+        bundle_generated_paths: set[pathlib.PurePosixPath] = set()
+        for item in manifest["generatedFiles"]:
+            item_path = pathlib.PurePosixPath(item["artifactPath"])
+            try:
+                item_relative = item_path.relative_to(bundle_path)
+            except ValueError:
+                continue
+            bundle_generated_paths.add(item_relative)
+            if item_relative != pathlib.PurePosixPath("Contents/Info.plist") and item_relative.parts[
+                :2
+            ] != ("Contents", "Resources"):
+                raise ArtifactError(
+                    "manifest.invalid",
+                    "Generated bundle files must be Info.plist or resources",
+                    id=item["id"],
+                )
+        if pathlib.PurePosixPath("Contents/Info.plist") not in bundle_generated_paths:
+            raise ArtifactError("manifest.invalid", "Sealed bundle must declare Info.plist")
         attestation_relative = safe_relative_path(
             sealing["attestationPath"],
             "sealing.attestationPath",
@@ -953,8 +984,19 @@ def validate_manifest_structure(manifest: Any) -> dict[str, Any]:
             )
         validate_destination_set(artifact_paths | generated_paths | sealing_paths)
     require_string(sealing["bundleId"], "sealing.bundleId")
-    require_string(sealing["teamId"], "sealing.teamId")
-    require_string(sealing["identity"], "sealing.identity")
+    team_id = require_string(sealing["teamId"], "sealing.teamId")
+    identity = require_string(sealing["identity"], "sealing.identity")
+    if present_output_fields:
+        if not re.fullmatch(r"[A-Z0-9]{10}", team_id):
+            raise ArtifactError("manifest.invalid", "Developer ID Team ID is invalid")
+        if not re.fullmatch(
+            rf"Developer ID Application: .+ \({re.escape(team_id)}\)",
+            identity,
+        ):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Sealing identity must be a Developer ID Application identity for the Team ID",
+            )
     require_bool(sealing["timestamp"], "sealing.timestamp")
     if sealing["timestamp"]:
         raise ArtifactError(
@@ -1281,10 +1323,10 @@ def codesign_info(
     required: bool,
     isolate_bundle_executable: bool = True,
 ) -> dict[str, Any] | None:
-    codesign = shutil.which("codesign")
-    if codesign is None:
+    codesign = pathlib.Path("/usr/bin/codesign")
+    if not codesign.is_file():
         if required:
-            raise ArtifactError("input.signature", "codesign is unavailable", path=str(path))
+            raise ArtifactError("input.signature", "codesign is unavailable", path=str(codesign))
         return None
     verification_path = path
     temporary_path: pathlib.Path | None = None
@@ -1297,7 +1339,7 @@ def codesign_info(
         verification_path = temporary_path
     try:
         verify = subprocess.run(
-            [codesign, "--verify", "--strict", "--all-architectures", str(verification_path)],
+            [str(codesign), "--verify", "--strict", "--all-architectures", str(verification_path)],
             check=False,
             capture_output=True,
             text=True,
@@ -1312,7 +1354,7 @@ def codesign_info(
                 )
             return None
         detail = subprocess.run(
-            [codesign, "-dv", "--verbose=4", str(verification_path)],
+            [str(codesign), "-dv", "--verbose=4", str(verification_path)],
             check=False,
             capture_output=True,
             text=True,
@@ -1808,6 +1850,34 @@ def make_tree_read_only(root: pathlib.Path) -> None:
         elif path.is_dir():
             path.chmod(0o555)
     root.chmod(0o555)
+
+
+def remove_stale_sealing_paths(output_root: pathlib.Path) -> list[str]:
+    removed: list[str] = []
+    for path in sorted(output_root.iterdir()):
+        if not path.name.startswith((".seal-", ".publish-")):
+            continue
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ArtifactError(
+                "artifact.publish",
+                "Stale sealing path has an unsafe type",
+                path=str(path),
+            )
+        if metadata.st_uid != os.getuid():
+            raise ArtifactError(
+                "artifact.publish",
+                "Stale sealing path has an unexpected owner",
+                path=str(path),
+                owner=metadata.st_uid,
+            )
+        canonical_tree_sha256(path)
+        make_tree_writable(path)
+        shutil.rmtree(path)
+        removed.append(path.name)
+    if removed:
+        fsync_directory(output_root)
+    return removed
 
 
 def fsync_tree(root: pathlib.Path) -> None:
@@ -2600,6 +2670,7 @@ def seal_artifact(
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ArtifactError("artifact.publish", "Another artifact build owns the output lock") from error
+        remove_stale_sealing_paths(output_root)
         temporary_parent = pathlib.Path(tempfile.mkdtemp(prefix=".seal-", dir=output_root))
         published_root: pathlib.Path | None = None
         publication_staging: pathlib.Path | None = None
@@ -3030,16 +3101,25 @@ def build_plan(
         resolve_plan_operation(item, artifact_root, bindings, allowed_roots)
         for item in manifest["uninstallPlan"]
     ]
+    requires_sealing = metadata["stage"] != "sealed"
+    sealing_blockers = ["artifact.sealing_required"] if requires_sealing else []
     return {
         "schemaVersion": 1,
         "artifact": str(artifact_root),
         "sealId": metadata["sealId"],
         "artifactStage": metadata["stage"],
-        "requiresSealing": metadata["stage"] != "sealed",
-        "installReady": all(item["ready"] for item in install),
-        "uninstallReady": all(item["ready"] for item in uninstall),
-        "installBlockers": [item["id"] for item in install if not item["ready"]],
-        "uninstallBlockers": [item["id"] for item in uninstall if not item["ready"]],
+        "requiresSealing": requires_sealing,
+        "installReady": not requires_sealing and all(item["ready"] for item in install),
+        "uninstallReady": not requires_sealing and all(item["ready"] for item in uninstall),
+        "installBlockers": [
+            *sealing_blockers,
+            *(item["id"] for item in install if not item["ready"]),
+        ],
+        "uninstallBlockers": [
+            *sealing_blockers,
+            *(item["id"] for item in uninstall if not item["ready"]),
+        ],
+        "fixtureRoot": str((REPO_ROOT / ".code").resolve()),
         "allowedTargetRoots": [str(root) for root in allowed_roots],
         "mutableState": mutable_state,
         "install": install,
@@ -3274,7 +3354,8 @@ def self_test() -> dict[str, Any]:
         if (
             plan["install"][0]["target"] != str(stock_target.resolve())
             or plan["mutableState"][0]["location"] != str(target_root)
-            or not plan["installReady"]
+            or plan["installReady"]
+            or plan["installBlockers"] != ["artifact.sealing_required"]
         ):
             raise ArtifactError("self-test.failed", "Plan did not resolve exact ready operations")
         completed.extend(["atomic-build", "compare", "read-only", "plan"])
@@ -3422,8 +3503,8 @@ def self_test() -> dict[str, Any]:
                 "attestationPath": "Contents/Resources/runtime-sealing.json",
                 "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
                 "bundleId": "example.fixture.sealed",
-                "teamId": "FIXTURETEAM",
-                "identity": "Developer ID Application: Runtime Fixture (FIXTURETEAM)",
+                "teamId": "FIXTURE001",
+                "identity": "Developer ID Application: Runtime Fixture (FIXTURE001)",
                 "timestamp": False,
             },
         }
@@ -3456,24 +3537,28 @@ def self_test() -> dict[str, Any]:
 
         def fake_code_resources(bundle: pathlib.Path) -> bytes:
             info = bundle / "Contents" / "Info.plist"
-            executable = bundle / "Contents" / "MacOS" / "fixture_bridge"
             owner = bundle / "Contents" / "Resources" / "runtime-owner.json"
             attestation = bundle / "Contents" / "Resources" / "runtime-sealing.json"
             return canonical_json_bytes(
                 {
                     "attestation": sha256_file(attestation),
-                    "executable": sha256_file(executable),
                     "info": sha256_file(info),
                     "owner": sha256_file(owner),
                 }
             )
 
-        def fake_signer(bundle: pathlib.Path, _: dict[str, Any]) -> None:
+        def fake_signer_with_cms(bundle: pathlib.Path, cms_marker: bytes) -> None:
             executable = bundle / "Contents" / "MacOS" / "fixture_bridge"
-            executable.write_bytes(executable.read_bytes() + b"signed\n")
+            executable.write_bytes(executable.read_bytes() + b"\nCMS:" + cms_marker)
             resources = bundle / "Contents" / "_CodeSignature" / "CodeResources"
             resources.parent.mkdir(parents=True)
             resources.write_bytes(fake_code_resources(bundle))
+
+        def fake_signer_a(bundle: pathlib.Path, _: dict[str, Any]) -> None:
+            fake_signer_with_cms(bundle, b"A")
+
+        def fake_signer_b(bundle: pathlib.Path, _: dict[str, Any]) -> None:
+            fake_signer_with_cms(bundle, b"B")
 
         def fake_bundle_inspector(
             bundle: pathlib.Path,
@@ -3483,13 +3568,16 @@ def self_test() -> dict[str, Any]:
             if resources.read_bytes() != fake_code_resources(bundle):
                 raise ArtifactError("sealing.signature", "Fixture resource signature differs")
             executable = bundle / "Contents" / "MacOS" / "fixture_bridge"
+            code_bytes, marker, cms_bytes = executable.read_bytes().partition(b"\nCMS:")
+            if marker != b"\nCMS:" or cms_bytes not in {b"A", b"B"}:
+                raise ArtifactError("sealing.signature", "Fixture CMS signature differs")
             policy = manifest_value["sealing"]
             return {
                 "kind": "developer-id",
                 "identifier": policy["bundleId"],
                 "teamIdentifier": policy["teamId"],
                 "cdhash": hashlib.sha1(
-                    executable.read_bytes(),
+                    code_bytes,
                     usedforsecurity=False,
                 ).hexdigest(),
                 "authority": policy["identity"],
@@ -3523,6 +3611,11 @@ def self_test() -> dict[str, Any]:
         )
         if not unsealed_plan["requiresSealing"] or unsealed_plan["artifactStage"] != "unsealed":
             raise ArtifactError("self-test.failed", "Unsealed fixture did not remain mutation-gated")
+        stale_seal = temp_root / "sealing-output-a" / ".seal-stale"
+        stale_publish = temp_root / "sealing-output-a" / ".publish-stale"
+        stale_seal.mkdir(parents=True)
+        stale_publish.mkdir()
+        (stale_seal / "partial").write_bytes(b"partial\n")
         sealed_artifact_a = pathlib.Path(
             seal_artifact(
                 loaded_sealing_manifest,
@@ -3531,11 +3624,13 @@ def self_test() -> dict[str, Any]:
                 sealing_lock_hash,
                 unsealed_artifact,
                 temp_root / "sealing-output-a",
-                signer=fake_signer,
+                signer=fake_signer_a,
                 bundle_inspector=fake_bundle_inspector,
                 artifact_inspector=fake_artifact_inspector,
             )["path"]
         )
+        if stale_seal.exists() or stale_publish.exists():
+            raise ArtifactError("self-test.failed", "Stale sealing paths were not reconciled")
         sealed_artifact_b = pathlib.Path(
             seal_artifact(
                 loaded_sealing_manifest,
@@ -3544,17 +3639,30 @@ def self_test() -> dict[str, Any]:
                 sealing_lock_hash,
                 unsealed_artifact,
                 temp_root / "sealing-output-b",
-                signer=fake_signer,
+                signer=fake_signer_b,
                 bundle_inspector=fake_bundle_inspector,
                 artifact_inspector=fake_artifact_inspector,
             )["path"]
         )
-        compare_artifacts(
-            sealed_artifact_a,
-            sealed_artifact_b,
-            bundle_inspector=fake_bundle_inspector,
-            artifact_inspector=fake_artifact_inspector,
+        expect_error(
+            "artifact.compare",
+            lambda: compare_artifacts(
+                sealed_artifact_a,
+                sealed_artifact_b,
+                bundle_inspector=fake_bundle_inspector,
+                artifact_inspector=fake_artifact_inspector,
+            ),
         )
+        sealed_record_a = load_json(sealed_artifact_a / SEALING_PROVENANCE_PATH)
+        sealed_record_b = load_json(sealed_artifact_b / SEALING_PROVENANCE_PATH)
+        if (
+            sealed_record_a["signature"] != sealed_record_b["signature"]
+            or sealed_record_a["sealedTreeSha256"] == sealed_record_b["sealedTreeSha256"]
+        ):
+            raise ArtifactError(
+                "self-test.failed",
+                "Fixture CMS variance did not preserve stable code identity",
+            )
         sealed_plan = build_plan(
             loaded_sealing_manifest,
             sealed_artifact_a,
@@ -3582,7 +3690,7 @@ def self_test() -> dict[str, Any]:
                 sealing_lock_hash,
                 sealed_artifact_a,
                 temp_root / "sealing-refused",
-                signer=fake_signer,
+                signer=fake_signer_a,
                 bundle_inspector=fake_bundle_inspector,
                 artifact_inspector=fake_artifact_inspector,
             ),
@@ -3605,7 +3713,8 @@ def self_test() -> dict[str, Any]:
             [
                 "unsealed-gate",
                 "post-build-seal",
-                "sealed-compare",
+                "stale-seal-cleanup",
+                "sealed-cms-variance",
                 "sealed-plan",
                 "sealed-relocation",
                 "sealed-source-refusal",

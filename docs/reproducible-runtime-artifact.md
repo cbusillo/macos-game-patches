@@ -294,8 +294,11 @@ The dev7 manifest retains separate-step signing without weakening admission.
 Both lifecycle commands return `artifact.sealing_required` before creating
 directories, stopping services, writing journals, or changing targets when the
 verified artifact stage is `unsealed`. A verified `sealed` artifact carries its
-exact post-sign bundle tree into the transaction plan; remaining live-path and
-physical qualification gates still apply before user-path enablement.
+exact post-sign bundle tree into the transaction plan. Non-fixture target roots
+still return `transaction.live_path_hardening_required` before lifecycle lock
+creation, service stop, journal write, or target mutation. Descriptor-anchored
+mutation and physical qualification remain explicit gates before user-path
+enablement.
 
 ### Verify And Compare
 
@@ -311,8 +314,11 @@ python3 tools/build_runtime_artifact.py compare \
 `verify` recalculates all content records and the seal, then verifies final
 Developer ID evidence when the stage is `sealed`. `compare` requires two
 independent artifacts at the same stage to have identical seals and file
-records. No-timestamp signing has been observed to produce identical full tree,
-executable, CodeResources, and CDHash values for two independent copies.
+records. Unsealed builds are deterministic and must compare equal. Developer ID
+CMS bytes can vary between valid no-timestamp signing operations even when the
+source seal, signed attestation, CodeResources, and CDHash remain identical, so
+each final tree receives its own exact content address and an exact sealed-stage
+`compare` intentionally reports those byte-level differences.
 
 ### Self-Test
 
@@ -325,9 +331,9 @@ wrong-type, unsafe-destination, symlink, wrong-commit, tracked/untracked dirty
 worktree, atomic-build, read-only publication, exact-plan, contract mismatch,
 exact modes, undeclared directories, tamper detection, and two-build-equivalence
 behavior. Deterministic test doubles also cover the unsealed gate, post-build
-seal, final-stage plan readiness, independently equal seals, relocation,
-re-seal refusal, and signed-tree tamper detection. It does not use CrossOver or
-Apple tooling and runs in CI.
+seal, final-stage plan readiness, CMS byte variance with stable code identity,
+stale publication cleanup, relocation, re-seal refusal, and signed-tree tamper
+detection. It does not use CrossOver or Apple tooling and runs in CI.
 
 ## Binding Rules
 
@@ -363,8 +369,9 @@ classes include:
 - `artifact.publish`, `artifact.verify`, and `artifact.compare`;
 - `plan.unresolved` for incomplete or unsafe dry-run plans; and
 - `artifact.sealing_required`, `transaction.busy`, `transaction.retry_required`,
-  `plan.blocked`, `runtime.target_busy`, and `capacity.insufficient` for
-  lifecycle admission failures; and
+  `transaction.live_path_hardening_required`, `plan.blocked`,
+  `runtime.target_busy`, and `capacity.insufficient` for lifecycle admission
+  failures; and
 - `internal.error` for unexpected failures that are still returned as JSON.
 
 There is no continue-anyway override for integrity, identity, architecture, or
@@ -383,8 +390,10 @@ Issue #58 is complete when:
 
 Issue #62's final-sealing slice additionally requires:
 
-1. two independently signed copies to produce matching final tree, executable,
-   CodeResources, CDHash, and artifact seal values with timestamps disabled;
+1. two independently signed copies to preserve the source seal, signed
+   attestation, CodeResources, and CDHash; varying CMS bytes must produce
+   distinct exact final tree and artifact seal values rather than being
+   normalized away;
 2. an unsealed artifact to remain lifecycle-gated before every mutation;
 3. a final artifact to verify after relocation and enter planning as `sealed`;
 4. source-seal, signed-attestation, CodeResources, executable, identity, and

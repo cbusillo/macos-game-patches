@@ -88,7 +88,9 @@ The dev7 contract still uses a separate signing step, but readiness now comes
 from verified artifact stage rather than manifest mode alone. Unsealed artifacts
 return `artifact.sealing_required` before any lifecycle mutation; a final sealed
 artifact carries its exact signed tree into the transaction plan. Live user-path
-and physical qualification remain explicit follow-up gates.
+and physical qualification remain explicit follow-up gates: non-fixture target
+roots return `transaction.live_path_hardening_required` until descriptor-
+anchored mutation lands.
 
 ## Runtime Control Plane
 

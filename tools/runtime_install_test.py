@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import build_runtime_artifact as artifact_contract
@@ -271,6 +271,7 @@ class LifecycleFixture:
             "artifact": str(self.artifact_root),
             "sealId": "a" * 64,
             "requiresSealing": False,
+            "fixtureRoot": str(CODE_ROOT),
             "allowedTargetRoots": [str(self.root)],
             "mutableState": mutable_state,
             "install": install,
@@ -385,6 +386,28 @@ class RuntimeInstallTests(unittest.TestCase):
                     report = command(context, fixture.artifact_root)
                     self.assertFalse(report.ok)
                     self.assertEqual(report.reason_code, "artifact.sealing_required")
+            doctor_mock.assert_not_called()
+            stop_mock.assert_not_called()
+            self.assertFalse(fixture.transaction_root.exists())
+            self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
+
+    def test_sealed_live_roots_require_path_hardening_before_mutation(self) -> None:
+        with lifecycle_fixture() as fixture:
+            with patched_lifecycle(fixture) as (context, doctor_mock, stop_mock):
+                plan_mock = cast(mock.Mock, runtime_install._build_plan)
+
+                def live_plan(*_: Any) -> dict[str, Any]:
+                    plan = fixture.plan()
+                    plan["allowedTargetRoots"] = [*plan["allowedTargetRoots"], "/Applications"]
+                    return plan
+
+                plan_mock.side_effect = live_plan
+                report = runtime_install.install_runtime(context, fixture.artifact_root)
+                self.assertFalse(report.ok)
+                self.assertEqual(
+                    report.reason_code,
+                    "transaction.live_path_hardening_required",
+                )
             doctor_mock.assert_not_called()
             stop_mock.assert_not_called()
             self.assertFalse(fixture.transaction_root.exists())

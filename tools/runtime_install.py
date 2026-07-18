@@ -407,6 +407,26 @@ def _build_plan(
         raise _artifact_error(error) from error
 
 
+def _fixture_only_plan(plan: dict[str, Any]) -> bool:
+    fixture_root_value = plan.get("fixtureRoot")
+    allowed_root_values = plan.get("allowedTargetRoots")
+    if not isinstance(fixture_root_value, str) or not isinstance(allowed_root_values, list):
+        return False
+    fixture_root = pathlib.Path(fixture_root_value)
+    if not fixture_root.is_absolute():
+        return False
+    fixture_text = str(fixture_root)
+    for raw_root in allowed_root_values:
+        if not isinstance(raw_root, str) or not pathlib.Path(raw_root).is_absolute():
+            return False
+        try:
+            if os.path.commonpath([raw_root, fixture_text]) != fixture_text:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def _executor(
     kind: MutationKind,
     plan: dict[str, Any],
@@ -1066,6 +1086,29 @@ def _mutate_runtime(
                 reason_code="artifact.sealing_required",
                 message=(
                     "The runtime artifact requires a verified post-sign tree before lifecycle mutation"
+                ),
+                artifact=artifact,
+            )
+        admission_plan = _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash)
+        if admission_plan.get("requiresSealing") is not False:
+            return MutationReport(
+                command=command,
+                ok=False,
+                state="blocked",
+                reason_code="artifact.sealing_required",
+                message=(
+                    "The runtime artifact requires a verified post-sign tree before lifecycle mutation"
+                ),
+                artifact=artifact,
+            )
+        if not _fixture_only_plan(admission_plan):
+            return MutationReport(
+                command=command,
+                ok=False,
+                state="blocked",
+                reason_code="transaction.live_path_hardening_required",
+                message=(
+                    "Verified sealed artifacts remain fixture-only until descriptor-anchored target mutation is implemented"
                 ),
                 artifact=artifact,
             )
