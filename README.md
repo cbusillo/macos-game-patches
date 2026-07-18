@@ -52,6 +52,24 @@ Qualified local validation and builds use ignored bindings documented in
 `docs/reproducible-runtime-artifact.md` for the deterministic payload,
 provenance, sealing boundary, and read-only install/uninstall plan contract.
 
+## Runtime Control Plane
+
+Issue #60 is extracting the proven runtime lifecycle from the research runner.
+The first artifact-backed slice provides truthful prerequisite diagnostics,
+live status, and exact owned teardown without changing the launchd/Mach data
+plane:
+
+```bash
+python3 tools/runtime_cli.py doctor --artifact <artifact>
+python3 tools/runtime_cli.py status --artifact <artifact>
+python3 tools/runtime_cli.py stop
+```
+
+All commands support `--json`. `doctor` performs no mutation, `status` refuses
+to infer live health from stale logs or cached PIDs, and `stop` boots out only an
+exact owned launchd job. The long-running `start` supervisor remains follow-up
+work; live qualification still uses the profile runner until that slice lands.
+
 ## Starting New Work
 
 Start with the active GitHub plan and the frozen runtime boundary. For new live
