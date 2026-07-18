@@ -119,7 +119,7 @@
       "compile": "python3 -m py_compile tools/runtime_descriptor.py tools/runtime_install.py tools/runtime_cli.py tools/runtime_install_test.py",
       "install": "python3 tools/runtime_cli.py install --artifact <artifact> [--bindings <bindings>] [--json]",
       "uninstall": "python3 tools/runtime_cli.py uninstall --artifact <artifact> [--bindings <bindings>] [--json]",
-      "boundary": "The ownership, descriptor locks/directories, journal, backup, recovery, capacity, and CLI contract is implemented against temporary fixtures and the qualified Mac16,9 host; dev8 unsealed artifacts return artifact.sealing_required before mutation, prior signed stable bundles require Developer ID admission, uninstall retains the exact stable tree, and the corrected sealed artifact passes one migration plus three physical exact-restoration cycles"
+      "boundary": "The ownership, descriptor locks/directories, journal, backup, recovery, capacity, and CLI contract is implemented against temporary fixtures and the qualified Mac16,9 host; dev8 unsealed artifacts return artifact.sealing_required before mutation, prior signed stable bundles require Developer ID admission, uninstall retains the exact stable tree, clean committed journals from a prior plan archive before an update, and the corrected sealed artifact passes one migration plus three physical exact-restoration cycles"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",

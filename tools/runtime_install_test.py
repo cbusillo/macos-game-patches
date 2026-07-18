@@ -534,6 +534,30 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertNotEqual(reinstalled.transaction_id, installed.transaction_id)
             self.assertEqual(len(list(fixture.history_root.glob("*.json"))), 2)
 
+    def test_prior_committed_plan_journal_archives_before_new_install(self) -> None:
+        with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (
+            context,
+            _,
+            _,
+        ):
+            installed = runtime_install.install_runtime(context, fixture.artifact_root)
+            self.assertTrue(installed.ok)
+            uninstalled = runtime_install.uninstall_runtime(context, fixture.artifact_root)
+            self.assertTrue(uninstalled.ok)
+            previous_transaction_id = uninstalled.transaction_id
+
+            fixture.patched_source.write_bytes(b"patched payload v2")
+            fixture.patched_sha256 = artifact_contract.sha256_file(fixture.patched_source)
+            upgraded = runtime_install.install_runtime(context, fixture.artifact_root)
+
+            self.assertTrue(upgraded.ok, upgraded.to_dict())
+            self.assertEqual(upgraded.state, "committed")
+            self.assertIsNotNone(upgraded.archived_journal)
+            assert upgraded.archived_journal is not None
+            self.assertIn(previous_transaction_id or "", upgraded.archived_journal.name)
+            self.assertEqual(fixture.stock.read_bytes(), b"patched payload v2")
+            self.assertEqual(len(list(fixture.history_root.glob("*.json"))), 2)
+
     def test_verified_prior_bundle_migrates_and_is_retained(self) -> None:
         with lifecycle_fixture() as fixture:
             fixture._tree(fixture.bridge_bundle)

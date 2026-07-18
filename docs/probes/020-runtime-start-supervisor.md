@@ -90,6 +90,9 @@ constants, not caller-selectable flags.
   after its sealed artifact is moved, while new starts still require the current
   checked-in contract;
 - install and uninstall stop a live synchronized supervisor before lock retry;
+- a clean committed terminal journal from a prior plan is archived before the
+  new install plan runs, while incomplete or dirty prior journals remain
+  fail-closed;
 - human and JSON start output and usage errors remain stable.
 
 ## Validation
@@ -136,6 +139,8 @@ verify, and doctor a fresh artifact from a clean commit.
   `runtime.start_timeout`;
 - synchronized child startup fails: `runtime.start_failed` with its private log
   preserved;
+- a prior plan left a non-clean terminal journal:
+  `transaction.journal_mismatch` or `transaction.cleanup_failed`;
 - verified service bootout succeeds but the live supervisor does not clean up:
   `owner.unresponsive` with the owner state preserved.
 
