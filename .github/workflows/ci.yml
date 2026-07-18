@@ -107,6 +107,8 @@ jobs:
   runtime-lifecycle-macos:
     name: Runtime Lifecycle (macOS)
     runs-on: macos-latest
+    env:
+      RUNTIME_FIXTURE_ROOT: /private/tmp/runtime-fixtures
     steps:
       - name: Checkout
         uses: actions/checkout@v7
