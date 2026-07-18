@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ ARTIFACT_VERIFY_TOOL = REPO_ROOT / "tools" / "build_runtime_artifact.py"
 CLEANUP_TOOL = REPO_ROOT / "tools" / "vr_stack_cleanup.py"
 PROBE_RUNNER = REPO_ROOT / "tools" / "run_real_native_iosurface_probe.sh"
 PROFILE_OUTPUT_ROOT = REPO_ROOT / ".code" / "probes" / "013-the-lab-profile-qualification"
+CURATED_PROFILE_PATH_PREFIX = "${REPO_ROOT}/runtime/profiles/"
 
 PROFILE_KEYS = {
     "schemaVersion",
@@ -137,6 +138,31 @@ class LoadedProfile:
     sha256: str
 
 
+@dataclass(frozen=True)
+class ResolvedProfileTarget:
+    id: str
+    role: str
+    executable: pathlib.Path
+    working_directory: pathlib.Path
+    openvr_directory: pathlib.Path
+    graphics_directory: pathlib.Path
+    stock_openvr_sha256: str
+    process_pattern: str
+
+
+@dataclass(frozen=True)
+class InstalledProfile:
+    loaded: LoadedProfile
+    install_root: pathlib.Path
+    steam_manifest: pathlib.Path
+    steam_manifest_sha256: str
+    targets: tuple[ResolvedProfileTarget, ...]
+
+    @property
+    def entrypoint(self) -> ResolvedProfileTarget:
+        return self.targets[0]
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
 
@@ -191,13 +217,27 @@ def require_bool(value: Any, location: str) -> bool:
     return value
 
 
-def require_integer(value: Any, location: str, *, minimum: int = 1) -> int:
+def require_integer(
+    value: Any,
+    location: str,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ProfileError(
             "profile.invalid",
             "Expected an integer in range",
             location=location,
             minimum=minimum,
+        )
+    if maximum is not None and value > maximum:
+        raise ProfileError(
+            "profile.invalid",
+            "Expected an integer in range",
+            location=location,
+            minimum=minimum,
+            maximum=maximum,
         )
     return value
 
@@ -370,8 +410,16 @@ def validate_launch(profile: dict[str, Any]) -> None:
             location="launch.processPattern",
             detail=str(error),
         ) from error
-    require_integer(launch["startupTimeoutSeconds"], "launch.startupTimeoutSeconds")
-    require_integer(launch["transitionTimeoutSeconds"], "launch.transitionTimeoutSeconds")
+    require_integer(
+        launch["startupTimeoutSeconds"],
+        "launch.startupTimeoutSeconds",
+        maximum=600,
+    )
+    require_integer(
+        launch["transitionTimeoutSeconds"],
+        "launch.transitionTimeoutSeconds",
+        maximum=600,
+    )
 
 
 def validate_runtime(profile: dict[str, Any]) -> None:
@@ -629,11 +677,12 @@ def profile_path(profile_argument: str) -> pathlib.Path:
         path = candidate if candidate.is_absolute() else REPO_ROOT / candidate
     else:
         path = PROFILE_ROOT / f"{profile_argument}.json"
-    return path.resolve(strict=False)
+    return pathlib.Path(os.path.abspath(path))
 
 
 def load_profile(profile_argument: str, *, require_canonical: bool = True) -> LoadedProfile:
     path = profile_path(profile_argument)
+    reject_symlink_components(path)
     if not path.is_file() or path.is_symlink():
         raise ProfileError("profile.not_found", "Profile is not a regular file", path=str(path))
     try:
@@ -646,6 +695,106 @@ def load_profile(profile_argument: str, *, require_canonical: bool = True) -> Lo
     if require_canonical and raw_bytes != canonical:
         raise ProfileError("profile.noncanonical", "Profile JSON is not canonical", path=str(path))
     return LoadedProfile(path=path, data=value, sha256=sha256_bytes(canonical))
+
+
+def load_curated_profile(
+    profile_id: str,
+    manifest: dict[str, Any],
+    artifact: pathlib.Path,
+) -> LoadedProfile:
+    if not isinstance(profile_id, str) or not IDENTIFIER_RE.fullmatch(profile_id):
+        raise ProfileError(
+            "profile.invalid",
+            "Runtime start requires one curated lowercase profile identifier",
+            profile=profile_id,
+        )
+    expected_manifest_path = f"{CURATED_PROFILE_PATH_PREFIX}{profile_id}.json"
+    raw_sources = manifest.get("sourceFiles")
+    if not isinstance(raw_sources, list):
+        raise ProfileError("profile.artifact_mismatch", "Runtime manifest has no source file contract")
+    matches = [
+        item
+        for item in raw_sources
+        if isinstance(item, dict) and item.get("path") == expected_manifest_path
+    ]
+    if (
+        len(matches) != 1
+        or not isinstance(matches[0].get("id"), str)
+        or not isinstance(matches[0].get("sha256"), str)
+        or not SHA256_RE.fullmatch(matches[0]["sha256"])
+    ):
+        raise ProfileError(
+            "profile.not_curated",
+            "Profile is not listed in the sealed runtime source contract",
+            profile=profile_id,
+        )
+    source_id = matches[0]["id"]
+    expected_path = PROFILE_ROOT / f"{profile_id}.json"
+    loaded = load_profile(str(expected_path))
+    if loaded.path != expected_path.resolve(strict=False) or loaded.data["id"] != profile_id:
+        raise ProfileError(
+            "profile.not_curated",
+            "Profile filename and declared identifier do not match",
+            profile=profile_id,
+            path=str(loaded.path),
+        )
+    if matches[0]["sha256"] != loaded.sha256:
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Checked-in profile bytes differ from the runtime manifest source identity",
+            profile=profile_id,
+            expected=matches[0]["sha256"],
+            actual=loaded.sha256,
+        )
+
+    build_inputs_path = artifact / "provenance" / "build-inputs.json"
+    if not build_inputs_path.is_file() or build_inputs_path.is_symlink():
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Artifact build inputs are unavailable for profile admission",
+            path=str(build_inputs_path),
+        )
+    try:
+        build_inputs = json.loads(build_inputs_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Artifact build inputs could not be loaded for profile admission",
+            path=str(build_inputs_path),
+            detail=str(error),
+        ) from error
+    artifact_sources = build_inputs.get("sourceFiles") if isinstance(build_inputs, dict) else None
+    if not isinstance(artifact_sources, list):
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Artifact build inputs have no source file records",
+            path=str(build_inputs_path),
+        )
+    source_records = [
+        item
+        for item in artifact_sources
+        if isinstance(item, dict) and item.get("id") == source_id
+    ]
+    if (
+        len(source_records) != 1
+        or not isinstance(source_records[0].get("sha256"), str)
+        or not SHA256_RE.fullmatch(source_records[0]["sha256"])
+    ):
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Artifact build inputs do not contain the curated profile identity",
+            profile=profile_id,
+            sourceId=source_id,
+        )
+    if source_records[0]["sha256"] != loaded.sha256:
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Checked-in profile bytes differ from the sealed artifact source identity",
+            profile=profile_id,
+            expected=source_records[0]["sha256"],
+            actual=loaded.sha256,
+        )
+    return loaded
 
 
 def load_bindings(path: pathlib.Path | None) -> dict[str, str]:
@@ -747,17 +896,220 @@ def inspect_pe_x86_64(path: pathlib.Path, location: str) -> None:
         ) from error
 
 
-def payload_tree_identity(root: pathlib.Path) -> tuple[int, str]:
+def resolve_profile_install_root(
+    profile: dict[str, Any],
+    bindings: Mapping[str, str],
+) -> pathlib.Path:
+    install_root = pathlib.Path(
+        expand_template(profile["launch"]["installRoot"], dict(bindings), "launch.installRoot")
+    )
+    if not install_root.is_absolute():
+        raise ProfileError("path.unsafe", "Install root must resolve to an absolute path", path=str(install_root))
+    steam_bottle_value = bindings.get("STEAM_BOTTLE")
+    if not isinstance(steam_bottle_value, str) or not steam_bottle_value:
+        raise ProfileError("binding.invalid", "STEAM_BOTTLE is required for profile admission")
+    steam_bottle = pathlib.Path(steam_bottle_value)
+    if not steam_bottle.is_absolute():
+        raise ProfileError(
+            "binding.invalid",
+            "STEAM_BOTTLE must resolve to an absolute path",
+            path=str(steam_bottle),
+        )
+    reject_symlink_components(steam_bottle)
+    reject_symlink_components(install_root)
+    steam_bottle_resolved = steam_bottle.resolve(strict=False)
+    install_root_resolved = install_root.resolve(strict=False)
+    if (
+        install_root_resolved != steam_bottle_resolved
+        and steam_bottle_resolved not in install_root_resolved.parents
+    ):
+        raise ProfileError(
+            "path.unsafe",
+            "Profile install root is outside the configured Steam bottle",
+            path=str(install_root),
+            steamBottle=str(steam_bottle),
+        )
+    require_directory(install_root, "launch.installRoot")
+    return install_root
+
+
+def verify_steam_identity(
+    profile: dict[str, Any],
+    bindings: Mapping[str, str],
+) -> tuple[pathlib.Path, pathlib.Path, str]:
+    install_root = resolve_profile_install_root(profile, bindings)
+    source = profile["source"]
+    steam_bottle = pathlib.Path(bindings["STEAM_BOTTLE"])
+    manifest_path = (
+        steam_bottle
+        / "drive_c"
+        / "Program Files (x86)"
+        / "Steam"
+        / "steamapps"
+        / f"appmanifest_{source['appId']}.acf"
+    )
+    require_regular_file(manifest_path, "steam.appManifest")
+    try:
+        parsed_manifest = parse_vdf(manifest_path.read_text(errors="strict"))
+    except (OSError, UnicodeError) as error:
+        raise ProfileError(
+            "profile.not_installed",
+            "Steam app manifest could not be read",
+            path=str(manifest_path),
+            detail=str(error),
+        ) from error
+    app_state = require_object(parsed_manifest.get("AppState"), "steam.AppState")
+    expected_manifest_values = {
+        "appid": source["appId"],
+        "buildid": source["buildId"],
+        "SizeOnDisk": str(source["installedSizeBytes"]),
+        "StateFlags": "4",
+    }
+    for key, expected in expected_manifest_values.items():
+        actual = app_state.get(key)
+        if actual != expected:
+            raise ProfileError(
+                "profile.not_installed",
+                "Steam app identity does not match the profile",
+                key=key,
+                expected=expected,
+                actual=actual,
+                path=str(manifest_path),
+            )
+    installed_depots = require_object(app_state.get("InstalledDepots"), "steam.AppState.InstalledDepots")
+    for depot in source["depots"]:
+        installed = require_object(installed_depots.get(depot["id"]), f"steam.depot.{depot['id']}")
+        if installed.get("manifest") != depot["manifest"] or installed.get("size") != str(depot["sizeBytes"]):
+            raise ProfileError(
+                "profile.not_installed",
+                "Installed depot does not match the profile",
+                depot=depot["id"],
+                expected=depot,
+                actual=installed,
+            )
+    return install_root, manifest_path, sha256_file(manifest_path)
+
+
+def resolve_profile_targets(
+    profile: dict[str, Any],
+    install_root: pathlib.Path,
+    *,
+    require_stock_openvr: bool,
+) -> tuple[ResolvedProfileTarget, ...]:
+    resolved: list[ResolvedProfileTarget] = []
+    for target in ordered_targets(profile):
+        executable = resolve_under(install_root, target["executable"], f"target.{target['id']}.executable")
+        working_directory = resolve_under(
+            install_root,
+            target["workingDirectory"],
+            f"target.{target['id']}.workingDirectory",
+        )
+        openvr_directory = resolve_under(
+            install_root,
+            target["openvrDirectory"],
+            f"target.{target['id']}.openvrDirectory",
+        )
+        graphics_directory = resolve_under(
+            install_root,
+            target["graphicsDirectory"],
+            f"target.{target['id']}.graphicsDirectory",
+        )
+        require_regular_file(executable, f"target.{target['id']}.executable")
+        inspect_pe_x86_64(executable, f"target.{target['id']}.executable")
+        require_directory(working_directory, f"target.{target['id']}.workingDirectory")
+        require_directory(openvr_directory, f"target.{target['id']}.openvrDirectory")
+        require_directory(graphics_directory, f"target.{target['id']}.graphicsDirectory")
+        stock_openvr = openvr_directory / "openvr_api.dll"
+        require_regular_file(stock_openvr, f"target.{target['id']}.openvr")
+        inspect_pe_x86_64(stock_openvr, f"target.{target['id']}.openvr")
+        if require_stock_openvr:
+            actual_openvr_hash = sha256_file(stock_openvr)
+            if actual_openvr_hash != target["stockOpenvrSha256"]:
+                raise ProfileError(
+                    "preflight.hash",
+                    "Stock OpenVR hash does not match the profile",
+                    target=target["id"],
+                    expected=target["stockOpenvrSha256"],
+                    actual=actual_openvr_hash,
+                    path=str(stock_openvr),
+                )
+        resolved.append(
+            ResolvedProfileTarget(
+                id=target["id"],
+                role=target["role"],
+                executable=executable,
+                working_directory=working_directory,
+                openvr_directory=openvr_directory,
+                graphics_directory=graphics_directory,
+                stock_openvr_sha256=target["stockOpenvrSha256"],
+                process_pattern=target["processPattern"],
+            )
+        )
+    return tuple(resolved)
+
+
+def resolve_installed_profile(
+    loaded: LoadedProfile,
+    bindings: Mapping[str, str],
+) -> InstalledProfile:
+    install_root, steam_manifest, steam_manifest_sha256 = verify_steam_identity(
+        loaded.data,
+        bindings,
+    )
+    targets = resolve_profile_targets(
+        loaded.data,
+        install_root,
+        require_stock_openvr=False,
+    )
+    return InstalledProfile(
+        loaded=loaded,
+        install_root=install_root,
+        steam_manifest=steam_manifest,
+        steam_manifest_sha256=steam_manifest_sha256,
+        targets=targets,
+    )
+
+
+def payload_tree_identity(
+    root: pathlib.Path,
+    *,
+    substitutions: Mapping[str, str] | None = None,
+    excluded: set[str] | None = None,
+) -> tuple[int, str]:
+    substitution_hashes = dict(substitutions or {})
+    excluded_paths = set(excluded or set())
+    for relative, expected_digest in substitution_hashes.items():
+        require_relative_path(relative, "payload.substitutions")
+        require_sha256(expected_digest, f"payload.substitutions.{relative}")
+    for relative in excluded_paths:
+        require_relative_path(relative, "payload.excluded")
+    overlap = sorted(set(substitution_hashes) & excluded_paths)
+    if overlap:
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Projected payload paths cannot be both substituted and excluded",
+            paths=overlap,
+        )
     relative_files: list[str] = []
     for path in root.rglob("*"):
         if path.is_symlink():
             raise ProfileError("path.symlink", "Payload contains a symlink", path=str(path))
         if path.is_file():
-            relative_files.append(path.relative_to(root).as_posix())
+            relative = path.relative_to(root).as_posix()
+            if relative not in excluded_paths:
+                relative_files.append(relative)
     relative_files.sort()
+    missing_substitutions = sorted(set(substitution_hashes) - set(relative_files))
+    if missing_substitutions:
+        raise ProfileError(
+            "profile.artifact_mismatch",
+            "Projected payload substitution target is absent",
+            paths=missing_substitutions,
+        )
     digest = hashlib.sha256()
     for relative in relative_files:
-        digest.update(f"{sha256_file(root / relative)}  {relative}\n".encode())
+        file_hash = substitution_hashes.get(relative) or sha256_file(root / relative)
+        digest.update(f"{file_hash}  {relative}\n".encode())
     return len(relative_files), digest.hexdigest()
 
 
@@ -1221,7 +1573,10 @@ def command_self_test(_: argparse.Namespace) -> int:
         raise ProfileError("self-test.failed", "VDF parser fixture failed")
     results.append({"case": "vdf-parser", "passed": True})
 
-    with tempfile.TemporaryDirectory() as temporary_directory:
+    fixture_root = os.environ.get("RUNTIME_FIXTURE_ROOT")
+    if fixture_root is None and pathlib.Path("/private/tmp").is_dir():
+        fixture_root = "/private/tmp"
+    with tempfile.TemporaryDirectory(dir=fixture_root) as temporary_directory:
         path = pathlib.Path(temporary_directory) / "profile.json"
         path.write_bytes(canonical_json_bytes(source_profile))
         loaded = load_profile(str(path))

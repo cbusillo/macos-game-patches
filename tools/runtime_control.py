@@ -40,7 +40,8 @@ LEGACY_LIVE_STATES = frozenset({"waiting", "connected", "streaming", "recovering
 LIVE_STATES = frozenset({"idle", *LEGACY_LIVE_STATES})
 CHECK_STATUSES = frozenset({"pass", "fail", "unknown"})
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-SUPERVISOR_STOP_TIMEOUT_SECONDS = 1.0
+PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SUPERVISOR_STOP_TIMEOUT_SECONDS = 10.0
 SUPERVISOR_CLEANUP_ATTEMPTS = 50
 SUPERVISOR_CLEANUP_INTERVAL_SECONDS = 0.1
 
@@ -1155,6 +1156,121 @@ def process_start_time(pid: int, runner: CommandRunner) -> tuple[str | None, str
     return started_at, None
 
 
+def process_group_id(pid: int, runner: CommandRunner) -> tuple[int | None, str | None]:
+    result = runner.run(
+        ["/usr/bin/env", "LC_ALL=C", "/bin/ps", "-p", str(pid), "-o", "pgid="],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        return None, "Process group identity could not be read"
+    value = result.stdout.strip()
+    if not value.isdigit() or int(value) <= 0:
+        return None, "Process group identity is missing"
+    return int(value), None
+
+
+def process_command(pid: int, runner: CommandRunner) -> tuple[str | None, str | None]:
+    result = runner.run(
+        ["/usr/bin/env", "LC_ALL=C", "/bin/ps", "-p", str(pid), "-o", "command="],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        return None, "Process command could not be read"
+    command = result.stdout.strip()
+    if not command:
+        return None, "Process command is missing"
+    return command, None
+
+
+def process_group_members(process_group: int, runner: CommandRunner) -> tuple[list[int] | None, str | None]:
+    result = runner.run(
+        ["/usr/bin/env", "LC_ALL=C", "/bin/ps", "-axo", "pid=,pgid=,stat="],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        return None, "Process group membership could not be read"
+    members: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 3:
+            continue
+        try:
+            pid = int(fields[0])
+            group_id = int(fields[1])
+        except ValueError:
+            continue
+        if group_id == process_group and not fields[2].startswith("Z"):
+            members.append(pid)
+    return sorted(set(members)), None
+
+
+def validate_recorded_producer(
+    record: dict[str, Any],
+    runner: CommandRunner,
+) -> tuple[bool, str | None, str | None]:
+    if record.get("schemaVersion") != 3 or not isinstance(record.get("producer"), dict):
+        return True, None, None
+    producer = record["producer"]
+    members, member_error = process_group_members(producer["processGroupId"], runner)
+    if members is None:
+        return False, "producer.identity_unavailable", member_error
+    if producer["status"] == "quiesced":
+        if members:
+            return (
+                False,
+                "producer.quiesce_failed",
+                "Recorded producer process group remains live after quiescence",
+            )
+        return True, None, None
+    launcher_started_at, launcher_error = process_start_time(producer["launcherPid"], runner)
+    launcher_group, group_error = process_group_id(producer["launcherPid"], runner)
+    if (
+        launcher_started_at != producer["launcherStartedAt"]
+        or launcher_group != producer["processGroupId"]
+        or producer["launcherPid"] not in members
+    ):
+        return (
+            False,
+            "producer.identity_changed",
+            launcher_error or group_error or "Producer launcher identity does not match control state",
+        )
+    if producer["status"] == "starting":
+        return True, None, None
+    target_pid = producer["targetPid"]
+    if not isinstance(target_pid, int) or isinstance(target_pid, bool):
+        return False, "producer.identity_changed", "Ready producer target identity is missing"
+    target_started_at, target_error = process_start_time(target_pid, runner)
+    target_group, target_group_error = process_group_id(target_pid, runner)
+    target_command, command_error = process_command(target_pid, runner)
+    expected_name = pathlib.Path(producer["targetExecutable"]).name.casefold()
+    if (
+        target_started_at != producer["targetStartedAt"]
+        or target_group != producer["processGroupId"]
+        or target_pid not in members
+        or target_command is None
+        or expected_name not in target_command.casefold()
+    ):
+        return (
+            False,
+            "producer.identity_changed",
+            target_error
+            or target_group_error
+            or command_error
+            or "Ready producer target identity does not match control state",
+        )
+    return True, None, None
+
+
+def recorded_producer_group_present(
+    record: dict[str, Any],
+    runner: CommandRunner,
+) -> tuple[bool | None, str | None]:
+    if record.get("schemaVersion") != 3 or not isinstance(record.get("producer"), dict):
+        return False, None
+    members, error = process_group_members(record["producer"]["processGroupId"], runner)
+    return (None, error) if members is None else (bool(members), None)
+
+
 def validate_bridge_owner_marker(paths: RuntimePaths) -> tuple[bool, str | None]:
     try:
         metadata = paths.bridge_owner_marker.lstat()
@@ -1328,11 +1444,12 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             message="Control state must be a JSON object",
         )
     schema_version = record.get("schemaVersion")
+    run_dir: pathlib.Path | None = None
     if schema_version == 1:
         required = common_required
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LEGACY_LIVE_STATES
-    elif schema_version == 2:
+    elif schema_version in {2, 3}:
         required = common_required | {
             "runDir",
             "controlSocket",
@@ -1340,6 +1457,8 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             "bridgeExecutableSha256",
             "serviceRuns",
         }
+        if schema_version == 3:
+            required |= {"profile", "producer"}
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LIVE_STATES
     else:
@@ -1383,7 +1502,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             for value in record["bridgeIdentity"]["cdHashes"]
         )
     )
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         run_dir = pathlib.Path(record["runDir"]) if isinstance(record["runDir"], str) else None
         control_socket = (
             pathlib.Path(record["controlSocket"])
@@ -1415,6 +1534,90 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             and not isinstance(record["serviceRuns"], bool)
             and record["serviceRuns"] == 1
         )
+    if schema_version == 3:
+        profile = record.get("profile")
+        producer = record.get("producer")
+        profile_valid = (
+            isinstance(profile, dict)
+            and set(profile) == {"id", "sha256", "appId", "buildId", "entrypointTarget"}
+            and isinstance(profile["id"], str)
+            and PROFILE_ID_PATTERN.fullmatch(profile["id"]) is not None
+            and isinstance(profile["sha256"], str)
+            and SHA256_PATTERN.fullmatch(profile["sha256"]) is not None
+            and isinstance(profile["appId"], str)
+            and profile["appId"].isdigit()
+            and isinstance(profile["buildId"], str)
+            and profile["buildId"].isdigit()
+            and isinstance(profile["entrypointTarget"], str)
+            and PROFILE_ID_PATTERN.fullmatch(profile["entrypointTarget"]) is not None
+        )
+        producer_valid = False
+        if isinstance(producer, dict) and set(producer) == {
+            "status",
+            "launcherPid",
+            "launcherStartedAt",
+            "processGroupId",
+            "targetId",
+            "targetPid",
+            "targetStartedAt",
+            "targetExecutable",
+            "log",
+        }:
+            target_pid = producer["targetPid"]
+            target_started_at = producer["targetStartedAt"]
+            target_pair_valid = (
+                target_pid is None and target_started_at is None
+            ) or (
+                isinstance(target_pid, int)
+                and not isinstance(target_pid, bool)
+                and target_pid > 0
+                and isinstance(target_started_at, str)
+                and bool(target_started_at)
+            )
+            producer_log = pathlib.Path(producer["log"]) if isinstance(producer["log"], str) else None
+            target_executable = (
+                pathlib.Path(producer["targetExecutable"])
+                if isinstance(producer["targetExecutable"], str)
+                else None
+            )
+            log_under_run_dir = False
+            if run_dir is not None and producer_log is not None:
+                try:
+                    log_under_run_dir = (
+                        producer_log.is_absolute()
+                        and producer_log != run_dir
+                        and os.path.commonpath([str(run_dir), str(producer_log)]) == str(run_dir)
+                    )
+                except ValueError:
+                    log_under_run_dir = False
+            producer_valid = (
+                producer["status"] in {"starting", "ready", "quiesced"}
+                and isinstance(producer["launcherPid"], int)
+                and not isinstance(producer["launcherPid"], bool)
+                and producer["launcherPid"] > 0
+                and isinstance(producer["launcherStartedAt"], str)
+                and bool(producer["launcherStartedAt"])
+                and isinstance(producer["processGroupId"], int)
+                and not isinstance(producer["processGroupId"], bool)
+                and producer["processGroupId"] > 0
+                and producer["processGroupId"] == producer["launcherPid"]
+                and isinstance(producer["targetId"], str)
+                and PROFILE_ID_PATTERN.fullmatch(producer["targetId"]) is not None
+                and target_pair_valid
+                and target_executable is not None
+                and target_executable.is_absolute()
+                and producer_log is not None
+                and log_under_run_dir
+                and (
+                    (producer["status"] == "starting" and record["state"] == "idle" and target_pid is None)
+                    or (producer["status"] == "ready" and record["state"] == "waiting" and target_pid is not None)
+                    or (producer["status"] == "quiesced" and record["state"] == "idle")
+                )
+            )
+        identities_consistent = False
+        if profile_valid and producer_valid and isinstance(profile, dict) and isinstance(producer, dict):
+            identities_consistent = producer["targetId"] == profile["entrypointTarget"]
+        valid = valid and identities_consistent
     if not valid:
         return ControlStateInspection(
             True,
@@ -1426,7 +1629,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
 
 
 def validate_control_socket(record: dict[str, Any]) -> tuple[pathlib.Path | None, str | None]:
-    if record.get("schemaVersion") != 2:
+    if record.get("schemaVersion") not in {2, 3}:
         return None, "Live control state does not expose a supervisor control socket"
     socket_value = record.get("controlSocket")
     run_dir_value = record.get("runDir")
@@ -1507,13 +1710,25 @@ def request_supervisor_command(
         )
     except (UnicodeDecodeError, json.JSONDecodeError, artifact_contract.ArtifactError) as error:
         return False, f"Supervisor stop response is invalid: {error}"
-    if not isinstance(response, dict) or response != {
+    if isinstance(response, dict) and response == {
         "schemaVersion": 1,
         "ok": True,
         "generation": record["generation"],
     }:
-        return False, "Supervisor stop response does not match the live generation"
-    return True, None
+        return True, None
+    if (
+        isinstance(response, dict)
+        and response.get("schemaVersion") == 1
+        and response.get("ok") is False
+        and response.get("generation") == record["generation"]
+        and set(response) == {"schemaVersion", "ok", "generation", "error"}
+        and isinstance(response.get("error"), dict)
+        and set(response["error"]) == {"code", "message"}
+        and isinstance(response["error"].get("code"), str)
+        and isinstance(response["error"].get("message"), str)
+    ):
+        return False, f"{response['error']['code']}: {response['error']['message']}"
+    return False, "Supervisor stop response does not match the live generation"
 
 
 def request_supervisor_ping(record: dict[str, Any]) -> tuple[bool, str | None]:
@@ -1704,7 +1919,7 @@ def status_runtime(
                 lock,
                 control_state,
             )
-        if record["schemaVersion"] == 2:
+        if record["schemaVersion"] in {2, 3}:
             run_dir = pathlib.Path(record["runDir"])
             if (
                 run_dir.parent != paths.state_root
@@ -1755,6 +1970,18 @@ def status_runtime(
                 return failed_status(
                     "owner.unresponsive",
                     response_error or "Live supervisor did not answer its identity-bound ping",
+                    service,
+                    lock,
+                    control_state,
+                )
+            producer_valid, producer_code, producer_error = validate_recorded_producer(
+                record,
+                context.runner,
+            )
+            if not producer_valid:
+                return failed_status(
+                    producer_code or "producer.identity_changed",
+                    producer_error or "Recorded producer identity is not live and exact",
                     service,
                     lock,
                     control_state,
@@ -2008,7 +2235,7 @@ def validate_recorded_content(
     if not control_state.valid or control_state.record is None:
         return True, None
     record = control_state.record
-    if record.get("schemaVersion") != 2:
+    if record.get("schemaVersion") not in {2, 3}:
         return True, None
     try:
         if path_lexists(paths.launch_agent_plist):
@@ -2091,7 +2318,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
         lock.alive
         and lock.pid is not None
         and initial_record is not None
-        and initial_record.get("schemaVersion") == 2
+        and initial_record.get("schemaVersion") in {2, 3}
         and initial_record.get("ownerPid") == lock.pid
     ):
         actual_started_at, _ = process_start_time(lock.pid, context.runner)
@@ -2128,7 +2355,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
                 not live_status.ok
                 or live_status.state not in LIVE_STATES
                 or record is None
-                or record.get("schemaVersion") != 2
+                or record.get("schemaVersion") not in {2, 3}
             ):
                 return stop_failure(
                     "owner.unresponsive",
@@ -2140,8 +2367,14 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             requester = context.stop_requester or request_supervisor_stop
             requested, request_error = requester(record)
             if not requested:
+                request_code = (
+                    request_error.split(":", 1)[0]
+                    if isinstance(request_error, str)
+                    and request_error.startswith("producer.")
+                    else "owner.unresponsive"
+                )
                 return stop_failure(
-                    "owner.unresponsive",
+                    request_code,
                     request_error or "Live runtime owner did not accept the stop request",
                     actions,
                     service,
@@ -2150,6 +2383,40 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             supervisor_stop_requested = True
             supervisor_run_dir = pathlib.Path(record["runDir"])
             actions.append(f"request supervisor stop generation={record['generation']}")
+        elif (
+            initial_record is not None
+            and initial_record.get("schemaVersion") == 3
+            and isinstance(initial_record.get("producer"), dict)
+        ):
+            producer_present, producer_error = recorded_producer_group_present(
+                initial_record,
+                context.runner,
+            )
+            if producer_present is None:
+                return stop_failure(
+                    "producer.identity_unavailable",
+                    producer_error or "Stale producer process group could not be inspected",
+                    actions,
+                    service,
+                    lock,
+                )
+            if producer_present:
+                producer_status = initial_record["producer"].get("status")
+                return stop_failure(
+                    (
+                        "producer.quiesce_failed"
+                        if producer_status == "quiesced"
+                        else "producer.orphaned"
+                    ),
+                    (
+                        "Quiesced producer process group became live again; preserving state"
+                        if producer_status == "quiesced"
+                        else "Dead runtime owner left a producer process group; refusing cached-state signaling"
+                    ),
+                    actions,
+                    service,
+                    lock,
+                )
         result = context.runner.run(
             ["/bin/launchctl", "bootout", paths.service_domain, registered_path],
             timeout=10.0,
@@ -2244,7 +2511,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     stale_run_dir: pathlib.Path | None = None
     if control_state.valid and control_state.record is not None:
         record = control_state.record
-        if record.get("schemaVersion") == 2 and isinstance(record.get("controlSocket"), str):
+        if record.get("schemaVersion") in {2, 3} and isinstance(record.get("controlSocket"), str):
             run_dir = pathlib.Path(record["runDir"])
             if run_dir.parent != paths.state_root:
                 return stop_failure(

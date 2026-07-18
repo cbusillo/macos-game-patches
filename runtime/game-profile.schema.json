@@ -167,10 +167,12 @@
           "type": "string"
         },
         "startupTimeoutSeconds": {
+          "maximum": 600,
           "minimum": 1,
           "type": "integer"
         },
         "transitionTimeoutSeconds": {
+          "maximum": 600,
           "minimum": 1,
           "type": "integer"
         }

@@ -59,6 +59,7 @@ class LifecycleRunner:
         self.live_program: pathlib.Path | None = None
         self.extra_text_paths: list[pathlib.Path] = []
         self.owner_start_time = "Sat Jul 18 03:00:00 2026"
+        self.processes: dict[int, dict[str, object]] = {}
         self.codesign_error = False
         self.query_error: CommandResult | None = None
         self.bootout_returncode = 0
@@ -104,7 +105,26 @@ class LifecycleRunner:
                 ),
             )
         if command[:3] == ("/usr/bin/env", "LC_ALL=C", "/bin/ps"):
-            return CommandResult(command, 0, stdout=f"{self.owner_start_time}\n")
+            if "-axo" in command and "pid=,pgid=,stat=" in command:
+                output = "".join(
+                    f"{pid} {record['pgid']} {record.get('stat', 'S')}\n"
+                    for pid, record in sorted(self.processes.items())
+                )
+                return CommandResult(command, 0, stdout=output)
+            pid = int(command[command.index("-p") + 1])
+            process = self.processes.get(pid)
+            if "lstart=" in command:
+                started_at = process["startedAt"] if process is not None else self.owner_start_time
+                return CommandResult(command, 0, stdout=f"{started_at}\n")
+            if "pgid=" in command:
+                if process is None:
+                    return CommandResult(command, 1)
+                return CommandResult(command, 0, stdout=f"{process['pgid']}\n")
+            if "command=" in command:
+                if process is None:
+                    return CommandResult(command, 1)
+                return CommandResult(command, 0, stdout=f"{process['command']}\n")
+            return CommandResult(command, 1)
         return CommandResult(command, 0)
 
 
@@ -195,8 +215,8 @@ class CliTests(unittest.TestCase):
     def test_start_json_contract_is_machine_readable(self) -> None:
         report = runtime_cli.StartReport(
             True,
-            "idle",
-            "runtime.idle",
+            "waiting",
+            "runtime.waiting",
             "fixture supervisor ready",
             {"sealId": "a" * 64},
             7,
@@ -209,12 +229,19 @@ class CliTests(unittest.TestCase):
             stdout
         ):
             exit_code = runtime_cli.main(
-                ["start", "--artifact", "/tmp/artifact", "--json"]
+                [
+                    "start",
+                    "--artifact",
+                    "/tmp/artifact",
+                    "--profile",
+                    "freedom-locomotion",
+                    "--json",
+                ]
             )
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["state"], "idle")
+        self.assertEqual(payload["state"], "waiting")
 
 
 class LifecycleTests(unittest.TestCase):
@@ -287,6 +314,8 @@ class LifecycleTests(unittest.TestCase):
         owner_pid: int = 2000,
         schema_version: int = 1,
         run_dir: pathlib.Path | None = None,
+        producer_status: str = "ready",
+        producer_live: bool = True,
     ) -> dict[str, object]:
         self.paths.state_root.mkdir(parents=True, exist_ok=True)
         record: dict[str, object] = {
@@ -305,7 +334,7 @@ class LifecycleTests(unittest.TestCase):
                 "cdHashes": ["0123456789abcdef0123456789abcdef01234567"],
             },
         }
-        if schema_version == 2:
+        if schema_version in {2, 3}:
             assert run_dir is not None
             record.update(
                 {
@@ -318,6 +347,45 @@ class LifecycleTests(unittest.TestCase):
                     "serviceRuns": 1,
                 }
             )
+        if schema_version == 3:
+            assert run_dir is not None
+            launcher_pid = 5001
+            target_pid = 5002 if producer_status == "ready" else None
+            target_started_at = "Sat Jul 18 03:00:02 2026" if target_pid is not None else None
+            record.update(
+                {
+                    "profile": {
+                        "id": "freedom-locomotion",
+                        "sha256": "b" * 64,
+                        "appId": "584170",
+                        "buildId": "1797135",
+                        "entrypointTarget": "game",
+                    },
+                    "producer": {
+                        "status": producer_status,
+                        "launcherPid": launcher_pid,
+                        "launcherStartedAt": "Sat Jul 18 03:00:01 2026",
+                        "processGroupId": launcher_pid,
+                        "targetId": "game",
+                        "targetPid": target_pid,
+                        "targetStartedAt": target_started_at,
+                        "targetExecutable": str(self.root / "game/FreedomLocomotion.exe"),
+                        "log": str(run_dir / "producer.log"),
+                    },
+                }
+            )
+            if producer_live:
+                self.runner.processes[launcher_pid] = {
+                    "startedAt": "Sat Jul 18 03:00:01 2026",
+                    "pgid": launcher_pid,
+                    "command": "cxstart --wait-children FreedomLocomotion.exe",
+                }
+                if target_pid is not None:
+                    self.runner.processes[target_pid] = {
+                        "startedAt": target_started_at,
+                        "pgid": launcher_pid,
+                        "command": "FreedomLocomotion.exe",
+                    }
         self.paths.state_path.write_text(json.dumps(record))
         return record
 
@@ -667,6 +735,165 @@ class LifecycleTests(unittest.TestCase):
             skipped_verify.assert_not_called()
         finally:
             control_socket.close()
+
+    def test_schema_three_waiting_validates_exact_producer_identity(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="waiting",
+                owner_pid=2000,
+                schema_version=3,
+                run_dir=run_dir,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            waiting = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(waiting.state, "waiting")
+
+            self.runner.processes[5002]["startedAt"] = "Sat Jul 18 04:00:02 2026"
+            changed = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(changed.state, "failed")
+            self.assertEqual(changed.reason_code, "producer.identity_changed")
+        finally:
+            control_socket.close()
+
+    def test_schema_three_quiesced_state_requires_empty_producer_group(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=3,
+                run_dir=run_dir,
+                producer_status="quiesced",
+                producer_live=False,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            status = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(status.state, "idle")
+            self.assertEqual(status.reason_code, "runtime.idle")
+        finally:
+            control_socket.close()
+
+    def test_schema_three_quiesced_state_ignores_reaped_zombies(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=3,
+                run_dir=run_dir,
+                producer_status="quiesced",
+            )
+            for process in self.runner.processes.values():
+                process["stat"] = "Z"
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            status = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(status.state, "idle")
+        finally:
+            control_socket.close()
+
+    def test_schema_three_stop_propagates_producer_quiesce_failure(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        record = self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=3,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        self.context.stop_requester = lambda _: (
+            False,
+            "producer.quiesce_failed: fixture producer remained live",
+        )
+        live_status = StatusReport(
+            "waiting",
+            "runtime.waiting",
+            "fixture live runtime",
+            {"sealId": "a" * 64},
+            {},
+            {},
+            {"record": record},
+        )
+        with mock.patch("runtime_control.status_runtime", return_value=live_status):
+            stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.quiesce_failed")
+        self.assertIsNotNone(self.runner.service_output)
+        self.assertTrue(self.paths.state_path.exists())
+
+    def test_dead_schema_three_owner_preserves_orphaned_producer_group(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=3,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertIsNotNone(self.runner.service_output)
+        self.assertTrue(self.paths.state_path.exists())
+
+    def test_dead_schema_three_owner_cleans_when_producer_group_is_absent(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=3,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertFalse(self.paths.state_path.exists())
+        self.assertFalse(self.paths.lock_path.exists())
+        self.assertFalse(run_dir.exists())
 
     def test_stop_requests_synchronized_supervisor_cleanup(self) -> None:
         self.create_bridge()

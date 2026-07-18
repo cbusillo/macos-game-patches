@@ -437,26 +437,31 @@ def patched_lifecycle(
 
 
 class RuntimeInstallTests(unittest.TestCase):
-    def test_live_schema_two_supervisor_stops_before_global_lock(self) -> None:
-        with lifecycle_fixture() as fixture:
-            live = StatusReport(
-                "idle",
-                "runtime.idle",
-                "fixture supervisor is live",
-                {"sealId": "a" * 64},
-                {"present": True},
-                {"alive": True},
-                {"record": {"schemaVersion": 2}},
-            )
-            with patched_lifecycle(fixture) as (context, _, stop_mock), mock.patch.object(
-                runtime_install,
-                "status_runtime",
-                return_value=live,
-            ):
-                report = runtime_install.install_runtime(context, fixture.artifact_root)
-            self.assertTrue(report.ok)
-            self.assertGreaterEqual(stop_mock.call_count, 2)
-            self.assertEqual(report.stop_actions.count("already-stopped"), 2)
+    def test_live_supervisor_stops_before_both_lifecycle_directions(self) -> None:
+        for schema_version in (2, 3):
+            with self.subTest(schema_version=schema_version), lifecycle_fixture() as fixture:
+                state = "idle" if schema_version == 2 else "waiting"
+                live = StatusReport(
+                    state,
+                    f"runtime.{state}",
+                    "fixture supervisor is live",
+                    {"sealId": "a" * 64},
+                    {"present": True},
+                    {"alive": True},
+                    {"record": {"schemaVersion": schema_version}},
+                )
+                with patched_lifecycle(fixture) as (context, _, stop_mock), mock.patch.object(
+                    runtime_install,
+                    "status_runtime",
+                    return_value=live,
+                ):
+                    install = runtime_install.install_runtime(context, fixture.artifact_root)
+                    uninstall = runtime_install.uninstall_runtime(context, fixture.artifact_root)
+                self.assertTrue(install.ok)
+                self.assertTrue(uninstall.ok)
+                self.assertGreaterEqual(stop_mock.call_count, 4)
+                self.assertEqual(install.stop_actions.count("already-stopped"), 2)
+                self.assertEqual(uninstall.stop_actions.count("already-stopped"), 2)
 
     def test_sealing_gate_has_zero_lifecycle_mutation(self) -> None:
         with lifecycle_fixture() as fixture:

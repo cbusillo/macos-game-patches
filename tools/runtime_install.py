@@ -1314,7 +1314,7 @@ def _mutate_runtime(
             live_status.ok
             and live_status.state in LIVE_STATES
             and isinstance(live_record, dict)
-            and live_record.get("schemaVersion") == 2
+            and live_record.get("schemaVersion") in {2, 3}
         ):
             pre_lock_stop = stop_runtime(context)
             stop_actions = pre_lock_stop.actions
