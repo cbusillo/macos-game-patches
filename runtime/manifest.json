@@ -16,7 +16,7 @@
     "description": "Deterministic payload with a separate Developer ID final-sealing phase for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev7"
+    "version": "1.0.0-dev8"
   },
   "artifacts": [
     {
@@ -192,12 +192,6 @@
     {
       "default": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR/Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_2/Win64",
       "name": "FREEDOM_OPENVR_DIR",
-      "phases": ["plan"],
-      "required": true
-    },
-    {
-      "default": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app",
-      "name": "NATIVE_BRIDGE_BUNDLE",
       "phases": ["plan"],
       "required": true
     },
@@ -438,17 +432,19 @@
       "action": "assert_absent_or_owned",
       "id": "verify_native_bridge_owned",
       "marker": "Contents/Resources/runtime-owner.json",
+      "ownershipPolicy": "developer-id-bundle",
       "resource": "native_bridge_bundle",
       "source": "payload/macos/ALVRMacOSBridge.app",
-      "target": "${NATIVE_BRIDGE_BUNDLE}"
+      "target": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app"
     },
     {
       "action": "replace_tree",
       "atomic": true,
       "id": "install_native_bridge_bundle",
+      "retainOnUninstall": true,
       "resource": "native_bridge_bundle",
       "source": "payload/macos/ALVRMacOSBridge.app",
-      "target": "${NATIVE_BRIDGE_BUNDLE}"
+      "target": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app"
     },
     {
       "action": "assert_absent",
@@ -556,7 +552,7 @@
       "id": "bridge_bundle",
       "kind": "directory",
       "lifecycle": "retained",
-      "location": "${NATIVE_BRIDGE_BUNDLE}",
+      "location": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app",
       "owner": "runtime"
     },
     {
@@ -591,7 +587,7 @@
       "id": "launch_services_registration",
       "kind": "launch-services",
       "lifecycle": "retained",
-      "location": "${NATIVE_BRIDGE_BUNDLE}",
+      "location": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app",
       "owner": "shared"
     },
     {
@@ -755,7 +751,7 @@
     {
       "id": "scope_record",
       "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
-      "sha256": "6b48c46d69c6733dbf9d67aa896a279d64f25f050f009ff229d9e83478e2bd38",
+      "sha256": "083ba8780d116ded3e678a3a64387df4776a264b2dcc5218ed56d905151637f3",
       "supplyClass": "repo-source"
     },
     {
@@ -851,31 +847,31 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "1971048a8950814d063aed109099b60eca8a4ec210f90aec0ef4719149ccabae",
+      "sha256": "0d71687eb57714838b804b501133e085a72d98ffa77504fb33aa0c2a8e15d27e",
       "supplyClass": "repo-source"
     },
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "521c810897b2e867ba8bebe55e9aee3b84e7379e417936e6b9e2298d656c4265",
+      "sha256": "ec0e022aa4a4ca19f3f3c4b8150eed0da59fb0341818b0eeec992582c8bba503",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_descriptor",
       "path": "${REPO_ROOT}/tools/runtime_descriptor.py",
-      "sha256": "c9b089781a971a41f5de77617ed21a4e7ca81ea4c5c10cc3d736856ec19715e2",
+      "sha256": "b9d4f753ea1ffe49d617067ceec05c9d0e697bc581941ef8f014b92991141fed",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_transaction",
       "path": "${REPO_ROOT}/tools/runtime_transaction.py",
-      "sha256": "579a7380cbf941a566a9fdca3d1853958440bfff3a8ab6a8ead22f379a857bab",
+      "sha256": "2bcd6251faae7bb1bd809db1c3ebfa02f6fb9afc75318f7524eed82a8d6192d1",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "e512c61a3387e7f28eeae0bf911e3edda8a2929a2c814c2e19386be1ab0efefc",
+      "sha256": "1e94719a0bb681dfb39694d80a4409480506b8af0ad3173f29430f60fefb1c0c",
       "supplyClass": "repo-source"
     },
     {
@@ -946,12 +942,12 @@
       "target": "${FREEDOM_GAME_DIR}/dxgi.dll"
     },
     {
-      "action": "remove_tree",
-      "id": "remove_native_bridge_bundle",
+      "action": "retain_tree",
+      "id": "retain_native_bridge_bundle",
       "marker": "Contents/Resources/runtime-owner.json",
       "resource": "native_bridge_bundle",
       "source": "payload/macos/ALVRMacOSBridge.app",
-      "target": "${NATIVE_BRIDGE_BUNDLE}"
+      "target": "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app"
     },
     {
       "action": "remove",

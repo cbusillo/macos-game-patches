@@ -97,6 +97,7 @@ class FixtureLayout:
         *,
         failure_injector: Any = None,
         journal_path: pathlib.Path | None = None,
+        tree_ownership_validator: runtime_transaction.TreeOwnershipValidator | None = None,
     ) -> TransactionExecutor:
         return TransactionExecutor(
             kind=kind,  # type: ignore[arg-type]
@@ -106,6 +107,7 @@ class FixtureLayout:
             transaction_root=self.transaction_root,
             allowed_roots=[self.target_root],
             failure_injector=failure_injector,
+            tree_ownership_validator=tree_ownership_validator,
         )
 
     def transaction_temporary_paths(self) -> list[pathlib.Path]:
@@ -330,6 +332,49 @@ class FixtureLayout:
         ]
         return operations, target_tree
 
+    def prepare_managed_tree_replace(
+        self,
+    ) -> tuple[list[dict[str, Any]], pathlib.Path, dict[str, tuple[str, int, bytes | str | None]]]:
+        source_tree = self.tree(
+            self.artifact_root / "payload/Managed.app",
+            data_payload=b"current managed tree",
+        )
+        target_tree = self.tree(
+            self.target_root / "Managed.app",
+            data_payload=b"prior managed tree",
+        )
+        marker_sha256 = artifact_contract.sha256_file(source_tree / MARKER)
+        source_tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
+        target_tree_sha256 = artifact_contract.canonical_tree_sha256(target_tree)
+        operations: list[dict[str, Any]] = [
+            {
+                "id": "assert_managed_tree_owned",
+                "resource": "managed_tree",
+                "action": "assert_absent_or_owned",
+                "source": str(source_tree),
+                "sourceTreeSha256": source_tree_sha256,
+                "marker": MARKER,
+                "sourceMarkerSha256": marker_sha256,
+                "target": str(target_tree),
+                "ownershipPolicy": "developer-id-bundle",
+                "qualifiedTargetTreeSha256": target_tree_sha256,
+                "ownershipEvidence": {"kind": "developer-id"},
+                "ready": True,
+            },
+            {
+                "id": "replace_managed_tree",
+                "resource": "managed_tree",
+                "action": "replace_tree",
+                "atomic": True,
+                "retainOnUninstall": True,
+                "source": str(source_tree),
+                "sourceTreeSha256": source_tree_sha256,
+                "target": str(target_tree),
+                "ready": True,
+            },
+        ]
+        return operations, target_tree, snapshot_tree(target_tree)
+
 
 @contextlib.contextmanager
 def fixture_layout() -> Iterator[FixtureLayout]:
@@ -439,7 +484,11 @@ class TransactionTests(unittest.TestCase):
                     race_operations,
                     failure_injector=replace_before_intent,
                 ).execute()
-            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            self.assertEqual(
+                raised.exception.code,
+                "transaction.rolled_back",
+                raised.exception.context,
+            )
             self.assertEqual(restore_target.read_bytes(), b"foreign")
             recovered = fixture.executor("uninstall", race_operations).recover()
             self.assertEqual(recovered.state, "rolled-back")
@@ -1390,6 +1439,328 @@ class TransactionTests(unittest.TestCase):
             failed = json.loads(fixture.journal_path.read_text())
             self.assertEqual(failed["state"], "failed")
             self.assertTrue(moved_tree.is_dir())
+
+    def test_developer_id_prior_tree_requires_validation_and_updates(self) -> None:
+        with fixture_layout() as fixture:
+            operations, target_tree, _ = fixture.prepare_managed_tree_replace()
+            with self.assertRaises(TransactionError) as unqualified:
+                fixture.executor("install", operations).validate()
+            self.assertEqual(unqualified.exception.code, "transaction.target_foreign")
+
+            validations: list[pathlib.Path] = []
+
+            def validate_bundle(
+                path: pathlib.Path,
+                _operation: dict[str, Any],
+            ) -> dict[str, Any]:
+                validations.append(path)
+                return {"kind": "developer-id"}
+
+            report = fixture.executor(
+                "install",
+                operations,
+                tree_ownership_validator=validate_bundle,
+            ).execute()
+            self.assertTrue(report.ok)
+            self.assertGreaterEqual(len(validations), 2)
+            source = pathlib.Path(operations[1]["source"])
+            self.assertEqual(
+                artifact_contract.canonical_tree_sha256(target_tree),
+                artifact_contract.canonical_tree_sha256(source),
+            )
+
+    def test_developer_id_prior_tree_rolls_back_exactly(self) -> None:
+        with fixture_layout() as fixture:
+            operations, target_tree, prior_snapshot = fixture.prepare_managed_tree_replace()
+            tail_source = fixture.artifact_file("payload/tail.bin", b"tail payload")
+            tail_target = fixture.target_root / "tail.bin"
+            operations.extend(
+                [
+                    {
+                        "id": "assert_tail_absent",
+                        "resource": "tail",
+                        "action": "assert_absent",
+                        "target": str(tail_target),
+                        "ready": True,
+                    },
+                    {
+                        "id": "create_tail",
+                        "resource": "tail",
+                        "action": "create_file",
+                        "atomic": True,
+                        "source": str(tail_source),
+                        "sourceSha256": artifact_contract.sha256_file(tail_source),
+                        "target": str(tail_target),
+                        "ready": True,
+                    },
+                ]
+            )
+
+            def fail_after_tail(step_id: str, phase: str) -> None:
+                if step_id == "create_tail" and phase == "after-mutation":
+                    raise RuntimeError("force exact prior-tree rollback")
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=fail_after_tail,
+                    tree_ownership_validator=lambda _path, _operation: {
+                        "kind": "developer-id"
+                    },
+                ).execute()
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+            self.assertFalse(tail_target.exists())
+
+    def test_developer_id_exchange_crashes_keep_the_stable_target_present(self) -> None:
+        with fixture_layout() as fixture:
+            operations, target_tree, prior_snapshot = fixture.prepare_managed_tree_replace()
+            source_tree = pathlib.Path(operations[1]["source"])
+
+            def crash_after_exchange(step_id: str, phase: str) -> None:
+                if step_id == "replace_managed_tree" and phase == "after-tree-exchanged":
+                    self.assertTrue(target_tree.is_dir())
+                    self.assertEqual(
+                        artifact_contract.canonical_tree_sha256(target_tree),
+                        artifact_contract.canonical_tree_sha256(source_tree),
+                    )
+                    raise SimulatedCrash("crash after stable tree exchange")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_after_exchange,
+                    tree_ownership_validator=lambda _path, _operation: {
+                        "kind": "developer-id"
+                    },
+                ).execute()
+            self.assertTrue(target_tree.is_dir())
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["steps"][1]["undo"]["phase"], "staged")
+
+            recovered = fixture.executor(
+                "install",
+                operations,
+                tree_ownership_validator=lambda _path, _operation: {
+                    "kind": "developer-id"
+                },
+            ).recover()
+            self.assertEqual(recovered.state, "rolled-back")
+            self.assertTrue(target_tree.is_dir())
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+
+        with fixture_layout() as fixture:
+            operations, target_tree, prior_snapshot = fixture.prepare_managed_tree_replace()
+            tail_source = fixture.artifact_file("payload/tail.bin", b"tail payload")
+            tail_target = fixture.target_root / "tail.bin"
+            operations.extend(
+                [
+                    {
+                        "id": "assert_tail_absent",
+                        "resource": "tail",
+                        "action": "assert_absent",
+                        "target": str(tail_target),
+                    },
+                    {
+                        "id": "create_tail",
+                        "resource": "tail",
+                        "action": "create_file",
+                        "atomic": True,
+                        "source": str(tail_source),
+                        "sourceSha256": artifact_contract.sha256_file(tail_source),
+                        "target": str(tail_target),
+                    },
+                ]
+            )
+
+            def crash_during_rollback(step_id: str, phase: str) -> None:
+                if step_id == "create_tail" and phase == "after-mutation":
+                    raise RuntimeError("begin rollback")
+                if (
+                    step_id == "replace_managed_tree"
+                    and phase == "after-tree-rollback-exchanged"
+                ):
+                    self.assertTrue(target_tree.is_dir())
+                    raise SimulatedCrash("crash after rollback exchange")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_during_rollback,
+                    tree_ownership_validator=lambda _path, _operation: {
+                        "kind": "developer-id"
+                    },
+                ).execute()
+            self.assertTrue(target_tree.is_dir())
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+            recovered = fixture.executor(
+                "install",
+                operations,
+                tree_ownership_validator=lambda _path, _operation: {
+                    "kind": "developer-id"
+                },
+            ).recover()
+            self.assertEqual(recovered.state, "rolled-back")
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+
+    def test_stable_bundle_observations_do_not_change_plan_identity(self) -> None:
+        with fixture_layout() as fixture:
+            operations, _, _ = fixture.prepare_managed_tree_replace()
+            baseline = fixture.executor("install", operations)
+            observations_changed = copy.deepcopy(operations)
+            guard = observations_changed[0]
+            guard["qualifiedTargetTreeSha256"] = "f" * 64
+            guard["ownershipEvidence"] = {
+                "kind": "developer-id",
+                "cdhash": "e" * 40,
+            }
+            guard["ownership"] = "managed-signed-prior"
+            observed = fixture.executor("install", observations_changed)
+            self.assertEqual(observed.plan_digest, baseline.plan_digest)
+
+            policy_changed = copy.deepcopy(operations)
+            policy_changed[0].pop("ownershipPolicy")
+            policy_changed[0].pop("qualifiedTargetTreeSha256")
+            policy_changed[0].pop("ownershipEvidence")
+            semantic = fixture.executor("install", policy_changed)
+            self.assertNotEqual(semantic.plan_digest, baseline.plan_digest)
+
+    def test_exchange_rollback_resumes_interrupted_original_cleanup(self) -> None:
+        with fixture_layout() as fixture:
+            operations, target_tree, prior_snapshot = fixture.prepare_managed_tree_replace()
+            tail_source = fixture.artifact_file("payload/tail.bin", b"tail payload")
+            tail_target = fixture.target_root / "tail.bin"
+            operations.extend(
+                [
+                    {
+                        "id": "assert_tail_absent",
+                        "resource": "tail",
+                        "action": "assert_absent",
+                        "target": str(tail_target),
+                    },
+                    {
+                        "id": "create_tail",
+                        "resource": "tail",
+                        "action": "create_file",
+                        "atomic": True,
+                        "source": str(tail_source),
+                        "sourceSha256": artifact_contract.sha256_file(tail_source),
+                        "target": str(tail_target),
+                    },
+                ]
+            )
+
+            def fail_after_tail(step_id: str, phase: str) -> None:
+                if step_id == "create_tail" and phase == "after-mutation":
+                    raise RuntimeError("begin exchange rollback cleanup")
+
+            remove_path_durable = runtime_transaction.remove_path_durable
+
+            def crash_original_cleanup(
+                path: pathlib.Path,
+                *args: Any,
+                **kwargs: Any,
+            ) -> None:
+                if "replace_managed_tree.original.descriptor-delete" in path.name:
+                    raise SimulatedCrash("crash during exchanged original cleanup")
+                remove_path_durable(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    runtime_transaction,
+                    "remove_path_durable",
+                    side_effect=crash_original_cleanup,
+                ),
+                self.assertRaises(SimulatedCrash),
+            ):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=fail_after_tail,
+                    tree_ownership_validator=lambda _path, _operation: {
+                        "kind": "developer-id"
+                    },
+                ).execute()
+
+            self.assertTrue(target_tree.is_dir())
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+            recovered = fixture.executor(
+                "install",
+                operations,
+                tree_ownership_validator=lambda _path, _operation: {
+                    "kind": "developer-id"
+                },
+            ).recover()
+            self.assertEqual(recovered.state, "rolled-back")
+            self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
+            self.assertFalse(fixture.transaction_temporary_paths())
+
+    def test_retain_tree_preserves_exact_target_and_rejects_modified_tree(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.tree(fixture.artifact_root / "payload/Retained.app")
+            target = fixture.tree(fixture.target_root / "Retained.app")
+            source_tree = artifact_contract.canonical_tree_sha256(source)
+            operation = {
+                "id": "retain_tree",
+                "resource": "retained_tree",
+                "action": "retain_tree",
+                "source": str(source),
+                "sourceTreeSha256": source_tree,
+                "marker": MARKER,
+                "sourceMarkerSha256": artifact_contract.sha256_file(source / MARKER),
+                "target": str(target),
+                "ready": True,
+            }
+            before = snapshot_tree(target)
+            report = fixture.executor("uninstall", [operation]).execute()
+            self.assertTrue(report.ok)
+            self.assertEqual(snapshot_tree(target), before)
+
+        with fixture_layout() as fixture:
+            source = fixture.tree(fixture.artifact_root / "payload/Retained.app")
+            target = fixture.tree(
+                fixture.target_root / "Retained.app",
+                data_payload=b"modified retained tree",
+            )
+            operation = {
+                "id": "retain_tree",
+                "resource": "retained_tree",
+                "action": "retain_tree",
+                "source": str(source),
+                "sourceTreeSha256": artifact_contract.canonical_tree_sha256(source),
+                "marker": MARKER,
+                "sourceMarkerSha256": artifact_contract.sha256_file(source / MARKER),
+                "target": str(target),
+                "ready": False,
+                "blockedReason": "retained tree differs",
+            }
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("uninstall", [operation]).validate()
+            self.assertEqual(raised.exception.code, "transaction.target_foreign")
+            self.assertFalse(fixture.journal_path.exists())
+
+        with fixture_layout() as fixture:
+            source = fixture.tree(fixture.artifact_root / "payload/Retained.app")
+            target = fixture.target_root / "Retained.app"
+            operation = {
+                "id": "retain_tree",
+                "resource": "retained_tree",
+                "action": "retain_tree",
+                "source": str(source),
+                "sourceTreeSha256": artifact_contract.canonical_tree_sha256(source),
+                "marker": MARKER,
+                "sourceMarkerSha256": artifact_contract.sha256_file(source / MARKER),
+                "target": str(target),
+                "ready": False,
+                "blockedReason": "retained tree is missing",
+            }
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("uninstall", [operation]).validate()
+            self.assertEqual(raised.exception.code, "transaction.target_missing")
+            self.assertFalse(fixture.journal_path.exists())
 
     def test_file_rollback_is_noop_when_original_target_is_unchanged(self) -> None:
         with fixture_layout() as fixture:

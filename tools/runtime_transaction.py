@@ -33,6 +33,7 @@ SUPPORTED_ACTIONS = frozenset(
         "remove",
         "remove_tree",
         "retain",
+        "retain_tree",
     }
 )
 MUTATING_ACTIONS = frozenset(
@@ -55,11 +56,16 @@ SOURCE_ACTIONS = frozenset(
         "restore",
         "remove",
         "remove_tree",
+        "retain_tree",
     }
 )
 FILE_SOURCE_ACTIONS = frozenset({"replace_file", "create_file", "restore", "remove"})
-TREE_SOURCE_ACTIONS = frozenset({"assert_absent_or_owned", "replace_tree", "remove_tree"})
-TREE_MARKER_ACTIONS = frozenset({"assert_absent_or_owned", "remove_tree"})
+TREE_SOURCE_ACTIONS = frozenset(
+    {"assert_absent_or_owned", "replace_tree", "remove_tree", "retain_tree"}
+)
+TREE_MARKER_ACTIONS = frozenset(
+    {"assert_absent_or_owned", "remove_tree", "retain_tree"}
+)
 INSTALL_ACTIONS = frozenset(
     {
         "assert_sha256",
@@ -72,7 +78,9 @@ INSTALL_ACTIONS = frozenset(
         "retain",
     }
 )
-UNINSTALL_ACTIONS = frozenset({"restore", "remove", "remove_tree", "retain"})
+UNINSTALL_ACTIONS = frozenset(
+    {"restore", "remove", "remove_tree", "retain", "retain_tree"}
+)
 INSTALL_EFFECTS = frozenset({"replace_file", "create_file", "replace_tree"})
 UNINSTALL_EFFECTS = frozenset({"restore", "remove", "remove_tree"})
 PARENT_REQUIRED_ACTIONS = frozenset(
@@ -96,6 +104,8 @@ SEMANTIC_OPERATION_FIELDS = (
     "sourceMarkerSha256",
     "backup",
     "expectedSha256",
+    "ownershipPolicy",
+    "retainOnUninstall",
 )
 OBSERVATION_OPERATION_FIELDS = frozenset(
     {
@@ -111,6 +121,9 @@ OBSERVATION_OPERATION_FIELDS = frozenset(
         "targetSha256",
         "backupSha256",
         "state",
+        "qualifiedTargetTreeSha256",
+        "ownershipEvidence",
+        "ownershipFailure",
     }
 )
 KNOWN_OPERATION_FIELDS = (
@@ -146,6 +159,7 @@ class TransactionError(Exception):
 
 
 FailureInjector = Callable[[str, str], None]
+TreeOwnershipValidator = Callable[[pathlib.Path, dict[str, Any]], dict[str, Any]]
 
 
 _ACTIVE_DESCRIPTOR_SESSION: contextvars.ContextVar[
@@ -547,6 +561,20 @@ def rename_exclusive(source: pathlib.Path, target: pathlib.Path) -> None:
     fsync_directory(target.parent)
 
 
+def rename_exchange(left: pathlib.Path, right: pathlib.Path) -> None:
+    left_bound = _bound_path(left)
+    if left_bound is None:
+        raise TransactionError(
+            "transaction.descriptor_required",
+            "Atomic tree exchange requires an active descriptor session",
+            left=str(left),
+            right=str(right),
+        )
+    right_bound = _bound_path(right)
+    assert right_bound is not None
+    _descriptor_result(lambda: left_bound.exchange_with(right_bound))
+
+
 def make_directory(path: pathlib.Path, mode: int) -> None:
     bound = _bound_path(path)
     if bound is not None:
@@ -795,6 +823,7 @@ class TransactionExecutor:
         transaction_root: pathlib.Path,
         allowed_roots: Sequence[pathlib.Path],
         failure_injector: FailureInjector | None = None,
+        tree_ownership_validator: TreeOwnershipValidator | None = None,
     ) -> None:
         self.kind = kind
         self.artifact_root = self._absolute_input_path(artifact_root)
@@ -810,6 +839,7 @@ class TransactionExecutor:
                 )
             self.operations.append(dict(operation))
         self.failure_injector = failure_injector
+        self.tree_ownership_validator = tree_ownership_validator
         plan = [semantic_operation(operation) for operation in self.operations]
         self.plan_digest = artifact_contract.sha256_bytes(
             artifact_contract.canonical_json_bytes(plan)
@@ -972,6 +1002,41 @@ class TransactionExecutor:
             raise TransactionError(
                 "transaction.plan_invalid",
                 "Operation atomic flag must be a boolean",
+                operation=operation["id"],
+            )
+        ownership_policy = operation.get("ownershipPolicy")
+        if ownership_policy is not None and (
+            action != "assert_absent_or_owned"
+            or ownership_policy != "developer-id-bundle"
+        ):
+            raise TransactionError(
+                "transaction.plan_invalid",
+                "Operation ownership policy is invalid for this action",
+                operation=operation["id"],
+            )
+        if "retainOnUninstall" in operation and (
+            action != "replace_tree" or operation["retainOnUninstall"] is not True
+        ):
+            raise TransactionError(
+                "transaction.plan_invalid",
+                "Operation retained-uninstall policy is invalid for this action",
+                operation=operation["id"],
+            )
+        if "qualifiedTargetTreeSha256" in operation:
+            if ownership_policy != "developer-id-bundle":
+                raise TransactionError(
+                    "transaction.plan_invalid",
+                    "Qualified target digest requires a Developer ID ownership policy",
+                    operation=operation["id"],
+                )
+            self._required_sha256(operation, "qualifiedTargetTreeSha256")
+        if "ownershipEvidence" in operation and (
+            ownership_policy != "developer-id-bundle"
+            or not isinstance(operation["ownershipEvidence"], dict)
+        ):
+            raise TransactionError(
+                "transaction.plan_invalid",
+                "Ownership evidence requires a Developer ID ownership policy",
                 operation=operation["id"],
             )
         if action in SOURCE_ACTIONS:
@@ -1248,9 +1313,9 @@ class TransactionExecutor:
         self,
         operation: dict[str, Any],
         target: pathlib.Path,
-    ) -> None:
+    ) -> str | None:
         if not path_lexists(target):
-            return
+            return None
         if not path_is_dir(target):
             raise TransactionError(
                 "transaction.target_foreign",
@@ -1272,7 +1337,9 @@ class TransactionExecutor:
             )
         expected_tree = self._required_sha256(contract, "sourceTreeSha256")
         actual_tree = tree_sha256(target)
-        if actual_tree != expected_tree:
+        if actual_tree == expected_tree:
+            return actual_tree
+        if contract.get("ownershipPolicy") != "developer-id-bundle":
             raise TransactionError(
                 "transaction.target_foreign",
                 "Tree target content does not match the artifact-owned tree",
@@ -1281,6 +1348,55 @@ class TransactionExecutor:
                 expected=expected_tree,
                 actual=actual_tree,
             )
+        qualified_tree = self._required_sha256(contract, "qualifiedTargetTreeSha256")
+        if actual_tree != qualified_tree:
+            raise TransactionError(
+                "transaction.target_changed",
+                "Tree target changed after Developer ID lifecycle qualification",
+                operation=operation["id"],
+                path=str(target),
+                expected=qualified_tree,
+                actual=actual_tree,
+            )
+        if self.tree_ownership_validator is None:
+            raise TransactionError(
+                "transaction.target_foreign",
+                "Developer ID tree ownership has not been independently validated",
+                operation=operation["id"],
+                path=str(target),
+            )
+        try:
+            self.tree_ownership_validator(target, contract)
+        except artifact_contract.ArtifactError as error:
+            raise TransactionError(
+                "transaction.target_foreign",
+                "Developer ID tree ownership validation failed",
+                operation=operation["id"],
+                path=str(target),
+                causeCode=error.code,
+                causeMessage=error.message,
+            ) from error
+        except TransactionError:
+            raise
+        except Exception as error:
+            raise TransactionError(
+                "transaction.target_foreign",
+                "Developer ID tree ownership validation failed",
+                operation=operation["id"],
+                path=str(target),
+                causeType=type(error).__name__,
+            ) from error
+        confirmed_tree = tree_sha256(target)
+        if confirmed_tree != actual_tree:
+            raise TransactionError(
+                "transaction.target_changed",
+                "Tree target changed during Developer ID lifecycle qualification",
+                operation=operation["id"],
+                path=str(target),
+                expected=actual_tree,
+                actual=confirmed_tree,
+            )
+        return actual_tree
 
     def _preflight_operation(self, operation: dict[str, Any]) -> None:
         action = operation["action"]
@@ -1398,6 +1514,16 @@ class TransactionExecutor:
                 )
         elif action == "remove_tree":
             self._verify_source_tree(operation)
+            self._validate_owned_tree(operation, target)
+        elif action == "retain_tree":
+            self._verify_source_tree(operation)
+            if not path_lexists(target):
+                raise TransactionError(
+                    "transaction.target_missing",
+                    "Retained tree target is missing",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             self._validate_owned_tree(operation, target)
         elif action == "retain":
             return
@@ -1744,6 +1870,7 @@ class TransactionExecutor:
                 "staging",
                 "rollbackDiscard",
                 "existed",
+                "treePublication",
                 "marker",
                 "markerSha256",
                 "originalTreeSha256",
@@ -1754,12 +1881,19 @@ class TransactionExecutor:
             }
             if set(undo) != expected_keys or undo.get("kind") != "restore-tree":
                 raise self._invalid_journal("Transaction journal tree undo is invalid", index=index)
+            expected_publication = (
+                "exchange"
+                if undo.get("existed") is True
+                and contract.get("ownershipPolicy") == "developer-id-bundle"
+                else "exclusive-move"
+            )
             if (
                 undo.get("target") != str(target)
                 or undo.get("original") != str(original)
                 or undo.get("staging") != str(staging)
                 or undo.get("rollbackDiscard") != str(rollback_discard)
                 or not isinstance(undo.get("existed"), bool)
+                or undo.get("treePublication") != expected_publication
                 or undo.get("marker") != self._marker_relative(contract).as_posix()
                 or undo.get("markerSha256")
                 != self._required_sha256(contract, "sourceMarkerSha256")
@@ -2188,6 +2322,24 @@ class TransactionExecutor:
                         operation=operation["id"],
                         path=str(target),
                     )
+            elif action == "retain_tree":
+                try:
+                    self._verify_source_tree(operation)
+                    if not path_lexists(target):
+                        raise TransactionError(
+                            "transaction.target_missing",
+                            "Retained tree target is missing",
+                            operation=operation["id"],
+                            path=str(target),
+                        )
+                    self._validate_owned_tree(operation, target)
+                except TransactionError as error:
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed retained tree does not match the ownership contract",
+                        operation=operation["id"],
+                        path=str(target),
+                    ) from error
             elif action == "restore":
                 expected = self._required_sha256(operation, "expectedSha256")
                 if not path_is_file(target) or sha256_file(target) != expected:
@@ -2272,10 +2424,19 @@ class TransactionExecutor:
                 )
             return finish()
         if kind == "restore-tree":
+            original_cleanup = logical == pathlib.Path(undo["original"])
+            exchanged_rollback = (
+                undo.get("treePublication") == "exchange"
+                and undo.get("phase") == "rollback-restored"
+            )
             expected = (
-                undo["originalTreeSha256"]
-                if logical == pathlib.Path(undo["original"])
-                else undo["appliedTreeSha256"]
+                undo["appliedTreeSha256"]
+                if original_cleanup and exchanged_rollback
+                else (
+                    undo["originalTreeSha256"]
+                    if original_cleanup
+                    else undo["appliedTreeSha256"]
+                )
             )
             if expected is None:
                 raise TransactionError(
@@ -2385,6 +2546,8 @@ class TransactionExecutor:
         journal: dict[str, Any],
         undo: dict[str, Any],
         path: pathlib.Path,
+        *,
+        logical_path: pathlib.Path | None = None,
     ) -> None:
         quarantine = self._cleanup_quarantine(path)
         progress = journal["cleanupInProgress"].get(str(path))
@@ -2398,7 +2561,11 @@ class TransactionExecutor:
                 )
             if not path_lexists(path):
                 return
-            identity, tree_entries = self._validate_cleanup_payload(undo, path)
+            identity, tree_entries = self._validate_cleanup_payload(
+                undo,
+                path,
+                logical_path=logical_path,
+            )
             self._set_cleanup_progress(
                 journal,
                 path,
@@ -2776,6 +2943,13 @@ class TransactionExecutor:
         if action == "replace_tree":
             contract = self._tree_contract(operation)
             source = self._verify_source_tree(operation)
+            original_tree_sha256 = self._validate_owned_tree(operation, target)
+            tree_publication = (
+                "exchange"
+                if original_tree_sha256 is not None
+                and contract.get("ownershipPolicy") == "developer-id-bundle"
+                else "exclusive-move"
+            )
             original = self._step_temporary_path(index, operation, "original", sibling_of=target)
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
             rollback_discard = self._step_temporary_path(
@@ -2790,10 +2964,11 @@ class TransactionExecutor:
                 "original": str(original),
                 "staging": str(staging),
                 "rollbackDiscard": str(rollback_discard),
-                "existed": path_is_dir(target),
+                "existed": original_tree_sha256 is not None,
+                "treePublication": tree_publication,
                 "marker": self._marker_relative(contract).as_posix(),
                 "markerSha256": self._required_sha256(contract, "sourceMarkerSha256"),
-                "originalTreeSha256": tree_sha256(target) if path_is_dir(target) else None,
+                "originalTreeSha256": original_tree_sha256,
                 "appliedTreeSha256": self._required_sha256(
                     operation,
                     "sourceTreeSha256",
@@ -2926,7 +3101,13 @@ class TransactionExecutor:
         self._preflight_operation(operation)
         action = operation["action"]
         target = self._mutable_path(operation, "target")
-        if action in {"assert_sha256", "assert_absent", "assert_absent_or_owned", "retain"}:
+        if action in {
+            "assert_sha256",
+            "assert_absent",
+            "assert_absent_or_owned",
+            "retain",
+            "retain_tree",
+        }:
             return
         self._require_undo_descriptor_parents(operation, undo)
         if action == "backup":
@@ -2986,17 +3167,45 @@ class TransactionExecutor:
                     "Tree transaction temporary path already exists",
                     operation=operation["id"],
                 )
-            copy_tree_staged(source, staging)
-            if tree_sha256(staging) != undo["appliedTreeSha256"]:
+            tree_publication = undo["treePublication"]
+            publication_staging = original if tree_publication == "exchange" else staging
+            copy_tree_staged(source, publication_staging)
+            if tree_sha256(publication_staging) != undo["appliedTreeSha256"]:
                 raise TransactionError(
                     "transaction.write_mismatch",
                     "Staged tree does not match its source",
                     operation=operation["id"],
-                    path=str(staging),
+                    path=str(publication_staging),
                 )
             undo["phase"] = "staged"
             self._save_journal(journal)
             self._inject(operation["id"], "after-tree-staged")
+            if tree_publication == "exchange":
+                if not path_is_dir(target) or tree_sha256(target) != undo["originalTreeSha256"]:
+                    raise TransactionError(
+                        "transaction.target_changed",
+                        "Tree target changed before atomic exchange",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
+                rename_exchange(target, original)
+                self._inject(operation["id"], "after-tree-exchanged")
+                if (
+                    tree_sha256(target) != undo["appliedTreeSha256"]
+                    or tree_sha256(original) != undo["originalTreeSha256"]
+                ):
+                    with contextlib.suppress(TransactionError):
+                        rename_exchange(target, original)
+                    raise TransactionError(
+                        "transaction.target_changed",
+                        "Atomic tree exchange published unexpected content",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
+                undo["phase"] = "replacement-installed"
+                self._save_journal(journal)
+                self._inject(operation["id"], "after-tree-replacement-installed")
+                return
             if path_lexists(target):
                 rename_exclusive(target, original)
                 if tree_sha256(original) != undo["originalTreeSha256"]:
@@ -3311,6 +3520,68 @@ class TransactionExecutor:
             staging = pathlib.Path(undo["staging"])
             rollback_discard = pathlib.Path(undo["rollbackDiscard"])
             remove_verified(staging)
+            if undo["treePublication"] == "exchange":
+                remove_verified(rollback_discard)
+                if undo["phase"] == "rollback-restored":
+                    self._validate_tree_payload(
+                        target,
+                        undo["marker"],
+                        undo["markerSha256"],
+                        undo["originalTreeSha256"],
+                    )
+                    self._remove_verified_payload(
+                        journal,
+                        undo,
+                        original,
+                        logical_path=staging,
+                    )
+                    return
+                if not path_is_dir(target) or not path_is_dir(original):
+                    raise TransactionError(
+                        "transaction.undo_missing",
+                        "Atomic tree rollback requires both exchange paths",
+                        target=str(target),
+                        original=str(original),
+                    )
+                target_tree = tree_sha256(target)
+                original_tree = tree_sha256(original)
+                if (
+                    target_tree == undo["appliedTreeSha256"]
+                    and original_tree == undo["originalTreeSha256"]
+                ):
+                    rename_exchange(target, original)
+                    self._inject(step["id"], "after-tree-rollback-exchanged")
+                elif not (
+                    target_tree == undo["originalTreeSha256"]
+                    and original_tree == undo["appliedTreeSha256"]
+                ):
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Atomic tree rollback paths contain unexpected content",
+                        target=str(target),
+                        original=str(original),
+                    )
+                self._validate_tree_payload(
+                    target,
+                    undo["marker"],
+                    undo["markerSha256"],
+                    undo["originalTreeSha256"],
+                )
+                self._validate_tree_payload(
+                    original,
+                    undo["marker"],
+                    undo["markerSha256"],
+                    undo["appliedTreeSha256"],
+                )
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+                self._remove_verified_payload(
+                    journal,
+                    undo,
+                    original,
+                    logical_path=staging,
+                )
+                return
             if undo["existed"]:
                 if path_lexists(original):
                     self._validate_tree_payload(

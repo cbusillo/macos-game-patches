@@ -105,3 +105,4 @@ Use this shape:
 - [016 - Runtime install coordinator](016-runtime-install-coordinator.md)
 - [017 - Runtime artifact sealing](017-runtime-artifact-sealing.md)
 - [018 - Runtime descriptor path hardening](018-runtime-descriptor-path-hardening.md)
+- [019 - Runtime stable bundle lifecycle](019-runtime-stable-bundle-lifecycle.md)

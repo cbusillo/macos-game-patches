@@ -899,6 +899,9 @@ class BoundPath:
     def rename_exclusive_from(self, source: BoundPath) -> None:
         _rename_exclusive(source, self)
 
+    def exchange_with(self, other: BoundPath) -> None:
+        _rename_exchange(self, other)
+
 
 def _tree_records(
     directory: int,
@@ -1468,4 +1471,95 @@ def _rename_exclusive(source: BoundPath, target: BoundPath) -> None:
             target=str(target.path),
             expected=source_identity.to_payload(),
             actual=(published_identity.to_payload() if published_identity is not None else None),
+        )
+
+
+def _rename_exchange(left: BoundPath, right: BoundPath) -> None:
+    left_parent = left._parent()
+    right_parent = right._parent()
+    if left.session is not right.session:
+        raise DescriptorError(
+            "transaction.path_unsafe",
+            "Atomic descriptor exchange requires one descriptor session",
+            left=str(left.path),
+            right=str(right.path),
+        )
+    left.verify_authority()
+    right.verify_authority()
+    left_identity = left.identity()
+    right_identity = right.identity()
+    if left_identity is None or right_identity is None:
+        raise DescriptorError(
+            "transaction.path_identity_changed",
+            "Atomic descriptor exchange requires both paths to exist",
+            left=str(left.path),
+            right=str(right.path),
+        )
+    if left_parent.identity.device != right_parent.identity.device:
+        raise DescriptorError(
+            "transaction.path_identity_changed",
+            "Atomic descriptor exchange crosses a device boundary",
+            left=str(left.path),
+            right=str(right.path),
+        )
+    function = _atomic_rename_function()
+    ctypes.set_errno(0)
+    result = function(
+        left_parent.descriptor,
+        os.fsencode(left._leaf_name()),
+        right_parent.descriptor,
+        os.fsencode(right._leaf_name()),
+        0x00000002,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {
+            errno.ENOENT,
+            errno.EXDEV,
+        }:
+            raise DescriptorError(
+                "transaction.path_identity_changed",
+                "Atomic descriptor exchange paths changed or crossed a device boundary",
+                left=str(left.path),
+                right=str(right.path),
+                errno=error_number,
+            )
+        if error_number in {
+            errno.ENOSYS,
+            errno.ENOTSUP,
+            getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+        }:
+            raise DescriptorError(
+                "transaction.descriptor_unsupported",
+                "Filesystem does not support required atomic descriptor exchange",
+                left=str(left.path),
+                right=str(right.path),
+                errno=error_number,
+            )
+        raise DescriptorError(
+            "transaction.descriptor_operation_failed",
+            "Atomic descriptor exchange failed",
+            left=str(left.path),
+            right=str(right.path),
+            errno=error_number,
+            detail=os.strerror(error_number),
+        )
+    left.session.invalidate_below(left.path, right.path)
+    os.fsync(left_parent.descriptor)
+    if left_parent.identity != right_parent.identity:
+        os.fsync(right_parent.descriptor)
+    left.verify_authority()
+    right.verify_authority()
+    exchanged_left = left.identity()
+    exchanged_right = right.identity()
+    if exchanged_left != right_identity or exchanged_right != left_identity:
+        raise DescriptorError(
+            "transaction.path_identity_changed",
+            "Atomic descriptor exchange published different filesystem objects",
+            left=str(left.path),
+            right=str(right.path),
+            expectedLeft=right_identity.to_payload(),
+            actualLeft=(exchanged_left.to_payload() if exchanged_left is not None else None),
+            expectedRight=left_identity.to_payload(),
+            actualRight=(exchanged_right.to_payload() if exchanged_right is not None else None),
         )

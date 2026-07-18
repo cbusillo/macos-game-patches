@@ -87,6 +87,36 @@ class DescriptorTests(unittest.TestCase):
             target_entry.remove()
             self.assertFalse(target_entry.exists())
 
+    def test_descriptor_exchange_keeps_both_tree_paths_present(self) -> None:
+        left = self.target_root / "left.app"
+        right = self.target_root / "right.app"
+        (left / "Contents").mkdir(parents=True)
+        (right / "Contents").mkdir(parents=True)
+        (left / "Contents/value.bin").write_bytes(b"left")
+        (right / "Contents/value.bin").write_bytes(b"right")
+
+        with DescriptorSession([self.target_root]) as session:
+            left_entry = session.bind(left)
+            right_entry = session.bind(right)
+            left_identity = left_entry.identity()
+            right_identity = right_entry.identity()
+            left_entry.exchange_with(right_entry)
+            self.assertEqual(
+                session.bind(left / "Contents/value.bin").read_bytes(),
+                b"right",
+            )
+            self.assertEqual(
+                session.bind(right / "Contents/value.bin").read_bytes(),
+                b"left",
+            )
+            self.assertEqual(session.bind(left).identity(), right_identity)
+            self.assertEqual(session.bind(right).identity(), left_identity)
+            session.bind(left).exchange_with(session.bind(right))
+            self.assertEqual(
+                session.bind(left / "Contents/value.bin").read_bytes(),
+                b"left",
+            )
+
     def test_directory_rename_invalidates_cached_descendant_descriptors(self) -> None:
         source = self.source_root / "Bridge.app"
         target = self.target_root / "Bridge.app"

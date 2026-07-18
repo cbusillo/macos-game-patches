@@ -85,15 +85,17 @@ python3 tools/runtime_cli.py install --artifact <artifact>
 python3 tools/runtime_cli.py uninstall --artifact <artifact>
 ```
 
-The dev7 contract still uses a separate signing step, but readiness now comes
+The dev8 contract still uses a separate signing step, but readiness now comes
 from verified artifact stage rather than manifest mode alone. Unsealed artifacts
 return `artifact.sealing_required` before any lifecycle mutation; a final sealed
-artifact carries its exact signed tree into the transaction plan. Live user-path
-mutation now walks declared roots with no-follow descriptors, journals target-
-parent identity, and publishes files and trees through exclusive sibling moves.
-The remaining live gate is physical qualification: three install/uninstall
-cycles must restore exact CrossOver, game, runtime, lock, service, and journal
-state before the installed layout is used for game launch.
+artifact carries its exact signed tree into the transaction plan. A prior bridge
+at the fixed consent-preserving URL is admitted only after marker and Developer
+ID policy validation, exchanged atomically with the current signed tree, and
+retained on uninstall. Other live user-path mutation still uses no-follow
+descriptors, journaled target-parent identity, and exclusive sibling moves. The
+remaining live gate is physical qualification: three install/uninstall cycles
+must retain that exact bridge while restoring CrossOver, game, runtime, lock,
+service, and journal state before the installed layout is used for game launch.
 
 ## Runtime Control Plane
 

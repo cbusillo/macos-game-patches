@@ -66,6 +66,8 @@ TRUSTED_ALLOWED_TARGET_ROOTS = {
     "${CROSSOVER_APP}",
     "${STEAM_BOTTLE}",
 }
+STABLE_BUNDLE_TARGET = "${REPO_ROOT}/.code/state/alvr-macos-bridge/ALVRMacOSBridge.app"
+STABLE_BUNDLE_MARKER = "Contents/Resources/runtime-owner.json"
 PLAN_ACTIONS = {
     "assert_absent",
     "assert_absent_or_owned",
@@ -77,10 +79,12 @@ PLAN_ACTIONS = {
     "replace_file",
     "replace_tree",
     "retain",
+    "retain_tree",
     "restore",
 }
 INSTALL_EFFECTS = {"create_file", "replace_file", "replace_tree"}
 UNINSTALL_EFFECTS = {"remove", "remove_tree", "restore"}
+UNINSTALL_RESOURCE_ACTIONS = UNINSTALL_EFFECTS | {"retain_tree"}
 INVERSE_ACTIONS = {
     "create_file": "remove",
     "replace_file": "restore",
@@ -617,6 +621,8 @@ def validate_plan(items: Any, location: str, binding_names: set[str]) -> list[di
         "backup",
         "expectedSha256",
         "atomic",
+        "ownershipPolicy",
+        "retainOnUninstall",
     }
     validated: list[dict[str, Any]] = []
     for index, raw_item in enumerate(require_list(items, location)):
@@ -644,13 +650,14 @@ def validate_plan(items: Any, location: str, binding_names: set[str]) -> list[di
             "remove_tree",
             "replace_file",
             "replace_tree",
+            "retain_tree",
             "restore",
         }
         if action in source_actions:
             safe_relative_path(item.get("source"), f"{item_location}.source")
         elif "source" in item:
             raise ArtifactError("manifest.invalid", "Plan source is not valid for this action", location=item_location)
-        marker_actions = {"assert_absent_or_owned", "remove_tree"}
+        marker_actions = {"assert_absent_or_owned", "remove_tree", "retain_tree"}
         if action in marker_actions:
             safe_relative_path(item.get("marker"), f"{item_location}.marker")
         elif "marker" in item:
@@ -672,6 +679,24 @@ def validate_plan(items: Any, location: str, binding_names: set[str]) -> list[di
             require_bool(item["atomic"], f"{item_location}.atomic")
             if action not in INSTALL_EFFECTS | {"restore"}:
                 raise ArtifactError("manifest.invalid", "Atomic is not valid for this action", location=item_location)
+        if "ownershipPolicy" in item:
+            if (
+                action != "assert_absent_or_owned"
+                or item["ownershipPolicy"] != "developer-id-bundle"
+            ):
+                raise ArtifactError(
+                    "manifest.invalid",
+                    "Ownership policy is invalid for this action",
+                    location=item_location,
+                )
+        if "retainOnUninstall" in item:
+            require_bool(item["retainOnUninstall"], f"{item_location}.retainOnUninstall")
+            if action != "replace_tree" or item["retainOnUninstall"] is not True:
+                raise ArtifactError(
+                    "manifest.invalid",
+                    "Retained uninstall policy is invalid for this action",
+                    location=item_location,
+                )
         validated.append(item)
     return validated
 
@@ -687,7 +712,7 @@ def validate_plan_inverses(install: list[dict[str, Any]], uninstall: list[dict[s
             raise ArtifactError("manifest.invalid", "Install resource has multiple mutating operations", resource=resource)
         install_effects[resource] = item
     for item in uninstall:
-        if item["action"] not in UNINSTALL_EFFECTS:
+        if item["action"] not in UNINSTALL_RESOURCE_ACTIONS:
             continue
         resource = item["resource"]
         if resource in uninstall_effects:
@@ -704,7 +729,12 @@ def validate_plan_inverses(install: list[dict[str, Any]], uninstall: list[dict[s
         uninstall_item = uninstall_effects[resource]
         if install_item.get("atomic") is not True:
             raise ArtifactError("manifest.invalid", "Install mutation must be atomic", resource=resource)
-        expected_action = INVERSE_ACTIONS[install_item["action"]]
+        expected_action = (
+            "retain_tree"
+            if install_item["action"] == "replace_tree"
+            and install_item.get("retainOnUninstall") is True
+            else INVERSE_ACTIONS[install_item["action"]]
+        )
         if uninstall_item["action"] != expected_action:
             raise ArtifactError(
                 "manifest.invalid",
@@ -717,7 +747,7 @@ def validate_plan_inverses(install: list[dict[str, Any]], uninstall: list[dict[s
             raise ArtifactError("manifest.invalid", "Install and uninstall targets differ", resource=resource)
         if uninstall_item["source"] != install_item["source"]:
             raise ArtifactError("manifest.invalid", "Install and uninstall source guards differ", resource=resource)
-        if expected_action == "remove_tree" and uninstall_item["marker"] not in {
+        if expected_action in {"remove_tree", "retain_tree"} and uninstall_item["marker"] not in {
             item.get("marker") for item in install if item["resource"] == resource
         }:
             raise ArtifactError("manifest.invalid", "Tree ownership markers differ", resource=resource)
@@ -749,6 +779,117 @@ def validate_plan_inverses(install: list[dict[str, Any]], uninstall: list[dict[s
             guards[0]["source"] != install_item["source"] or guards[0].get("marker") != uninstall_item.get("marker")
         ):
             raise ArtifactError("manifest.invalid", "Tree ownership guards differ", resource=resource)
+        if install_item.get("retainOnUninstall") is True and guards[0].get("ownershipPolicy") != (
+            "developer-id-bundle"
+        ):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Retained tree update requires a Developer ID ownership policy",
+                resource=resource,
+            )
+
+
+def validate_stable_bundle_contract(
+    manifest: dict[str, Any],
+    install: list[dict[str, Any]],
+    uninstall: list[dict[str, Any]],
+) -> None:
+    guards = [item for item in install if item.get("ownershipPolicy") == "developer-id-bundle"]
+    if not guards:
+        return
+    if len(guards) != 1:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Manifest must declare exactly one Developer ID stable-bundle guard",
+        )
+    guard = guards[0]
+    sealing = manifest["sealing"]
+    bundle_path = sealing.get("bundlePath")
+    if not isinstance(bundle_path, str) or guard.get("source") != bundle_path:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle guard source must be the sealed bundle",
+            resource=guard["resource"],
+        )
+    if guard.get("target") != STABLE_BUNDLE_TARGET:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle target must use the fixed consent-preserving URL",
+            resource=guard["resource"],
+            expected=STABLE_BUNDLE_TARGET,
+            actual=guard.get("target"),
+        )
+    if guard.get("marker") != STABLE_BUNDLE_MARKER:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle guard must use the signed ownership marker",
+            resource=guard["resource"],
+        )
+    updates = [
+        item
+        for item in install
+        if item["resource"] == guard["resource"] and item["action"] == "replace_tree"
+    ]
+    retained = [
+        item
+        for item in uninstall
+        if item["resource"] == guard["resource"] and item["action"] == "retain_tree"
+    ]
+    if len(updates) != 1 or len(retained) != 1:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable bundle requires one replace and one retain operation",
+            resource=guard["resource"],
+        )
+    update = updates[0]
+    retain = retained[0]
+    if update.get("retainOnUninstall") is not True:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle replacement must be retained on uninstall",
+            resource=guard["resource"],
+        )
+    for field in ("source", "target"):
+        if update.get(field) != guard.get(field) or retain.get(field) != guard.get(field):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Stable-bundle operation paths differ",
+                resource=guard["resource"],
+                field=field,
+            )
+    if retain.get("marker") != guard.get("marker"):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle ownership markers differ",
+            resource=guard["resource"],
+        )
+    marker_path = pathlib.PurePosixPath(bundle_path) / pathlib.PurePosixPath(
+        STABLE_BUNDLE_MARKER
+    )
+    owner_files = [
+        item
+        for item in manifest["generatedFiles"]
+        if pathlib.PurePosixPath(item["artifactPath"]) == marker_path
+    ]
+    if len(owner_files) != 1:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable bundle must generate exactly one signed ownership marker",
+        )
+    owner_content = owner_files[0].get("content")
+    if not isinstance(owner_content, dict) or owner_content.get("bundleId") != sealing["bundleId"]:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle ownership marker must bind the sealed bundle identifier",
+        )
+    stable_state = [
+        item for item in manifest["mutableState"] if item["location"] == STABLE_BUNDLE_TARGET
+    ]
+    if not stable_state or any(item["lifecycle"] != "retained" for item in stable_state):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Stable-bundle mutable state must be retained",
+        )
 
 
 def validate_mutable_state(items: Any, binding_names: set[str]) -> None:
@@ -1003,6 +1144,7 @@ def validate_manifest_structure(manifest: Any) -> dict[str, Any]:
             "manifest.invalid",
             "Content-addressed Developer ID sealing cannot use a timestamp",
         )
+    validate_stable_bundle_contract(manifest, install_plan, uninstall_plan)
     manifest["_artifactIds"] = artifact_ids
     manifest["_bindingNames"] = binding_names
     return manifest
@@ -1443,8 +1585,9 @@ def sign_bundle_with_codesign(bundle: pathlib.Path, sealing: dict[str, Any]) -> 
 def inspect_signed_bundle(bundle: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]:
     sealing = manifest["sealing"]
     _, executable_relative, _, _ = sealing_paths(manifest)
-    artifact_root = bundle.parents[len(pathlib.PurePosixPath(sealing["bundlePath"]).parts) - 1]
-    executable = artifact_root / executable_relative
+    bundle_relative = pathlib.PurePosixPath(sealing["bundlePath"])
+    executable_within_bundle = executable_relative.relative_to(bundle_relative)
+    executable = bundle.joinpath(*executable_within_bundle.parts)
     canonical_tree_sha256(bundle)
     executable_item = sealing_artifact_item(manifest)
     binary = inspect_binary(executable, executable_item["binary"]["format"])
@@ -2893,6 +3036,10 @@ def resolve_plan_operation(
     backup: pathlib.Path | None = None
     if "atomic" in item:
         result["atomic"] = item["atomic"]
+    if "ownershipPolicy" in item:
+        result["ownershipPolicy"] = item["ownershipPolicy"]
+    if "retainOnUninstall" in item:
+        result["retainOnUninstall"] = item["retainOnUninstall"]
     if "source" in item:
         source_relative = safe_relative_path(item["source"], f"plan.{item['id']}.source")
         source = (artifact_root / source_relative).resolve(strict=False)
@@ -2951,8 +3098,12 @@ def resolve_plan_operation(
                     result["ownership"] = "artifact-owned"
                 else:
                     ready = False
-                    reason = "existing tree content differs from the artifact-owned tree"
-                    result["ownership"] = "modified"
+                    if item.get("ownershipPolicy") == "developer-id-bundle":
+                        reason = "existing tree requires Developer ID lifecycle qualification"
+                        result["ownership"] = "qualification-required"
+                    else:
+                        reason = "existing tree content differs from the artifact-owned tree"
+                        result["ownership"] = "modified"
             else:
                 ready = False
                 reason = "existing tree has a foreign ownership marker"
@@ -2999,24 +3150,31 @@ def resolve_plan_operation(
                 if target_hash != sha256_file(source):
                     ready = False
                     reason = "removal target does not match the artifact-owned file"
-    elif action == "remove_tree":
+    elif action in {"remove_tree", "retain_tree"}:
         result["exists"] = target.exists()
-        if target.exists():
+        if not target.exists() and action == "retain_tree":
+            ready = False
+            reason = "retained tree target is missing"
+        elif target.exists():
+            operation_label = "removal" if action == "remove_tree" else "retention"
             if target_marker is None or source_marker is None or not target_marker.is_file():
                 ready = False
-                reason = "tree removal target has no ownership marker"
+                reason = f"tree {operation_label} target has no ownership marker"
             else:
                 marker_hash = sha256_file(target_marker)
                 result["targetMarkerSha256"] = marker_hash
                 if marker_hash != sha256_file(source_marker):
                     ready = False
-                    reason = "tree removal target has a foreign ownership marker"
+                    reason = f"tree {operation_label} target has a foreign ownership marker"
                 else:
                     target_tree_sha256 = canonical_tree_sha256(target)
                     result["targetTreeSha256"] = target_tree_sha256
                     if target_tree_sha256 != result["sourceTreeSha256"]:
                         ready = False
-                        reason = "tree removal target content differs from the artifact-owned tree"
+                        reason = (
+                            f"tree {operation_label} target content differs "
+                            "from the artifact-owned tree"
+                        )
     elif action == "retain":
         result["exists"] = target.exists()
     result["ready"] = ready
@@ -3205,6 +3363,40 @@ def write_minimal_pe(path: pathlib.Path) -> None:
 
 def self_test() -> dict[str, Any]:
     completed: list[str] = []
+    stable_manifest = load_json(DEFAULT_MANIFEST)
+    validate_manifest_structure(json.loads(json.dumps(stable_manifest)))
+    alternate_target = json.loads(json.dumps(stable_manifest))
+    for plan_name in ("installPlan", "uninstallPlan"):
+        for operation in alternate_target[plan_name]:
+            if operation["resource"] == "native_bridge_bundle":
+                operation["target"] = "${HOME}/Library/Application Support/alvr/Alternate.app"
+    expect_error(
+        "manifest.invalid",
+        lambda: validate_manifest_structure(alternate_target),
+    )
+    alternate_source = json.loads(json.dumps(stable_manifest))
+    for plan_name in ("installPlan", "uninstallPlan"):
+        for operation in alternate_source[plan_name]:
+            if operation["resource"] == "native_bridge_bundle":
+                operation["source"] = "payload/macos/Alternate.app"
+    expect_error(
+        "manifest.invalid",
+        lambda: validate_manifest_structure(alternate_source),
+    )
+    duplicate_guard = json.loads(json.dumps(stable_manifest))
+    guard = next(
+        operation
+        for operation in duplicate_guard["installPlan"]
+        if operation.get("ownershipPolicy") == "developer-id-bundle"
+    )
+    duplicate = json.loads(json.dumps(guard))
+    duplicate["id"] = "verify_duplicate_stable_bundle"
+    duplicate_guard["installPlan"].append(duplicate)
+    expect_error(
+        "manifest.invalid",
+        lambda: validate_manifest_structure(duplicate_guard),
+    )
+    completed.append("stable-bundle-contract")
     code_root = REPO_ROOT / ".code"
     code_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
