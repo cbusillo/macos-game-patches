@@ -13,10 +13,10 @@
       "--bindings",
       ".code/runtime-bindings.json"
     ],
-    "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
+    "description": "Deterministic payload with a separate Developer ID final-sealing phase for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev6"
+    "version": "1.0.0-dev7"
   },
   "artifacts": [
     {
@@ -291,9 +291,13 @@
     {
       "artifactPath": "config/sealing.json",
       "content": {
+        "artifactStages": ["unsealed", "sealed"],
         "bundleId": "com.alvr.macos-bridge.iosurface",
+        "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
         "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
+        "mode": "separate-step",
         "performedBy": "macOS integration issue #62",
+        "signedAttestationPath": "Contents/Resources/runtime-sealing.json",
         "teamId": "MM5YXC7T6E",
         "timestamp": false
       },
@@ -737,7 +741,11 @@
   ],
   "schemaVersion": 1,
   "sealing": {
+    "attestationPath": "Contents/Resources/runtime-sealing.json",
+    "bundlePath": "payload/macos/ALVRMacOSBridge.app",
     "bundleId": "com.alvr.macos-bridge.iosurface",
+    "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
+    "executableArtifactId": "native_bridge",
     "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
     "mode": "separate-step",
     "teamId": "MM5YXC7T6E",
@@ -843,13 +851,13 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "1574b4527041eaaffb9332b226ba1e1db7f58e39e889362e8cd8f701ad34236f",
+      "sha256": "ce8d37ff3a9f2900401bae9e9dc82d46c790142ed6c6ee8eff1da581a8e89185",
       "supplyClass": "repo-source"
     },
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "f7ed386894d11bf61ceb6c3fdfca069f847e0e4a7cb57313c5e3a8472d759787",
+      "sha256": "d409efe37c30f722afe4f07d05fb783c98b4a7b48e63610dad712f09e9889a1e",
       "supplyClass": "repo-source"
     },
     {
@@ -861,19 +869,19 @@
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "f1fad6c5cef5942385133c2e0f5a442c3294b2d436553f0c77f2a0c6667deffc",
+      "sha256": "22e5ec810c8a68b418e6d0a2b2555cb1fd7987d74e2fba795e1c586ce82f3584",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "bbbd215e7acf2535942d19dcbbe6e017b6359c58f0b21cff67fc2f5c27ff1907",
+      "sha256": "14ef1cb786a3c48ead7dbdfafba54451b64ca6059a8b6e9fce3a92a89bc3d9ec",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_cli",
       "path": "${REPO_ROOT}/tools/runtime_cli.py",
-      "sha256": "98f2474c7746fc775ec7d0ecdac2cc2d034b5364526a980cb55590fd3170e917",
+      "sha256": "6c7c51244bb006c70faedc8baf19c7cc0a425f5e2e44eb6bad863aea814e4836",
       "supplyClass": "repo-source"
     },
     {

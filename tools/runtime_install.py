@@ -1058,7 +1058,7 @@ def _mutate_runtime(
         manifest, _, manifest_hash, lock_hash = load_runtime_contract(context)
         artifact_path = _absolute(artifact_path)
         artifact = verify_artifact_reference(context, artifact_path)
-        if manifest["sealing"]["mode"] == "separate-step":
+        if artifact.get("stage") != "sealed":
             return MutationReport(
                 command=command,
                 ok=False,

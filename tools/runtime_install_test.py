@@ -324,19 +324,20 @@ def lifecycle_fixture() -> Iterator[LifecycleFixture]:
 def patched_lifecycle(
     fixture: LifecycleFixture,
     *,
-    sealing_mode: str = "embedded",
+    artifact_stage: str = "sealed",
 ) -> Iterator[tuple[RuntimeContext, mock.Mock, mock.Mock]]:
     context = RuntimeContext(
         bindings_path=fixture.root / "bindings.json",
         lifecycle_lock_path=fixture.global_lock,
         runner=ClosedTargetRunner(),
     )
-    manifest = {"sealing": {"mode": sealing_mode}}
+    manifest = {"sealing": {"mode": "separate-step"}}
     artifact = {
         "path": str(fixture.artifact_root),
         "id": "fixture-runtime",
         "version": "1.0.0-dev6",
         "sealId": "a" * 64,
+        "stage": artifact_stage,
     }
     doctor = DoctorReport(
         (
@@ -375,7 +376,7 @@ def patched_lifecycle(
 class RuntimeInstallTests(unittest.TestCase):
     def test_sealing_gate_has_zero_lifecycle_mutation(self) -> None:
         with lifecycle_fixture() as fixture:
-            with patched_lifecycle(fixture, sealing_mode="separate-step") as (
+            with patched_lifecycle(fixture, artifact_stage="unsealed") as (
                 context,
                 doctor_mock,
                 stop_mock,

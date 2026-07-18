@@ -1234,7 +1234,7 @@ def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -
     except artifact_contract.ArtifactError as error:
         raise ControlError(
             "artifact.invalid",
-            "Runtime state references an invalid sealed artifact",
+            "Runtime state references an invalid runtime artifact",
             artifactError=artifact_failure_details(error),
             path=str(artifact_path),
         ) from error
@@ -1253,6 +1253,7 @@ def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -
         "id": metadata["artifact"]["id"],
         "version": metadata["artifact"]["version"],
         "sealId": metadata["sealId"],
+        "stage": metadata["stage"],
     }
 
 

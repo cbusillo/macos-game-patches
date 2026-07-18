@@ -103,3 +103,4 @@ Use this shape:
 - [014 - Runtime control plane foundation](014-runtime-control-plane-foundation.md)
 - [015 - Runtime transaction journal](015-runtime-transaction-journal.md)
 - [016 - Runtime install coordinator](016-runtime-install-coordinator.md)
+- [017 - Runtime artifact sealing](017-runtime-artifact-sealing.md)

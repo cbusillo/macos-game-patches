@@ -8,7 +8,7 @@
   "runtimeAssumptions": {
     "runtimeV1Boundary": "The first release is a single-machine, single-signing-identity, owner-operated CLI runtime for curated unmodified OpenVR/D3D11 games. It uses user-owned CrossOver, Steam, games, Apple tooling, and hardware; manually authored profiles; manual Vision Pro client launch; and the custom fake_openvr_real/openvr_submit_shim runtime rather than the real SteamVR compositor. Public distribution, OpenXR-only titles, direct Vulkan capture, other controllers, and automatic profile discovery are out of scope.",
     "controlPlaneFoundation": "The first issue #60 slice provides artifact-aware doctor, synchronized live status, and idempotent exact-owned stop commands. It preserves the launchd/Mach data plane, never trusts cached PIDs as stop targets, does not silently self-heal from doctor, and leaves start, Vision Pro waiting/connection transitions, game-process ownership, and bounded recovery for follow-up slices.",
-    "transactionFoundation": "Issue #61 now has a dev6 production-shaped lifecycle coordinator over the artifact planner and durable executor. The planner emits canonical directory-source digests and complete allowed-root authority; one fixed per-user lock, journal, history, and backup namespace is shared across checkouts and bindings; active work is quiesced, verified, recovered, or archived across direction changes; runtime-owned roots use private modes; content-namespaced stock backups are retained; recursive open-target and conservative per-filesystem capacity checks run before journal creation; and isolated fixtures cover commit, replay, uninstall, reinstall, crash recovery, locking, blockers, and CLI output. The current separate-step artifact returns artifact.sealing_required before any lifecycle mutation, so real CrossOver/game paths remain disabled until #62 supplies a verified post-sign tree identity. The JSON journal is not an authentication boundary against hostile same-user rewrites, and descriptor-anchored pathname mutation remains a live-enable requirement.",
+    "transactionFoundation": "Issue #61 has a production-shaped lifecycle coordinator over the artifact planner and durable executor. The planner emits canonical directory-source digests and complete allowed-root authority; one fixed per-user lock, journal, history, and backup namespace is shared across checkouts and bindings; active work is quiesced, verified, recovered, or archived across direction changes; runtime-owned roots use private modes; content-namespaced stock backups are retained; recursive open-target and conservative per-filesystem capacity checks run before journal creation; and isolated fixtures cover commit, replay, uninstall, reinstall, crash recovery, locking, blockers, and CLI output. Issue #62's dev7 contract adds immutable unsealed and Developer ID sealed artifact stages: final readiness is derived from verified signed bytes, source/final tree provenance, exact authority/Team ID/bundle ID/CDHash, and a no-timestamp policy rather than manifest mode alone. Unsealed artifacts still return artifact.sealing_required before mutation. The JSON journal is not an authentication boundary against hostile same-user rewrites, and descriptor-anchored pathname mutation plus physical lifecycle qualification remain live-enable requirements.",
     "secondTitleGeneralityGate": "The Lab build 7242747 now produces visible eye imagery through the packaged D3D11/OpenVR path. Exact IVRInput_007 support removes the black submitted-resource blocker, and same-texture eye bounds now propagate into border-clamped Vulkan blits. Two consecutive post-merge runs of the sealed dev5 artifact passed 5,400 disconnected frames with visible-content validation at 89.817 and 90.006 FPS steady tails, zero producer/native drops, and zero pose gaps. Separately, an earlier source-backed physical candidate was user-confirmed clear. The gate remains open until PS VR2 Sense gameplay and at least 89.5 FPS physical steady-tail cadence pass together; direct Vulkan capture, a real SteamVR compositor, game binary changes, maintained game forks, and anti-cheat bypasses remain hard cut lines.",
     "gameplayControllers": "PS VR2 Sense controllers paired directly to Apple Vision Pro with visionOS 26-or-newer accessory tracking and the ALVR PSVR2Sense profile; the qualified device runs visionOS 27.0 beta",
     "freedomSourceGeometry": "Freedom can switch its submitted side-by-side texture from 3240x1800 to 2808x1560 at level load; the native IOSurface pool remains fixed at 3240x1800 and the focused gate expects that transition explicitly",
@@ -52,6 +52,7 @@
     "theLabProfileQualification": "docs/probes/013-the-lab-profile-qualification.md",
     "runtimeControlPlaneProbe": "docs/probes/014-runtime-control-plane-foundation.md",
     "runtimeInstallCoordinatorProbe": "docs/probes/016-runtime-install-coordinator.md",
+    "runtimeArtifactSealingProbe": "docs/probes/017-runtime-artifact-sealing.md",
     "crossoverDxvkPatches": "patches/crossover-dxvk/README.md",
     "crossoverMoltenVkPatches": "patches/crossover-moltenvk/README.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
@@ -76,6 +77,7 @@
       "validate": "python3 tools/build_runtime_artifact.py validate --bindings .code/runtime-bindings.json",
       "buildA": "python3 tools/build_runtime_artifact.py build --bindings .code/runtime-bindings.json --output-root .code/runtime-build-a",
       "buildB": "python3 tools/build_runtime_artifact.py build --bindings .code/runtime-bindings.json --output-root .code/runtime-build-b",
+      "seal": "python3 tools/build_runtime_artifact.py seal --artifact <unsealed-artifact> --output-root .code/runtime-artifacts",
       "verify": "python3 tools/build_runtime_artifact.py verify --artifact <artifact-a>",
       "compare": "python3 tools/build_runtime_artifact.py compare <artifact-a> <artifact-b>",
       "plan": "python3 tools/build_runtime_artifact.py plan --artifact <artifact-a> --bindings .code/runtime-bindings.json"
@@ -98,14 +100,14 @@
     "runtimeTransaction": {
       "fixtures": "python3 tools/runtime_transaction_test.py",
       "compile": "python3 -m py_compile tools/runtime_transaction.py tools/runtime_transaction_test.py",
-      "boundary": "Reusable transaction executor with exact planner tree identity; production-shaped lifecycle CLI remains fail-closed on separate-step artifacts and does not yet enable real CrossOver/game mutation"
+      "boundary": "Reusable transaction executor with exact planner tree identity; unsealed artifacts remain fail-closed, while verified final-stage signed artifacts still require descriptor-anchored live-path and physical qualification before real CrossOver/game enablement"
     },
     "runtimeLifecycle": {
       "fixtures": "python3 tools/runtime_install_test.py",
       "compile": "python3 -m py_compile tools/runtime_install.py tools/runtime_cli.py tools/runtime_install_test.py",
       "install": "python3 tools/runtime_cli.py install --artifact <artifact> [--bindings <bindings>] [--json]",
       "uninstall": "python3 tools/runtime_cli.py uninstall --artifact <artifact> [--bindings <bindings>] [--json]",
-      "boundary": "The dev6 ownership, lock, journal, backup, recovery, capacity, and CLI contract is implemented only against temporary fixtures; current separate-step artifacts return artifact.sealing_required before mutation"
+      "boundary": "The ownership, lock, journal, backup, recovery, capacity, and CLI contract is implemented against temporary fixtures; dev7 unsealed artifacts return artifact.sealing_required before mutation, and sealed artifacts remain subject to live-path hardening and physical qualification"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
