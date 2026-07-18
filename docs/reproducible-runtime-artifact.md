@@ -267,7 +267,9 @@ by the transaction executor. It reports complete install/uninstall plans, the
 resolved mutable-state inventory, readiness, and blockers, even when the current
 host is not in an installable state. It rejects an artifact built from a
 different external manifest or lock. The command emits JSON and performs no
-mutation.
+mutation. An unsealed artifact reports `installReady=false` and
+`uninstallReady=false` with an `artifact.sealing_required` blocker even when
+every target operation is otherwise ready.
 
 ### Transactional Lifecycle Commands
 

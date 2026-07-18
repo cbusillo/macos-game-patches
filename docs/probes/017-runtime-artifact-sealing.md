@@ -102,7 +102,7 @@ exists.
 The dev7 implementation passes the cross-platform artifact self-test with
 unsealed admission, post-build sealing, CMS-variance, sealed planning,
 relocation, re-seal refusal, signed-tree tamper, and existing artifact fixtures.
-All 15 lifecycle, 15 transaction, and 22 control tests remain green, including
+All 15 lifecycle, 15 transaction, and 23 control tests remain green, including
 zero-mutation live-path hardening and unsealed doctor-readiness checks.
 
 Qualified local validation passed on Mac16,9 with macOS 27.0, Xcode 27.0,

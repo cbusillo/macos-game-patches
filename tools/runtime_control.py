@@ -1256,7 +1256,12 @@ def resolve_context_paths(
     return manifest, bindings, paths
 
 
-def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -> dict[str, Any]:
+def verify_artifact_reference(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    *,
+    require_sealed: bool = False,
+) -> dict[str, Any]:
     _, _, manifest_hash, lock_hash = load_runtime_contract(context)
     artifact_path = pathlib.Path(os.path.abspath(artifact.expanduser()))
     try:
@@ -1277,6 +1282,13 @@ def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -
             artifactLockSha256=metadata["lockSha256"],
             expectedManifestSha256=manifest_hash,
             expectedLockSha256=lock_hash,
+        )
+    if require_sealed and metadata["stage"] != "sealed":
+        raise ControlError(
+            "artifact.sealing_required",
+            "Runtime state artifact requires Developer ID final sealing",
+            path=str(artifact_path),
+            stage=metadata["stage"],
         )
     return {
         "path": str(artifact_path),
@@ -1396,7 +1408,11 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
                 control_state,
             )
         try:
-            artifact_summary = verify_artifact_reference(context, pathlib.Path(record["artifactPath"]))
+            artifact_summary = verify_artifact_reference(
+                context,
+                pathlib.Path(record["artifactPath"]),
+                require_sealed=True,
+            )
         except ControlError as error:
             return failed_status(
                 error.code,
@@ -1416,7 +1432,11 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
             )
         if artifact is not None:
             try:
-                requested_artifact = verify_artifact_reference(context, artifact)
+                requested_artifact = verify_artifact_reference(
+                    context,
+                    artifact,
+                    require_sealed=True,
+                )
             except ControlError as error:
                 return failed_status(
                     error.code,
@@ -1485,7 +1505,8 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
     core_checks = {
         check.id: check.status
         for check in doctor.checks
-        if check.id in {"repository.contract", "artifact.verify", "artifact.contract"}
+        if check.id
+        in {"repository.contract", "artifact.verify", "artifact.stage", "artifact.contract"}
     }
     if any(
         core_checks.get(check_id) != "pass"
@@ -1494,6 +1515,16 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
         return failed_status(
             "artifact.invalid",
             "Requested runtime artifact is invalid or belongs to another contract",
+            service,
+            lock,
+            control_state,
+            doctor.checks,
+            doctor.artifact,
+        )
+    if core_checks.get("artifact.stage") != "pass":
+        return failed_status(
+            "artifact.sealing_required",
+            "Requested runtime artifact requires Developer ID final sealing",
             service,
             lock,
             control_state,
