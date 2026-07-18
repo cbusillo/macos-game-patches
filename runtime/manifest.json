@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev4"
+    "version": "1.0.0-dev5"
   },
   "artifacts": [
     {
@@ -689,25 +689,25 @@
     {
       "id": "openvr_shim_source",
       "path": "${REPO_ROOT}/tools/openvr_submit_shim.cpp",
-      "sha256": "d068a1b6f8d9a6e43f38971ade6359b191f314431c930f96d29d6855dadb095a",
+      "sha256": "39dcb706b74cedca784549eca4a32766ec28b154b8769c678f424d38f8803ebb",
       "supplyClass": "repo-source"
     },
     {
       "id": "custom_openvr_runtime_source",
       "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
-      "sha256": "f25726fb7210b94f7b47832b2b8af5851b310806d1412ca21476ed2631b0b212",
+      "sha256": "56ac781b8cea36e6012d201c197c0cbab21233455e8699b9ec42967b130ba805",
       "supplyClass": "repo-source"
     },
     {
       "id": "dxvk_submit_source",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
-      "sha256": "91a1e29a3a5215da33e84878afa4848b78fef06405c489da89394fb683dd2fab",
+      "sha256": "7d8bfb4ec43eafd30ed2fa70f11ae3663cab451d55af45d05bec243ac7dc4edf",
       "supplyClass": "repo-source"
     },
     {
       "id": "dxvk_submit_header",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.h",
-      "sha256": "8c9e0bda131ba7d2c3fd11a3d58acabb03a967fe7d95d3ea178432bb0dbb2bde",
+      "sha256": "e1e53889c25d16b6f04a2a50f4c4a0c68bebd4f994e3b033ab4bcb032dd6bff9",
       "supplyClass": "repo-source"
     },
     {

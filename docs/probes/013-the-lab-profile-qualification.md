@@ -9,17 +9,17 @@ the proven frame, pose, transport, controller, or native handoff protocols?
 ## Boundary
 
 - Steam app: `450390` (`The Lab`).
-- Runtime artifact: issue #58 artifact `1.0.0-dev1` with seal `ccd98aa245ce0f0b`
-  was the initial candidate. The first artifact-backed smoke proved that its
-  ALVR host pin lacked the production `iosurface` entrypoint, so qualification
-  now requires a `1.0.0-dev2` rebuild from the physically qualified host commit
-  `229e8ced76be9b62307fe79690229c5e6bc020d5`.
+- Runtime artifact history: issue #58 artifact `1.0.0-dev1` with seal
+  `ccd98aa245ce0f0b` was the initial candidate, and `1.0.0-dev2` first corrected
+  its missing production `iosurface` host entrypoint. The current eye/input
+  compatibility correction is packaged as `1.0.0-dev5`.
 - Host matrix: Mac16,9, macOS 27.0, CrossOver 26.2, and the pinned ALVR and
   ALVR visionOS checkouts in `.github/github.json`.
 - Supported title path: official OpenVR plus D3D11 only.
 - Required title behavior: hub launch, one hub-to-experience transition, two
-  meaningful interactive experiences, adaptive source geometry, and PS VR2
-  Sense gameplay.
+  meaningful interactive experiences, bounded declared stereo geometry, and
+  PS VR2 Sense gameplay. The current stable profile intentionally fixes the
+  source at `1152x1280` per eye instead of enabling adaptive quality.
 - Hard cuts: no game binary patches, maintained fork, real SteamVR compositor,
   direct Vulkan capture, anti-cheat bypass, or title-specific native protocol.
 
@@ -334,11 +334,12 @@ Issue routing:
 
 ## Status
 
-`architecture-ceiling`: the official payload and reusable profiles pass strict
-preflight, and the packaged runtime sustains The Lab at the required cadence,
-but it has not produced visible game content.
+`partial-pass`: the custom runtime now produces visible The Lab eye imagery in
+disconnected and physical runs. The black-eye architecture ceiling is removed.
+Issue #67 remains open because PS VR2 Sense gameplay and repeatable physical
+steady-tail cadence have not both passed in one acceptance run.
 
-### Final Disconnected Classification
+### Pre-Correction Disconnected Classification
 
 Artifact `1.0.0-dev4`, seal
 `805d6ca7d57b42145cb8a9fd77c347671bda20fe9f7113d020da57152e1d466a`,
@@ -357,3 +358,86 @@ The physical Vision Pro was unavailable on July 17, 2026; the next discriminator
 is a live physical run. If live tracking/focus does not produce visible content,
 issue #59 has reached the declared custom-fake-runtime/compositor ceiling and
 must not be closed as a successful second-title qualification.
+
+### Compositor-Compatible Eye Submission Correction
+
+The first actionable divergence was OpenVR input bootstrap, not the native
+IOSurface or encoder path. The Lab requests both `IVRInput_007` and
+`FnTable:IVRInput_007`; the fake runtime stopped at `IVRInput_006`. The exact
+27-slot interface adds `GetActionBindingInfo` before the final three methods.
+After that ABI became available, the same official game build submitted visible
+RGBA eye content instead of the persistently black resource observed by the
+pre-correction runs.
+
+The submission path also now preserves each eye's `VRTextureBounds_t` through
+the same-texture D3D11 pair and into the Vulkan blit. Cropped eye regions are
+validated as disjoint left/right halves, all cropped linear-blit borders are
+copied with nearest filtering to prevent sampling outside the declared region,
+and full/null bounds cannot be misclassified as side-by-side stereo. The third
+startup pixel test uses an inset RGBA source and samples an output corner, so
+both channel conversion and crop-edge isolation fail closed before production.
+
+Run:
+`the-lab-noaq-msaa2-full/real-native-encode-20260717T224707Z`
+
+Verified:
+
+- The official hub submitted one `2304x1280`
+  `DXGI_FORMAT_R8G8B8A8_TYPELESS` texture for both eyes with explicit
+  `[0.0, 0.5]` and `[0.5, 1.0]` horizontal bounds.
+- All `5400/5400` requested frames were submitted and encoded, eventual visible
+  content passed, producer and native drops remained zero, pose-generation gaps
+  remained zero, and the final 300-frame producer window was `90.006 FPS`.
+- Cleanup restored all three stock OpenVR DLL hashes and stock MoltenVK and
+  removed the launchd job, lock, staged files, and transient processes.
+
+Physical discriminator:
+`the-lab-visible-physical-full/real-native-encode-20260717T232639Z`
+
+Human observation:
+The user confirmed the Vision Pro image was clear. They left the headset before
+controller testing, so the subsequent client disconnect and not-ready drops do
+not qualify cadence, recovery, or gameplay and are not treated as an acceptance
+pass.
+
+### Remaining Input And Cadence Gate
+
+The runtime now exposes The Lab's action manifest through `IVRInput_007`, maps
+the declared trigger, grip, pose, thumbstick, menu, tool, movement, and haptic
+actions onto the shared PS VR2 Sense state, and reports `HeadsetOnHead` as an
+active head-origin action. The profile launches with `-hub` so qualification no
+longer waits in the noninteractive Valve logo sequence; `-noaq -msaa 2` keeps a
+fixed `1152x1280` per-eye source while retaining 2x MSAA.
+
+Do not infer controller failure from the earlier logo-scene runs: that scene
+only queried `HeadsetOnHead`. Conversely, do not claim gameplay from tracked
+controller poses alone. A valid completion run must actively supply both hands,
+highlight and select a hub destination, exercise trigger and grip in gameplay,
+retain at least `89.5 FPS` in the final 300-frame window, and complete cleanup.
+
+The July 18 physical transport-only run
+`the-lab-hub-controller-physical/real-native-encode-20260718T001219Z`
+transported `16200/16200` frames with zero producer/native drops and zero pose
+gaps, but the client supplied fallback tracking and the tail was `89.414 FPS`.
+It is useful negative evidence, not an acceptance run.
+
+The post-review hardening run
+`the-lab-review-fixes/real-native-encode-20260718T014958Z` passed all three
+startup pixel tests, including the cropped RGBA output corner at
+`3239,1799`, then submitted and encoded `1800/1800` visible frames with zero
+drops, zero pose gaps, and exact cleanup. Its `84.202 FPS` tail is correctness
+evidence only and does not replace the required cadence run.
+
+Reproducible artifact-backed commands after the dev5 artifact is sealed:
+
+```bash
+python3 tools/runtime_profile.py probe \
+  --profile the-lab --artifact <dev5-artifact> --mode disconnected
+python3 tools/runtime_profile.py probe \
+  --profile the-lab --artifact <dev5-artifact> --mode physical
+python3 tools/vr_stack_cleanup.py
+```
+
+Issue routing:
+merge the reusable eye/input compatibility correction without closing #67;
+then complete #67's physical controller/cadence gate before unblocking #59.

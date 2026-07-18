@@ -31,6 +31,18 @@ struct SubmitProofPose {
     bool fallback = false;
 };
 
+struct SubmitProofTextureRegion {
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+struct SubmitProofStereoRegions {
+    SubmitProofTextureRegion left;
+    SubmitProofTextureRegion right;
+};
+
 class DxvkIosurfaceSubmitProof {
   public:
     explicit DxvkIosurfaceSubmitProof(SubmitProofLogFunction logFunction);
@@ -45,6 +57,7 @@ class DxvkIosurfaceSubmitProof {
     void shutdown();
 
     void capturePoolFrame(ID3D11Texture2D *sourceTexture,
+                          const SubmitProofStereoRegions &sourceRegions,
                           uint64_t submitSequence,
                           uint32_t eye,
                           uint64_t videoTimestampNs,
@@ -81,6 +94,7 @@ class DxvkIosurfaceSubmitProof {
     static DWORD WINAPI poolInitializationEntry(void *parameter);
     void capturePoolSources(ID3D11Texture2D *leftTexture,
                             ID3D11Texture2D *rightTexture,
+                            const SubmitProofStereoRegions *sourceRegions,
                             uint64_t submitSequence,
                             uint32_t eye,
                             uint64_t videoTimestampNs,
