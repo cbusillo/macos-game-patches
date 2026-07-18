@@ -11,8 +11,10 @@ import tempfile
 import unittest
 from collections.abc import Iterator
 from typing import Any
+from unittest import mock
 
 import build_runtime_artifact as artifact_contract
+import runtime_transaction
 from runtime_transaction import TransactionError, TransactionExecutor
 
 
@@ -375,6 +377,65 @@ class TransactionTests(unittest.TestCase):
             self.assertFalse(paths["absent_target"].exists())
             self.assertEqual(fixture.transaction_temporary_paths(), [])
 
+        with fixture_layout() as fixture:
+            installed_source = fixture.artifact_file("payload/installed.bin", b"installed")
+            restored_target = fixture.target_file("game/restored.bin", b"original")
+            missing_backup = fixture.target_root / "backups/missing.bin"
+            missing_backup.parent.mkdir()
+            restored_operations: list[dict[str, Any]] = [
+                {
+                    "id": "restore_original",
+                    "resource": "restored_file",
+                    "action": "restore",
+                    "atomic": True,
+                    "source": str(installed_source),
+                    "sourceSha256": artifact_contract.sha256_file(installed_source),
+                    "target": str(restored_target),
+                    "backup": str(missing_backup),
+                    "expectedSha256": artifact_contract.sha256_file(restored_target),
+                    "state": "already-restored",
+                    "ready": True,
+                }
+            ]
+
+            report = fixture.executor("uninstall", restored_operations).execute()
+            self.assertTrue(report.ok)
+            self.assertEqual(restored_target.read_bytes(), b"original")
+            self.assertFalse(missing_backup.exists())
+
+        with fixture_layout() as fixture:
+            installed_source = fixture.artifact_file("payload/installed.bin", b"installed")
+            restore_target = fixture.target_file("game/restore.bin", b"installed")
+            backup = fixture.target_file("backups/restore.bin", b"original")
+            race_operations: list[dict[str, Any]] = [
+                {
+                    "id": "restore_original",
+                    "resource": "restored_file",
+                    "action": "restore",
+                    "atomic": True,
+                    "source": str(installed_source),
+                    "sourceSha256": artifact_contract.sha256_file(installed_source),
+                    "target": str(restore_target),
+                    "backup": str(backup),
+                    "expectedSha256": artifact_contract.sha256_file(backup),
+                }
+            ]
+
+            def replace_before_intent(step_id: str, phase: str) -> None:
+                if step_id == "restore_original" and phase == "before":
+                    restore_target.write_bytes(b"foreign")
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor(
+                    "uninstall",
+                    race_operations,
+                    failure_injector=replace_before_intent,
+                ).execute()
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            self.assertEqual(restore_target.read_bytes(), b"foreign")
+            recovered = fixture.executor("uninstall", race_operations).recover()
+            self.assertEqual(recovered.state, "rolled-back")
+
     def test_assertion_failure_precedes_journal_and_target_mutation(self) -> None:
         with fixture_layout() as fixture:
             target = fixture.target_file("game/stock.bin", b"unexpected")
@@ -471,6 +532,81 @@ class TransactionTests(unittest.TestCase):
                 self.assertEqual(report.state, "rolled-back")
                 self.assertEqual(snapshot_tree(fixture.target_root), before)
                 self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+        with fixture_layout() as fixture:
+            operations, target_tree = fixture.prepare_tree_replace()
+
+            def crash_after_tree(step_id: str, phase: str) -> None:
+                if step_id == "replace_crash_tree" and phase == "after-mutation":
+                    raise SimulatedCrash("remove original payload")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_after_tree,
+                ).execute()
+            journal = json.loads(fixture.journal_path.read_text())
+            replace_step = next(
+                step for step in journal["steps"] if step["id"] == "replace_crash_tree"
+            )
+            shutil.rmtree(pathlib.Path(replace_step["undo"]["original"]))
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).recover()
+            self.assertEqual(raised.exception.code, "transaction.rollback_failed")
+            self.assertEqual(
+                (target_tree / "Contents/Resources/data.bin").read_bytes(),
+                b"new crash tree",
+            )
+            failed_journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(failed_journal["state"], "failed")
+
+        with fixture_layout() as fixture:
+            operations, _ = fixture.prepare_tree_replace()
+            before = snapshot_tree(fixture.target_root)
+
+            def crash_after_tree(step_id: str, phase: str) -> None:
+                if step_id == "replace_crash_tree" and phase == "after-mutation":
+                    raise SimulatedCrash("rollback discard fixture")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_after_tree,
+                ).execute()
+
+            real_remove = runtime_transaction.remove_path_durable
+            crashed = False
+
+            def crash_during_discard(path: pathlib.Path) -> None:
+                nonlocal crashed
+                if not crashed and path.name.endswith(".rollback") and path.is_dir():
+                    crashed = True
+                    marker = path / MARKER
+                    marker.unlink()
+                    raise SimulatedCrash("recursive discard cleanup")
+                real_remove(path)
+
+            with mock.patch.object(
+                runtime_transaction,
+                "remove_path_durable",
+                side_effect=crash_during_discard,
+            ), self.assertRaises(SimulatedCrash):
+                fixture.executor("install", operations).recover()
+
+            interrupted = json.loads(fixture.journal_path.read_text())
+            replace_step = next(
+                step for step in interrupted["steps"] if step["id"] == "replace_crash_tree"
+            )
+            self.assertEqual(interrupted["state"], "rolling-back")
+            self.assertEqual(replace_step["undo"]["phase"], "rollback-restored")
+
+            report = fixture.executor("install", operations).recover()
+            self.assertEqual(report.state, "rolled-back")
+            self.assertEqual(snapshot_tree(fixture.target_root), before)
+            self.assertEqual(fixture.transaction_temporary_paths(), [])
 
     def test_crash_during_rollback_resumes_rolling_back_step(self) -> None:
         with fixture_layout() as fixture:
@@ -660,6 +796,13 @@ class TransactionTests(unittest.TestCase):
                 fixture.executor("install", [unknown]).execute()
             self.assertEqual(unknown_raised.exception.code, "transaction.action_unsupported")
 
+            future = dict(retain)
+            future["id"] = "future_field"
+            future["futureExecutionMode"] = "unsafe"
+            with self.assertRaises(TransactionError) as future_raised:
+                fixture.executor("install", [future]).execute()
+            self.assertEqual(future_raised.exception.code, "transaction.plan_invalid")
+
             tree = fixture.tree(fixture.artifact_root / "payload/Tree.app")
             traversal: list[dict[str, Any]] = [
                 {
@@ -842,6 +985,51 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "transaction.journal_invalid")
             self.assertEqual(external.read_bytes(), b"external")
             self.assertEqual(target.read_bytes(), b"created")
+
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/create.bin", b"created")
+            target = fixture.target_root / "created.bin"
+            forged_operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_created_absent",
+                    "resource": "created_file",
+                    "action": "assert_absent",
+                    "target": str(target),
+                },
+                {
+                    "id": "create_file",
+                    "resource": "created_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                },
+            ]
+
+            def crash_after_intent(step_id: str, phase: str) -> None:
+                if step_id == "create_file" and phase == "after-intent":
+                    raise SimulatedCrash("forge committed state")
+
+            executor = fixture.executor(
+                "install",
+                forged_operations,
+                failure_injector=crash_after_intent,
+            )
+            with self.assertRaises(SimulatedCrash):
+                executor.execute()
+            forged = json.loads(fixture.journal_path.read_text())
+            forged["state"] = "committed"
+            forged["currentStep"] = None
+            for step in forged["steps"]:
+                step["status"] = "applied"
+            fixture.journal_path.write_text(json.dumps(forged))
+
+            with self.assertRaises(TransactionError) as forged_raised:
+                fixture.executor("install", forged_operations).execute()
+            self.assertEqual(forged_raised.exception.code, "transaction.journal_inconsistent")
+            self.assertFalse(target.exists())
+            self.assertTrue(executor.undo_root.exists())
 
 
 if __name__ == "__main__":

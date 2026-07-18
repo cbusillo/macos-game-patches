@@ -94,6 +94,32 @@ SEMANTIC_OPERATION_FIELDS = (
     "backup",
     "expectedSha256",
 )
+OBSERVATION_OPERATION_FIELDS = frozenset(
+    {
+        "ready",
+        "blockedReason",
+        "sourceFiles",
+        "actualSha256",
+        "exists",
+        "ownership",
+        "targetMarkerSha256",
+        "backupExists",
+        "targetSha256",
+        "backupSha256",
+        "state",
+    }
+)
+KNOWN_OPERATION_FIELDS = frozenset(SEMANTIC_OPERATION_FIELDS) | OBSERVATION_OPERATION_FIELDS
+TREE_PHASES = frozenset(
+    {
+        "intent",
+        "staged",
+        "original-moved",
+        "replacement-installed",
+        "rollback-target-moved",
+        "rollback-restored",
+    }
+)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -446,6 +472,14 @@ class TransactionExecutor:
 
     def _validate_operation_schema(self, operation: dict[str, Any]) -> None:
         action = operation["action"]
+        unknown_fields = sorted(set(operation) - KNOWN_OPERATION_FIELDS)
+        if unknown_fields:
+            raise TransactionError(
+                "transaction.plan_invalid",
+                "Operation contains unknown fields",
+                operation=operation["id"],
+                fields=unknown_fields,
+            )
         self._mutable_path(operation, "target")
         resource = operation.get("resource")
         if not isinstance(resource, str) or ID_PATTERN.fullmatch(resource) is None:
@@ -830,20 +864,22 @@ class TransactionExecutor:
             source = self._verify_source_file(operation)
             backup = self._mutable_path(operation, "backup")
             expected = self._required_sha256(operation, "expectedSha256")
+            target_hash = artifact_contract.sha256_file(target) if target.is_file() else None
+            if target_hash == expected:
+                return
+            if target_hash != artifact_contract.sha256_file(source):
+                raise TransactionError(
+                    "transaction.target_foreign",
+                    "Restore target is neither installed nor already restored",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             if not backup.is_file() or artifact_contract.sha256_file(backup) != expected:
                 raise TransactionError(
                     "transaction.backup_mismatch",
                     "Restore backup does not match the expected original",
                     operation=operation["id"],
                     path=str(backup),
-                )
-            target_hash = artifact_contract.sha256_file(target) if target.is_file() else None
-            if target_hash not in {expected, artifact_contract.sha256_file(source)}:
-                raise TransactionError(
-                    "transaction.target_foreign",
-                    "Restore target is neither installed nor already restored",
-                    operation=operation["id"],
-                    path=str(target),
                 )
         elif action == "remove":
             source = self._verify_source_file(operation)
@@ -896,6 +932,7 @@ class TransactionExecutor:
             return (
                 self._step_temporary_path(index, operation, "original", sibling_of=target),
                 self._step_temporary_path(index, operation, "staging", sibling_of=target),
+                self._step_temporary_path(index, operation, "rollback", sibling_of=target),
             )
         if action in {"remove", "remove_tree"}:
             return (self._step_temporary_path(index, operation, "removed", sibling_of=target),)
@@ -1051,14 +1088,22 @@ class TransactionExecutor:
             contract = self._tree_contract(operation)
             original = self._step_temporary_path(index, operation, "original", sibling_of=target)
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
+            rollback_discard = self._step_temporary_path(
+                index,
+                operation,
+                "rollback",
+                sibling_of=target,
+            )
             expected_keys = {
                 "kind",
                 "target",
                 "original",
                 "staging",
+                "rollbackDiscard",
                 "existed",
                 "marker",
                 "markerSha256",
+                "phase",
                 "commitCleanupPaths",
             }
             if set(undo) != expected_keys or undo.get("kind") != "restore-tree":
@@ -1067,11 +1112,14 @@ class TransactionExecutor:
                 undo.get("target") != str(target)
                 or undo.get("original") != str(original)
                 or undo.get("staging") != str(staging)
+                or undo.get("rollbackDiscard") != str(rollback_discard)
                 or not isinstance(undo.get("existed"), bool)
                 or undo.get("marker") != self._marker_relative(contract).as_posix()
                 or undo.get("markerSha256")
                 != self._required_sha256(contract, "sourceMarkerSha256")
-                or undo.get("commitCleanupPaths") != [str(original), str(staging)]
+                or undo.get("phase") not in TREE_PHASES
+                or undo.get("commitCleanupPaths")
+                != [str(original), str(staging), str(rollback_discard)]
             ):
                 raise self._invalid_journal("Transaction journal tree undo is invalid", index=index)
             return
@@ -1216,6 +1264,27 @@ class TransactionExecutor:
                     raise self._invalid_journal("Pending journal step contains undo intent", index=index)
             else:
                 self._validate_undo(index, operation, step.get("undo"))
+                if operation["action"] == "replace_tree":
+                    phase = step["undo"]["phase"]
+                    if step["status"] == "applied" and phase != "replacement-installed":
+                        raise self._invalid_journal(
+                            "Applied tree journal step has an invalid phase",
+                            index=index,
+                        )
+                    if step["status"] == "rolled-back" and phase != "rollback-restored":
+                        raise self._invalid_journal(
+                            "Rolled-back tree journal step has an invalid phase",
+                            index=index,
+                        )
+                    if phase.startswith("rollback-") and journal["state"] not in {
+                        "rolling-back",
+                        "rolled-back",
+                        "failed",
+                    }:
+                        raise self._invalid_journal(
+                            "Forward tree journal step has a rollback phase",
+                            index=index,
+                        )
         if journal["state"] == "failed" and not any(
             step["status"] == "rollback-failed" for step in steps
         ):
@@ -1296,6 +1365,60 @@ class TransactionExecutor:
             cleanup_failures,
         )
 
+    def _verify_committed_state(self, journal: dict[str, Any]) -> None:
+        for operation, step in zip(self.operations, journal["steps"], strict=True):
+            action = operation["action"]
+            target = self._mutable_path(operation, "target")
+            undo = step.get("undo") or {}
+            if action == "backup":
+                backup = self._mutable_path(operation, "backup")
+                expected = undo.get("backupSha256")
+                if (
+                    not backup.is_file()
+                    or not isinstance(expected, str)
+                    or artifact_contract.sha256_file(backup) != expected
+                ):
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed backup state does not match the journal",
+                        operation=operation["id"],
+                        path=str(backup),
+                    )
+            elif action in {"replace_file", "create_file"}:
+                expected = self._required_sha256(operation, "sourceSha256")
+                if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed file state does not match the plan",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
+            elif action == "replace_tree":
+                self._validate_owned_tree(operation, target)
+                if not target.is_dir():
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed tree target is missing",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
+            elif action == "restore":
+                expected = self._required_sha256(operation, "expectedSha256")
+                if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+                    raise TransactionError(
+                        "transaction.journal_inconsistent",
+                        "Committed restore state does not match the plan",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
+            elif action in {"remove", "remove_tree"} and path_lexists(target):
+                raise TransactionError(
+                    "transaction.journal_inconsistent",
+                    "Committed removal target still exists",
+                    operation=operation["id"],
+                    path=str(target),
+                )
+
     def _cleanup_payloads(self, journal: dict[str, Any]) -> None:
         failures: list[str] = []
         for step in journal["steps"]:
@@ -1332,6 +1455,7 @@ class TransactionExecutor:
             journal = self._load_journal()
             if journal is not None:
                 if journal["state"] == "committed":
+                    self._verify_committed_state(journal)
                     return self._finalize_cleanup(journal)
                 if journal["state"] in {"prepared", "running", "rolling-back"}:
                     raise TransactionError(
@@ -1361,16 +1485,18 @@ class TransactionExecutor:
                     step = journal["steps"][index]
                     journal["currentStep"] = operation["id"]
                     self._inject(operation["id"], "before")
+                    self._preflight_operation(operation)
                     undo = self._prepare_undo(index, operation)
                     step["undo"] = undo
                     step["status"] = "applying"
                     self._save_journal(journal)
                     self._inject(operation["id"], "after-intent")
-                    self._apply_operation(operation, undo)
+                    self._apply_operation(operation, undo, journal)
                     self._inject(operation["id"], "after-mutation")
                     step["status"] = "applied"
                     self._save_journal(journal)
                     self._inject(operation["id"], "after")
+                self._verify_committed_state(journal)
                 journal["currentStep"] = None
                 journal["state"] = "committed"
                 self._save_journal(journal)
@@ -1403,6 +1529,7 @@ class TransactionExecutor:
                     path=str(self.journal_path),
                 )
             if journal["state"] == "committed":
+                self._verify_committed_state(journal)
                 return self._finalize_cleanup(journal)
             if journal["state"] == "rolled-back":
                 return self._finalize_cleanup(journal)
@@ -1491,15 +1618,23 @@ class TransactionExecutor:
             contract = self._tree_contract(operation)
             original = self._step_temporary_path(index, operation, "original", sibling_of=target)
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
+            rollback_discard = self._step_temporary_path(
+                index,
+                operation,
+                "rollback",
+                sibling_of=target,
+            )
             return {
                 "kind": "restore-tree",
                 "target": str(target),
                 "original": str(original),
                 "staging": str(staging),
+                "rollbackDiscard": str(rollback_discard),
                 "existed": target.is_dir(),
                 "marker": self._marker_relative(contract).as_posix(),
                 "markerSha256": self._required_sha256(contract, "sourceMarkerSha256"),
-                "commitCleanupPaths": [str(original), str(staging)],
+                "phase": "intent",
+                "commitCleanupPaths": [str(original), str(staging), str(rollback_discard)],
             }
         if action == "remove":
             original = self._step_temporary_path(index, operation, "removed", sibling_of=target)
@@ -1529,7 +1664,12 @@ class TransactionExecutor:
             action=action,
         )
 
-    def _apply_operation(self, operation: dict[str, Any], undo: dict[str, Any]) -> None:
+    def _apply_operation(
+        self,
+        operation: dict[str, Any],
+        undo: dict[str, Any],
+        journal: dict[str, Any],
+    ) -> None:
         self._preflight_operation(operation)
         action = operation["action"]
         target = self._mutable_path(operation, "target")
@@ -1570,7 +1710,12 @@ class TransactionExecutor:
             source = self._verify_source_tree(operation)
             original = pathlib.Path(undo["original"])
             staging = pathlib.Path(undo["staging"])
-            if path_lexists(original) or path_lexists(staging):
+            rollback_discard = pathlib.Path(undo["rollbackDiscard"])
+            if (
+                path_lexists(original)
+                or path_lexists(staging)
+                or path_lexists(rollback_discard)
+            ):
                 raise TransactionError(
                     "transaction.temporary_exists",
                     "Tree transaction temporary path already exists",
@@ -1579,11 +1724,17 @@ class TransactionExecutor:
             shutil.copytree(source, staging, copy_function=shutil.copy2)
             reject_tree_symlinks(staging)
             fsync_tree(staging)
+            undo["phase"] = "staged"
+            self._save_journal(journal)
             if path_lexists(target):
                 os.replace(target, original)
                 fsync_directory(target.parent)
+                undo["phase"] = "original-moved"
+                self._save_journal(journal)
             os.replace(staging, target)
             fsync_directory(target.parent)
+            undo["phase"] = "replacement-installed"
+            self._save_journal(journal)
             return
         if action == "restore":
             backup = self._mutable_path(operation, "backup")
@@ -1635,7 +1786,7 @@ class TransactionExecutor:
             self._save_journal(journal)
             try:
                 self._inject(step["id"], "before-rollback")
-                self._undo_step(step)
+                self._undo_step(step, journal)
                 step["status"] = "rolled-back"
                 self._save_journal(journal)
                 self._inject(step["id"], "after-rollback")
@@ -1676,7 +1827,7 @@ class TransactionExecutor:
                 path=str(path),
             )
 
-    def _undo_step(self, step: dict[str, Any]) -> None:
+    def _undo_step(self, step: dict[str, Any], journal: dict[str, Any]) -> None:
         undo = step["undo"]
         kind = undo["kind"]
         if kind == "none":
@@ -1755,6 +1906,7 @@ class TransactionExecutor:
             target = pathlib.Path(undo["target"])
             original = pathlib.Path(undo["original"])
             staging = pathlib.Path(undo["staging"])
+            rollback_discard = pathlib.Path(undo["rollbackDiscard"])
             remove_path_durable(staging)
             if undo["existed"]:
                 if path_lexists(original):
@@ -1769,28 +1921,107 @@ class TransactionExecutor:
                             undo["marker"],
                             undo["markerSha256"],
                         )
-                        remove_path_durable(target)
+                        if path_lexists(rollback_discard):
+                            raise TransactionError(
+                                "transaction.undo_foreign",
+                                "Tree rollback discard already exists",
+                                path=str(rollback_discard),
+                            )
+                        os.replace(target, rollback_discard)
+                        fsync_directory(target.parent)
+                        undo["phase"] = "rollback-target-moved"
+                        self._save_journal(journal)
                     os.replace(original, target)
                     fsync_directory(target.parent)
-                elif path_lexists(target):
+                    undo["phase"] = "rollback-restored"
+                    self._save_journal(journal)
+                    remove_path_durable(rollback_discard)
+                elif undo["phase"] == "rollback-restored":
+                    if not path_lexists(target):
+                        raise TransactionError(
+                            "transaction.undo_missing",
+                            "Restored tree target is missing",
+                            path=str(target),
+                        )
                     self._validate_tree_marker(
                         target,
                         undo["marker"],
                         undo["markerSha256"],
                     )
+                    remove_path_durable(rollback_discard)
+                elif path_lexists(rollback_discard) and path_lexists(target):
+                    self._validate_tree_marker(
+                        target,
+                        undo["marker"],
+                        undo["markerSha256"],
+                    )
+                    undo["phase"] = "rollback-restored"
+                    self._save_journal(journal)
+                    remove_path_durable(rollback_discard)
+                elif (
+                    undo["phase"] in {"intent", "staged"}
+                    and path_lexists(target)
+                    and not path_lexists(rollback_discard)
+                ):
+                    self._validate_tree_marker(
+                        target,
+                        undo["marker"],
+                        undo["markerSha256"],
+                    )
+                    undo["phase"] = "rollback-restored"
+                    self._save_journal(journal)
                 else:
                     raise TransactionError(
                         "transaction.undo_missing",
-                        "Tree rollback has neither target nor original payload",
+                        "Tree rollback original payload is missing",
+                        path=str(original),
+                    )
+            elif undo["phase"] == "rollback-restored":
+                if path_lexists(target):
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Created tree reappeared after rollback",
                         path=str(target),
                     )
+                remove_path_durable(rollback_discard)
             elif path_lexists(target):
+                if path_lexists(rollback_discard):
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Tree rollback target and discard both exist",
+                        path=str(target),
+                    )
+                if undo["phase"] == "intent":
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Tree target appeared before transaction staging",
+                        path=str(target),
+                    )
                 self._validate_tree_marker(
                     target,
                     undo["marker"],
                     undo["markerSha256"],
                 )
-                remove_path_durable(target)
+                os.replace(target, rollback_discard)
+                fsync_directory(target.parent)
+                undo["phase"] = "rollback-target-moved"
+                self._save_journal(journal)
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+                remove_path_durable(rollback_discard)
+            elif path_lexists(rollback_discard):
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+                remove_path_durable(rollback_discard)
+            elif undo["phase"] in {"intent", "staged"}:
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+            else:
+                raise TransactionError(
+                    "transaction.undo_missing",
+                    "Created tree rollback payload is missing",
+                    path=str(target),
+                )
             return
         if kind in {"restore-moved-file", "restore-moved-tree"}:
             if not undo["existed"]:

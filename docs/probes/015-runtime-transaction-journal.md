@@ -17,7 +17,8 @@ are enabled?
   rolled-back filesystem state, and stable failure codes.
 - Deferred: production `install`/`uninstall` CLI commands, a declared persistent
   journal path in the sealed manifest, app signing/Launch Services changes,
-  physical lifecycle cycles, and any mutation of user CrossOver/game paths.
+  physical lifecycle cycles, any mutation of user CrossOver/game paths, and an
+  authenticated journal for a hostile same-user rewrite threat model.
 - Hard cuts: no best-effort deletion, no following symlinks, no target outside
   allowed roots, no undeclared action, no continuation after plan/journal drift,
   and no dev5 manifest edit merely to expose this fixture slice.
@@ -82,8 +83,8 @@ rejects symlink path components before preflight or mutation.
 - mismatched plan digest and transaction kind refusal;
 - target escape, parent symlink, source symlink, journal symlink, duplicate id,
   unknown action, malformed marker, and foreign ownership marker refusal;
-- backup mismatch, journal-tamper refusal, rollback crash resumption, and
-  terminal rollback-failure journaling.
+- backup mismatch, deterministic undo-path and terminal-state inconsistency
+  refusal, rollback crash resumption, and terminal rollback-failure journaling.
 
 ## Validation
 
@@ -111,6 +112,7 @@ or the user runtime state root.
 ## Known Failure Signatures
 
 - plan digest or kind differs from an existing journal: refuse and preserve it;
+- committed journal effects disagree with live files: refuse before cleanup;
 - target or journal escapes allowed roots: refuse before mutation;
 - any symlink component in a mutable path: refuse before mutation;
 - source/target/backup hash mismatch: preflight failure, no mutation;
@@ -127,6 +129,12 @@ injected failures, recovers crashes at intent/mutation/applied and rolling-back
 boundaries, ignores volatile planner observations for committed replay, rejects
 semantic plan or kind drift, and validates every journal-owned cleanup/undo path
 before use.
+
+The JSON journal is not an authentication boundary against an owner who can
+rewrite both the journal and target files. This slice detects structural drift,
+unsafe path substitution, invalid transitions, and terminal-state/filesystem
+inconsistency; production integration must either retain that owner-operated
+threat model or add an external integrity anchor.
 
 ## Verdict
 
