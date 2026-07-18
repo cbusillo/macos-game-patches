@@ -52,6 +52,21 @@ Qualified local validation and builds use ignored bindings documented in
 `docs/reproducible-runtime-artifact.md` for the deterministic payload,
 provenance, sealing boundary, and read-only install/uninstall plan contract.
 
+## Runtime Transactions
+
+Issue #61 is converting that read-only plan into fail-closed filesystem
+transactions. The first slice is fixture-only: it validates every resolved
+action, writes a durable journal before mutation, rolls back in reverse order,
+and recovers interrupted work without touching production CrossOver or game
+paths:
+
+```bash
+python3 tools/runtime_transaction_test.py
+```
+
+Production `install` and `uninstall` commands remain follow-up work after the
+journal and backup locations are declared in the next sealed artifact contract.
+
 ## Runtime Control Plane
 
 Issue #60 is extracting the proven runtime lifecycle from the research runner.
