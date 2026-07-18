@@ -117,6 +117,29 @@ class DescriptorTests(unittest.TestCase):
                 b"left",
             )
 
+    def test_verified_cleanup_removes_read_only_tree(self) -> None:
+        target = self.target_root / "ReadOnly.app"
+        nested = target / "Contents" / "_CodeSignature"
+        nested.mkdir(parents=True)
+        payload = nested / "CodeResources"
+        payload.write_bytes(b"signed resources")
+        payload.chmod(0o444)
+        nested.chmod(0o555)
+        nested.parent.chmod(0o555)
+        target.chmod(0o555)
+
+        with DescriptorSession([self.target_root]) as session:
+            target_entry = session.bind(target)
+            identity = target_entry.identity()
+            self.assertIsNotNone(identity)
+            manifest = target_entry.tree_cleanup_manifest()
+            target_entry.remove(
+                identity,
+                manifest,
+                allow_cleanup_modes=True,
+            )
+            self.assertFalse(target_entry.exists())
+
     def test_directory_rename_invalidates_cached_descendant_descriptors(self) -> None:
         source = self.source_root / "Bridge.app"
         target = self.target_root / "Bridge.app"

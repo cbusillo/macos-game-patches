@@ -825,6 +825,8 @@ class BoundPath:
         self,
         expected: FileIdentity | None = None,
         tree_entries: list[dict[str, Any]] | None = None,
+        *,
+        allow_cleanup_modes: bool = False,
     ) -> None:
         self.verify_authority()
         metadata = self.lstat()
@@ -863,6 +865,7 @@ class BoundPath:
                 metadata,
                 "directory",
                 self.path,
+                allow_cleanup_mode=allow_cleanup_modes,
             )
             descriptor, opened = self._open_directory()
             try:
@@ -873,6 +876,7 @@ class BoundPath:
                     pathlib.PurePosixPath(),
                     self.root,
                     expected_entries,
+                    allow_cleanup_modes,
                 )
             finally:
                 os.close(descriptor)
@@ -1105,6 +1109,8 @@ def _require_cleanup_entry(
     metadata: os.stat_result,
     entry_type: str,
     path: pathlib.Path,
+    *,
+    allow_cleanup_mode: bool = False,
 ) -> dict[str, Any] | None:
     if expected_entries is None:
         return None
@@ -1122,7 +1128,16 @@ def _require_cleanup_entry(
         field=f"cleanupTree.{relative_path}.identity",
     )
     _require_identity(FileIdentity.from_stat(metadata), expected_identity, path)
-    if stat.S_IMODE(metadata.st_mode) != expected.get("mode"):
+    actual_mode = stat.S_IMODE(metadata.st_mode)
+    expected_mode = expected.get("mode")
+    cleanup_mode = (
+        expected_mode | stat.S_IWUSR | stat.S_IXUSR
+        if isinstance(expected_mode, int) and entry_type == "directory"
+        else expected_mode
+    )
+    if actual_mode != expected_mode and not (
+        allow_cleanup_mode and actual_mode == cleanup_mode
+    ):
         raise DescriptorError(
             "transaction.undo_foreign",
             "Cleanup tree entry metadata changed",
@@ -1138,7 +1153,23 @@ def _remove_tree_contents(
     relative: pathlib.PurePosixPath,
     root: _RootHandle,
     expected_entries: dict[str, dict[str, Any]] | None,
+    allow_cleanup_modes: bool,
 ) -> None:
+    directory_metadata = os.fstat(directory)
+    if allow_cleanup_modes:
+        if directory_metadata.st_uid != os.getuid():
+            raise DescriptorError(
+                "transaction.owner_mismatch",
+                "Verified cleanup directory belongs to another user",
+                path=str(path),
+                owner=directory_metadata.st_uid,
+                expectedOwner=os.getuid(),
+            )
+        directory_mode = stat.S_IMODE(directory_metadata.st_mode)
+        writable_mode = directory_mode | stat.S_IWUSR | stat.S_IXUSR
+        if writable_mode != directory_mode:
+            os.fchmod(directory, writable_mode)
+            os.fsync(directory)
     with os.scandir(directory) as entries:
         names = sorted((entry.name for entry in entries), reverse=True)
     for name in names:
@@ -1155,6 +1186,7 @@ def _remove_tree_contents(
                 metadata,
                 "file",
                 entry_path,
+                allow_cleanup_mode=allow_cleanup_modes,
             )
             descriptor = os.open(name, _file_read_flags(), dir_fd=directory)
             try:
@@ -1174,6 +1206,7 @@ def _remove_tree_contents(
                     current,
                     "file",
                     entry_path,
+                    allow_cleanup_mode=allow_cleanup_modes,
                 )
                 os.unlink(name, dir_fd=directory)
             finally:
@@ -1185,6 +1218,7 @@ def _remove_tree_contents(
                 metadata,
                 "directory",
                 entry_path,
+                allow_cleanup_mode=allow_cleanup_modes,
             )
             child = os.open(name, _directory_flags(), dir_fd=directory)
             try:
@@ -1195,6 +1229,7 @@ def _remove_tree_contents(
                     entry_relative,
                     root,
                     expected_entries,
+                    allow_cleanup_modes,
                 )
             finally:
                 os.close(child)
@@ -1206,6 +1241,7 @@ def _remove_tree_contents(
                 current,
                 "directory",
                 entry_path,
+                allow_cleanup_mode=allow_cleanup_modes,
             )
             os.rmdir(name, dir_fd=directory)
     os.fsync(directory)

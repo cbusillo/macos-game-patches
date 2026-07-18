@@ -387,7 +387,13 @@ def remove_path_durable(
             return
         raise
     if bound is not None:
-        _descriptor_result(lambda: bound.remove(expected_identity, tree_entries))
+        _descriptor_result(
+            lambda: bound.remove(
+                expected_identity,
+                tree_entries,
+                allow_cleanup_modes=tree_entries is not None,
+            )
+        )
         return
     if expected_identity is not None or tree_entries is not None:
         raise TransactionError(
@@ -653,6 +659,26 @@ def tree_cleanup_manifest(path: pathlib.Path) -> list[dict[str, Any]]:
             path=str(path),
         )
     return list(_descriptor_result(bound.tree_cleanup_manifest))
+
+
+def cleanup_tree_record_matches(
+    expected: dict[str, Any] | None,
+    actual: dict[str, Any],
+) -> bool:
+    if expected == actual:
+        return True
+    if expected is None or expected.get("type") != "directory" or actual.get("type") != (
+        "directory"
+    ):
+        return False
+    expected_mode = expected.get("mode")
+    if not isinstance(expected_mode, int):
+        return False
+    normalized = dict(actual)
+    if normalized.get("mode") != expected_mode | stat.S_IWUSR | stat.S_IXUSR:
+        return False
+    normalized["mode"] = expected_mode
+    return normalized == expected
 
 
 def validate_cleanup_tree_entries(
@@ -2502,7 +2528,7 @@ class TransactionExecutor:
                 )
             expected = {record["path"]: record for record in expected_tree_entries}
             for record in tree_cleanup_manifest(path):
-                if expected.get(record["path"]) != record:
+                if not cleanup_tree_record_matches(expected.get(record["path"]), record):
                     raise TransactionError(
                         "transaction.undo_foreign",
                         "Partial cleanup tree contains changed or unjournaled content",
