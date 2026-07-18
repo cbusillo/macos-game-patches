@@ -1031,6 +1031,16 @@ class TransactionTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertTrue(executor.undo_root.exists())
 
+        with fixture_layout() as fixture:
+            operations, target_tree = fixture.prepare_tree_replace()
+            report = fixture.executor("install", operations).execute()
+            self.assertTrue(report.ok)
+            (target_tree / "Contents/Resources/data.bin").write_bytes(b"drifted contents")
+
+            with self.assertRaises(TransactionError) as drift_raised:
+                fixture.executor("install", operations).execute()
+            self.assertEqual(drift_raised.exception.code, "transaction.journal_inconsistent")
+
 
 if __name__ == "__main__":
     unittest.main()

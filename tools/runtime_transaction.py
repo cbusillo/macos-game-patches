@@ -261,6 +261,51 @@ def reject_tree_symlinks(root: pathlib.Path) -> None:
             raise TransactionError("path.symlink", "Tree contains a symlink", path=str(path))
 
 
+def tree_sha256(root: pathlib.Path) -> str:
+    reject_tree_symlinks(root)
+    if not root.is_dir():
+        raise TransactionError(
+            "transaction.source_missing",
+            "Tree digest requires a directory",
+            path=str(root),
+        )
+    entries: list[dict[str, Any]] = [
+        {
+            "path": ".",
+            "type": "directory",
+            "mode": stat.S_IMODE(root.lstat().st_mode),
+        }
+    ]
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        metadata = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        if stat.S_ISDIR(metadata.st_mode):
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "directory",
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                }
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            entries.append(
+                {
+                    "path": relative,
+                    "type": "file",
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "size": metadata.st_size,
+                    "sha256": artifact_contract.sha256_file(path),
+                }
+            )
+        else:
+            raise TransactionError(
+                "transaction.tree_unsupported",
+                "Tree contains an unsupported filesystem entry",
+                path=str(path),
+            )
+    return artifact_contract.sha256_bytes(artifact_contract.canonical_json_bytes(entries))
+
+
 def copy_file_atomic(
     source: pathlib.Path,
     target: pathlib.Path,
@@ -1103,6 +1148,8 @@ class TransactionExecutor:
                 "existed",
                 "marker",
                 "markerSha256",
+                "originalTreeSha256",
+                "appliedTreeSha256",
                 "phase",
                 "commitCleanupPaths",
             }
@@ -1117,6 +1164,16 @@ class TransactionExecutor:
                 or undo.get("marker") != self._marker_relative(contract).as_posix()
                 or undo.get("markerSha256")
                 != self._required_sha256(contract, "sourceMarkerSha256")
+                or not isinstance(undo.get("appliedTreeSha256"), str)
+                or SHA256_PATTERN.fullmatch(undo["appliedTreeSha256"]) is None
+                or (
+                    undo["existed"]
+                    and (
+                        not isinstance(undo.get("originalTreeSha256"), str)
+                        or SHA256_PATTERN.fullmatch(undo["originalTreeSha256"]) is None
+                    )
+                )
+                or (not undo["existed"] and undo.get("originalTreeSha256") is not None)
                 or undo.get("phase") not in TREE_PHASES
                 or undo.get("commitCleanupPaths")
                 != [str(original), str(staging), str(rollback_discard)]
@@ -1395,10 +1452,15 @@ class TransactionExecutor:
                     )
             elif action == "replace_tree":
                 self._validate_owned_tree(operation, target)
-                if not target.is_dir():
+                expected = undo.get("appliedTreeSha256")
+                if (
+                    not target.is_dir()
+                    or not isinstance(expected, str)
+                    or tree_sha256(target) != expected
+                ):
                     raise TransactionError(
                         "transaction.journal_inconsistent",
-                        "Committed tree target is missing",
+                        "Committed tree state does not match the transaction intent",
                         operation=operation["id"],
                         path=str(target),
                     )
@@ -1616,6 +1678,7 @@ class TransactionExecutor:
             }
         if action == "replace_tree":
             contract = self._tree_contract(operation)
+            source = self._verify_source_tree(operation)
             original = self._step_temporary_path(index, operation, "original", sibling_of=target)
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
             rollback_discard = self._step_temporary_path(
@@ -1633,6 +1696,8 @@ class TransactionExecutor:
                 "existed": target.is_dir(),
                 "marker": self._marker_relative(contract).as_posix(),
                 "markerSha256": self._required_sha256(contract, "sourceMarkerSha256"),
+                "originalTreeSha256": tree_sha256(target) if target.is_dir() else None,
+                "appliedTreeSha256": tree_sha256(source),
                 "phase": "intent",
                 "commitCleanupPaths": [str(original), str(staging), str(rollback_discard)],
             }
@@ -1708,6 +1773,13 @@ class TransactionExecutor:
             return
         if action == "replace_tree":
             source = self._verify_source_tree(operation)
+            if tree_sha256(source) != undo["appliedTreeSha256"]:
+                raise TransactionError(
+                    "transaction.source_mismatch",
+                    "Tree source changed after transaction intent",
+                    operation=operation["id"],
+                    path=str(source),
+                )
             original = pathlib.Path(undo["original"])
             staging = pathlib.Path(undo["staging"])
             rollback_discard = pathlib.Path(undo["rollbackDiscard"])
@@ -1724,6 +1796,13 @@ class TransactionExecutor:
             shutil.copytree(source, staging, copy_function=shutil.copy2)
             reject_tree_symlinks(staging)
             fsync_tree(staging)
+            if tree_sha256(staging) != undo["appliedTreeSha256"]:
+                raise TransactionError(
+                    "transaction.write_mismatch",
+                    "Staged tree does not match its source",
+                    operation=operation["id"],
+                    path=str(staging),
+                )
             undo["phase"] = "staged"
             self._save_journal(journal)
             if path_lexists(target):
@@ -1733,6 +1812,13 @@ class TransactionExecutor:
                 self._save_journal(journal)
             os.replace(staging, target)
             fsync_directory(target.parent)
+            if tree_sha256(target) != undo["appliedTreeSha256"]:
+                raise TransactionError(
+                    "transaction.write_mismatch",
+                    "Installed tree does not match its source",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             undo["phase"] = "replacement-installed"
             self._save_journal(journal)
             return
@@ -1827,6 +1913,24 @@ class TransactionExecutor:
                 path=str(path),
             )
 
+    def _validate_tree_payload(
+        self,
+        path: pathlib.Path,
+        marker: str,
+        marker_sha256: str,
+        tree_digest: str,
+    ) -> None:
+        self._validate_tree_marker(path, marker, marker_sha256)
+        actual = tree_sha256(path)
+        if actual != tree_digest:
+            raise TransactionError(
+                "transaction.undo_foreign",
+                "Rollback tree content does not match the journal",
+                path=str(path),
+                expected=tree_digest,
+                actual=actual,
+            )
+
     def _undo_step(self, step: dict[str, Any], journal: dict[str, Any]) -> None:
         undo = step["undo"]
         kind = undo["kind"]
@@ -1910,16 +2014,18 @@ class TransactionExecutor:
             remove_path_durable(staging)
             if undo["existed"]:
                 if path_lexists(original):
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         original,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["originalTreeSha256"],
                     )
                     if path_lexists(target):
-                        self._validate_tree_marker(
+                        self._validate_tree_payload(
                             target,
                             undo["marker"],
                             undo["markerSha256"],
+                            undo["appliedTreeSha256"],
                         )
                         if path_lexists(rollback_discard):
                             raise TransactionError(
@@ -1943,17 +2049,19 @@ class TransactionExecutor:
                             "Restored tree target is missing",
                             path=str(target),
                         )
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         target,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["originalTreeSha256"],
                     )
                     remove_path_durable(rollback_discard)
                 elif path_lexists(rollback_discard) and path_lexists(target):
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         target,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["originalTreeSha256"],
                     )
                     undo["phase"] = "rollback-restored"
                     self._save_journal(journal)
@@ -1963,10 +2071,11 @@ class TransactionExecutor:
                     and path_lexists(target)
                     and not path_lexists(rollback_discard)
                 ):
-                    self._validate_tree_marker(
+                    self._validate_tree_payload(
                         target,
                         undo["marker"],
                         undo["markerSha256"],
+                        undo["originalTreeSha256"],
                     )
                     undo["phase"] = "rollback-restored"
                     self._save_journal(journal)
@@ -1997,10 +2106,11 @@ class TransactionExecutor:
                         "Tree target appeared before transaction staging",
                         path=str(target),
                     )
-                self._validate_tree_marker(
+                self._validate_tree_payload(
                     target,
                     undo["marker"],
                     undo["markerSha256"],
+                    undo["appliedTreeSha256"],
                 )
                 os.replace(target, rollback_discard)
                 fsync_directory(target.parent)

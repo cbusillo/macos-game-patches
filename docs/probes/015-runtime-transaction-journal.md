@@ -52,8 +52,10 @@ mutations in reverse order rather than guessing forward progress.
 All file and tree comparisons use SHA-256 and exact ownership markers. The
 resolved `replace_tree` record inherits its marker contract from the preceding
 matching `assert_absent_or_owned` record, mirroring the artifact planner's
-actual output. Atomic staging occurs in the target parent, and the executor
-rejects symlink path components before preflight or mutation.
+actual output. Canonical tree digests cover relative paths, entry types, modes,
+sizes, and file hashes for source staging, committed replay, and exact rollback.
+Atomic staging occurs in the target parent, and the executor rejects symlink
+path components before preflight or mutation.
 
 ## Execution Rules
 
@@ -128,7 +130,8 @@ every resolved action shape, restores byte-for-byte target snapshots after
 injected failures, recovers crashes at intent/mutation/applied and rolling-back
 boundaries, ignores volatile planner observations for committed replay, rejects
 semantic plan or kind drift, and validates every journal-owned cleanup/undo path
-before use.
+before use. Committed file and tree effects are revalidated against persisted
+content digests before cleanup or idempotent replay succeeds.
 
 The JSON journal is not an authentication boundary against an owner who can
 rewrite both the journal and target files. This slice detects structural drift,
