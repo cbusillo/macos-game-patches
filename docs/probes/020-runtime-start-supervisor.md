@@ -118,6 +118,46 @@ Run the control and lifecycle fixtures under macOS and the repository's Python
 3.12 Linux image. Before any physical start, build, compare, Developer ID seal,
 verify, and doctor a fresh artifact from a clean commit.
 
+## Physical Qualification
+
+The qualified Mac16,9 host passed the host-only dev9 gate on July 18, 2026.
+
+- Source commit:
+  `f9ffe1bef06b310dd83301d51717bedc1d2212ff`.
+- Manifest SHA-256:
+  `5c5daaa8d03171e56c64eecbc3552255c2d6ff40d11dc3911f68ea2be5b09dbc`.
+- Lock SHA-256:
+  `b758b8e0e1ba629872c4d7e6e187be4d9bd82785864eb6eab86bf0bc04235d89`.
+- Two independent builds produced unsealed seal
+  `761d1e41b8057ab655771721d2cc291aa59344dba3382f53102636764e0a0e8d`.
+- Developer ID sealing produced final seal
+  `89480c39fb4ce46a1d9be30722af1018dd514a907cd4e50493d10924d321ed4d`.
+- The first candidate correctly rejected the clean committed dev8 uninstall
+  journal as another plan. The corrected coordinator archived transaction
+  `93a00741446c42ceb154a8fc81d64bfe` without target mutation, then committed
+  dev9 install transaction `e082ffdc22cc41888af6ff2adf78e940` with zero
+  cleanup or rollback failures.
+- Start generation `4513839464176147750` reached `idle` with supervisor PID
+  `70925`, launchd PID `71010`, one launchd run, exact plist/program hashes,
+  Team ID `MM5YXC7T6E`, and CDHash
+  `6174b8325bde23911b6f732e5403aff14cea5cd2`. A second start was idempotent,
+  and status remained synchronized after the 30-second full identity refresh.
+- Cooperative stop removed the exact service, lock, state, plist, socket, and
+  generation directory with no cached-PID signal.
+- A second physical start reached `idle`; uninstall while live requested the
+  supervisor stop channel, booted out the exact service, archived install
+  transaction `e082ffdc22cc41888af6ff2adf78e940`, and committed uninstall
+  transaction `bb45a4c914124d6caf21c5ca61c449e2` with zero cleanup or rollback
+  failures.
+- Final status is `runtime.ready` with no owner or service present. The retained
+  signed bridge tree is exactly
+  `9314ccb48866c15edfc5ae6b46e55891655bb67296ee602ad8144c471b5f1780`,
+  and no transaction undo or runtime-generation residue remains.
+
+This qualifies signed host startup and teardown without a game producer or
+Vision Pro observation. It does not qualify game launch, client discovery,
+streaming, controllers, or headset-visible quality.
+
 ## Cleanup
 
 - The supervisor owns only its declared lock, state, plist, run directory, log,
