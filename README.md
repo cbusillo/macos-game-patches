@@ -93,27 +93,33 @@ at the fixed consent-preserving URL is admitted only after marker and Developer
 ID policy validation, exchanged atomically with the current signed tree, and
 retained on uninstall. Other live user-path mutation still uses no-follow
 descriptors, journaled target-parent identity, and exclusive sibling moves. The
-remaining live gate is physical qualification: three install/uninstall cycles
-must retain that exact bridge while restoring CrossOver, game, runtime, lock,
-service, and journal state before the installed layout is used for game launch.
+corrected dev8 artifact passed a prior-version migration and three further
+physical install/uninstall cycles while retaining the exact signed bridge and
+restoring CrossOver, game, runtime, lock, service, and journal state. That
+qualified installed layout is now the admission boundary for runtime start.
 
 ## Runtime Control Plane
 
 Issue #60 is extracting the proven runtime lifecycle from the research runner.
-The first artifact-backed slice provides truthful prerequisite diagnostics,
-live status, and exact owned teardown without changing the launchd/Mach data
-plane:
+The artifact-backed control plane provides truthful prerequisite diagnostics,
+a bounded detached host supervisor, synchronized live status, and exact owned
+teardown without changing the launchd/Mach data plane:
 
 ```bash
 python3 tools/runtime_cli.py doctor --artifact <artifact>
+python3 tools/runtime_cli.py start --artifact <artifact>
 python3 tools/runtime_cli.py status --artifact <artifact>
 python3 tools/runtime_cli.py stop
+python3 tools/runtime_start_test.py
 ```
 
 All commands support `--json`. `doctor` performs no mutation, `status` refuses
 to infer live health from stale logs or cached PIDs, and `stop` boots out only an
-exact owned launchd job. The long-running `start` supervisor remains follow-up
-work; live qualification still uses the profile runner until that slice lands.
+exact owned launchd job. `start` reports `idle` only after the exact signed
+bridge checks in under one synchronized supervisor; it does not yet launch a
+game or Vision Pro client. Profile/game ownership and the `waiting`,
+`connected`, `streaming`, and `recovering` transitions are the next issue #60
+slice.
 
 ## Starting New Work
 

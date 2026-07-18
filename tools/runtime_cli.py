@@ -1,4 +1,4 @@
-"""Diagnose, inspect, install, uninstall, and stop the Mac ALVR runtime."""
+"""Diagnose, install, start, inspect, stop, and uninstall the Mac ALVR runtime."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from runtime_control import (
     stop_runtime,
 )
 from runtime_install import MutationReport, install_runtime, uninstall_runtime
+from runtime_start import StartReport, start_runtime
 
 
 _JSON_ERRORS = False
@@ -70,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop_parser = subparsers.add_parser("stop", help="idempotently remove exact owned runtime state")
     add_common_arguments(stop_parser)
+
+    start_parser = subparsers.add_parser(
+        "start",
+        help="start the exact installed bridge under one bounded supervisor",
+    )
+    add_common_arguments(start_parser)
+    start_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="sealed runtime artifact")
 
     install_parser = subparsers.add_parser(
         "install",
@@ -134,6 +142,30 @@ def render_stop(report: StopReport) -> str:
         f"reason={report.reason_code}",
         f"message={report.message}",
     ]
+    for action in report.actions:
+        lines.append(f"action={action}")
+    return "\n".join(lines)
+
+
+def render_start(report: StartReport) -> str:
+    lines = [
+        f"state={report.state}",
+        f"reason={report.reason_code}",
+        f"message={report.message}",
+    ]
+    if report.artifact is not None:
+        if report.artifact.get("sealId"):
+            lines.append(f"artifact_seal={report.artifact['sealId']}")
+        if report.artifact.get("path"):
+            lines.append(f"artifact_path={report.artifact['path']}")
+    if report.generation is not None:
+        lines.append(f"generation={report.generation}")
+    if report.owner_pid is not None:
+        lines.append(f"owner_pid={report.owner_pid}")
+    if report.run_dir is not None:
+        lines.append(f"run_dir={report.run_dir}")
+    if report.supervisor_log is not None:
+        lines.append(f"supervisor_log={report.supervisor_log}")
     for action in report.actions:
         lines.append(f"action={action}")
     return "\n".join(lines)
@@ -234,6 +266,14 @@ def main(argv: list[str] | None = None) -> int:
                 text=render_mutation(uninstall_report),
             )
             return 0 if uninstall_report.ok else 1
+        if arguments.command == "start":
+            start_report = start_runtime(context, arguments.artifact)
+            emit(
+                start_report.to_dict(),
+                as_json=arguments.json,
+                text=render_start(start_report),
+            )
+            return 0 if start_report.ok else 1
         stop_report = stop_runtime(context)
         emit(stop_report.to_dict(), as_json=arguments.json, text=render_stop(stop_report))
         return 0 if stop_report.ok else 1

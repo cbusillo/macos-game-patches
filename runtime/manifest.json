@@ -16,7 +16,7 @@
     "description": "Deterministic payload with a separate Developer ID final-sealing phase for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev8"
+    "version": "1.0.0-dev9"
   },
   "artifacts": [
     {
@@ -847,7 +847,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "0d71687eb57714838b804b501133e085a72d98ffa77504fb33aa0c2a8e15d27e",
+      "sha256": "db4ea259256ecf4f143cb595889be8a12d1ebc1d22bac6d1311a7df7cf1f1e3e",
       "supplyClass": "repo-source"
     },
     {
@@ -871,19 +871,25 @@
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "1e94719a0bb681dfb39694d80a4409480506b8af0ad3173f29430f60fefb1c0c",
+      "sha256": "1064806de37e5b2ce3c2089d8a52ea0cece7af2afa957e5385404c9c8d07d9d2",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "81055340a589cc2e3da15b3939d7aff5f11b2e20a0c3ef76172a294f8ebed867",
+      "sha256": "42e7cc267480173e345c07b4ce9b2cac6e96e4ce3b41c3410b6517f622fe4e0e",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_start",
+      "path": "${REPO_ROOT}/tools/runtime_start.py",
+      "sha256": "fa320f48466e55c902c56bb4c4c5fe621770583014309cd86837b6303367be58",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_cli",
       "path": "${REPO_ROOT}/tools/runtime_cli.py",
-      "sha256": "6c7c51244bb006c70faedc8baf19c7cc0a425f5e2e44eb6bad863aea814e4836",
+      "sha256": "49282f977277b1d5fca0482f9cc6f385f70beba3196cc834b6220e109e900628",
       "supplyClass": "repo-source"
     },
     {

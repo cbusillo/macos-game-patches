@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import contextlib
 import io
+import os
 import pathlib
 import plistlib
+import socket
 import tempfile
 import unittest
 from collections.abc import Sequence
@@ -21,6 +23,7 @@ from runtime_control import (
     ControlError,
     DoctorReport,
     RuntimeContext,
+    StatusReport,
     doctor_runtime,
     evaluate_command_prerequisite,
     evaluate_plist_prerequisite,
@@ -29,6 +32,11 @@ from runtime_control import (
     stop_runtime,
     verify_artifact_reference,
 )
+
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CODE_ROOT = pathlib.Path(os.environ.get("RUNTIME_FIXTURE_ROOT", REPO_ROOT / ".code"))
+CODE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 class StaticRunner:
@@ -95,7 +103,7 @@ class LifecycleRunner:
                     "CDHash=0123456789abcdef0123456789abcdef01234567\n"
                 ),
             )
-        if command and command[0] == "/bin/ps":
+        if command[:3] == ("/usr/bin/env", "LC_ALL=C", "/bin/ps"):
             return CommandResult(command, 0, stdout=f"{self.owner_start_time}\n")
         return CommandResult(command, 0)
 
@@ -184,12 +192,34 @@ class CliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"]["code"], "usage.error")
 
+    def test_start_json_contract_is_machine_readable(self) -> None:
+        report = runtime_cli.StartReport(
+            True,
+            "idle",
+            "runtime.idle",
+            "fixture supervisor ready",
+            {"sealId": "a" * 64},
+            7,
+            9000,
+            pathlib.Path("/tmp/run"),
+            pathlib.Path("/tmp/run/supervisor.log"),
+        )
+        stdout = io.StringIO()
+        with mock.patch("runtime_cli.start_runtime", return_value=report), contextlib.redirect_stdout(
+            stdout
+        ):
+            exit_code = runtime_cli.main(
+                ["start", "--artifact", "/tmp/artifact", "--json"]
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["state"], "idle")
+
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
-        code_root = pathlib.Path(__file__).resolve().parents[1] / ".code"
-        code_root.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(prefix="runtime-control-lifecycle-", dir=code_root)
+        self.temp = tempfile.TemporaryDirectory(prefix="rc-", dir=CODE_ROOT)
         self.root = pathlib.Path(self.temp.name).resolve()
         self.repo_root_patch = mock.patch.object(artifact_contract, "REPO_ROOT", self.root)
         self.repo_root_patch.start()
@@ -199,7 +229,7 @@ class LifecycleTests(unittest.TestCase):
         self.bindings_path.write_text(
             json.dumps(
                 {
-                    "RUNTIME_STATE_ROOT": str(self.root / ".code/state/runtime"),
+                    "RUNTIME_STATE_ROOT": str(self.root / ".code/s"),
                 }
             )
         )
@@ -250,28 +280,46 @@ class LifecycleTests(unittest.TestCase):
         (self.paths.lock_path / "pid").write_text(pid_text)
         (self.paths.lock_path / "run-dir").write_text(run_dir)
 
-    def create_state(self, *, state: str = "streaming", owner_pid: int = 2000) -> None:
+    def create_state(
+        self,
+        *,
+        state: str = "streaming",
+        owner_pid: int = 2000,
+        schema_version: int = 1,
+        run_dir: pathlib.Path | None = None,
+    ) -> dict[str, object]:
         self.paths.state_root.mkdir(parents=True, exist_ok=True)
-        self.paths.state_path.write_text(
-            json.dumps(
+        record: dict[str, object] = {
+            "schemaVersion": schema_version,
+            "state": state,
+            "generation": 1,
+            "ownerPid": owner_pid,
+            "ownerStartedAt": self.runner.owner_start_time,
+            "serviceLabel": self.paths.service_label,
+            "servicePid": 4321,
+            "artifactPath": str(self.root / "sealed-artifact"),
+            "artifactSeal": "a" * 64,
+            "bridgeIdentity": {
+                "identifier": "com.alvr.macos-bridge",
+                "teamIdentifier": "TESTTEAM",
+                "cdHashes": ["0123456789abcdef0123456789abcdef01234567"],
+            },
+        }
+        if schema_version == 2:
+            assert run_dir is not None
+            record.update(
                 {
-                    "schemaVersion": 1,
-                    "state": state,
-                    "generation": 1,
-                    "ownerPid": owner_pid,
-                    "ownerStartedAt": self.runner.owner_start_time,
-                    "serviceLabel": self.paths.service_label,
-                    "servicePid": 4321,
-                    "artifactPath": str(self.root / "sealed-artifact"),
-                    "artifactSeal": "a" * 64,
-                    "bridgeIdentity": {
-                        "identifier": "com.alvr.macos-bridge",
-                        "teamIdentifier": "TESTTEAM",
-                        "cdHashes": ["0123456789abcdef0123456789abcdef01234567"],
-                    },
+                    "runDir": str(run_dir),
+                    "controlSocket": str(run_dir / "c.sock"),
+                    "plistSha256": artifact_contract.sha256_file(self.paths.launch_agent_plist),
+                    "bridgeExecutableSha256": artifact_contract.sha256_file(
+                        self.paths.bridge_program
+                    ),
+                    "serviceRuns": 1,
                 }
             )
-        )
+        self.paths.state_path.write_text(json.dumps(record))
+        return record
 
     def set_service(self, *, owned: bool = True) -> None:
         path = self.paths.launch_agent_plist if owned else self.root / "foreign.plist"
@@ -573,6 +621,190 @@ class LifecycleTests(unittest.TestCase):
             status = status_runtime(self.context)
         self.assertEqual(status.state, "streaming")
 
+    def test_schema_two_idle_state_requires_live_control_socket(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=2,
+                run_dir=run_dir,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            with mock.patch(
+                "runtime_control.verify_artifact_reference",
+                return_value={
+                    "path": str(self.root / "sealed-artifact"),
+                    "id": "mac-alvr-runtime",
+                    "version": "1.0.0-test",
+                    "sealId": "a" * 64,
+                },
+            ) as verify:
+                status = status_runtime(self.context)
+            self.assertEqual(status.state, "idle")
+            verify.assert_called_once_with(
+                self.context,
+                pathlib.Path(self.root / "sealed-artifact"),
+                require_sealed=True,
+                require_current_contract=False,
+            )
+            with mock.patch("runtime_control.verify_artifact_reference") as skipped_verify:
+                stop_status = status_runtime(
+                    self.context,
+                    verify_live_artifact=False,
+                )
+            self.assertEqual(stop_status.state, "idle")
+            skipped_verify.assert_not_called()
+        finally:
+            control_socket.close()
+
+    def test_stop_requests_synchronized_supervisor_cleanup(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        record = self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=2,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        cleaned = False
+
+        def cleanup(_: float) -> None:
+            nonlocal cleaned
+            if cleaned:
+                return
+            cleaned = True
+            self.paths.state_path.unlink(missing_ok=True)
+            self.paths.launch_agent_plist.unlink(missing_ok=True)
+            for name in ("pid", "run-dir"):
+                (self.paths.lock_path / name).unlink(missing_ok=True)
+            self.paths.lock_path.rmdir()
+            run_dir.rmdir()
+
+        self.context.stop_requester = lambda actual: (actual == record, None)
+        self.context.sleeper = cleanup
+        live_status = StatusReport(
+            "idle",
+            "runtime.idle",
+            "fixture live runtime",
+            {"sealId": "a" * 64},
+            {},
+            {},
+            {"record": record},
+        )
+        with mock.patch("runtime_control.status_runtime", return_value=live_status):
+            stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertTrue(any(action.startswith("request supervisor stop") for action in stopped.actions))
+        self.assertFalse(any(command[:2] == ("/bin/launchctl", "kill") for command in self.runner.commands))
+
+    def test_unresponsive_ping_is_not_reported_as_idle(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=2,
+                run_dir=run_dir,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (False, "fixture ping timeout")
+            with mock.patch(
+                "runtime_control.verify_artifact_reference",
+                return_value={
+                    "path": str(self.root / "sealed-artifact"),
+                    "id": "mac-alvr-runtime",
+                    "version": "1.0.0-test",
+                    "sealId": "a" * 64,
+                },
+            ):
+                status = status_runtime(self.context)
+            self.assertEqual(status.state, "failed")
+            self.assertEqual(status.reason_code, "owner.unresponsive")
+        finally:
+            control_socket.close()
+
+    def test_dead_schema_two_owner_cleanup_removes_stale_socket(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        socket_path = run_dir / "c.sock"
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(socket_path))
+            socket_path.chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=2,
+                run_dir=run_dir,
+            )
+            stopped = stop_runtime(self.context)
+            self.assertTrue(stopped.ok)
+            self.assertFalse(socket_path.exists())
+            self.assertFalse(self.paths.lock_path.exists())
+            self.assertFalse(self.paths.state_path.exists())
+        finally:
+            control_socket.close()
+
+    def test_stop_preserves_unresponsive_live_supervisor(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        record = self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=2,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        self.context.stop_requester = lambda _: (False, "fixture unresponsive")
+        live_status = StatusReport(
+            "idle",
+            "runtime.idle",
+            "fixture live runtime",
+            {"sealId": "a" * 64},
+            {},
+            {},
+            {"record": record},
+        )
+        with mock.patch("runtime_control.status_runtime", return_value=live_status):
+            stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "owner.unresponsive")
+        self.assertIsNotNone(self.runner.service_output)
+        self.assertTrue(self.paths.lock_path.exists())
+
     def test_reused_owner_pid_is_rejected_by_start_time(self) -> None:
         self.create_bridge()
         self.create_plist()
@@ -585,6 +817,52 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(status.state, "failed")
         self.assertEqual(status.reason_code, "owner.identity_mismatch")
 
+    def test_service_absent_reused_owner_pid_allows_exact_stale_cleanup(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=2,
+            run_dir=run_dir,
+        )
+        self.runner.owner_start_time = "Sat Jul 18 04:00:01 2026"
+        stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertTrue(any(action == "ignore reused owner pid=2000" for action in stopped.actions))
+        self.assertFalse(self.paths.lock_path.exists())
+        self.assertFalse(self.paths.state_path.exists())
+        self.assertFalse(self.paths.launch_agent_plist.exists())
+        self.assertFalse(run_dir.exists())
+
+    def test_service_present_reused_owner_pid_allows_exact_stale_cleanup(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=2,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        self.runner.owner_start_time = "Sat Jul 18 04:00:01 2026"
+        stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertTrue(any(action == "ignore reused owner pid=2000" for action in stopped.actions))
+        self.assertIsNone(self.runner.service_output)
+        self.assertFalse(self.paths.lock_path.exists())
+        self.assertFalse(self.paths.state_path.exists())
+        self.assertFalse(self.paths.launch_agent_plist.exists())
+        self.assertFalse(run_dir.exists())
+
     def test_foreign_plist_is_preserved(self) -> None:
         self.create_bridge()
         self.create_plist(owned=False)
@@ -592,6 +870,31 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(stopped.ok)
         self.assertEqual(stopped.reason_code, "service.plist_foreign")
         self.assertTrue(self.paths.launch_agent_plist.exists())
+
+    def test_schema_two_exact_plist_drift_is_preserved(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=2,
+            run_dir=run_dir,
+        )
+        with self.paths.launch_agent_plist.open("rb") as stream:
+            payload = plistlib.load(stream)
+        payload["KeepAlive"] = True
+        with self.paths.launch_agent_plist.open("wb") as stream:
+            plistlib.dump(payload, stream)
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "state.content_mismatch")
+        self.assertIsNotNone(self.runner.service_output)
+        self.assertTrue(self.paths.launch_agent_plist.exists())
+        self.assertTrue(self.paths.lock_path.exists())
 
 
 if __name__ == "__main__":

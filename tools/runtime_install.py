@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
 import os
 import pathlib
 import shutil
 import stat
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Literal, Sequence, cast
+from typing import Any, Callable, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
 import runtime_transaction
 from runtime_control import (
+    LIVE_STATES,
     ControlError,
     RuntimeContext,
     doctor_runtime,
+    global_lifecycle_lock,
     load_runtime_contract,
+    status_runtime,
     stop_runtime,
     verify_artifact_reference,
 )
@@ -237,53 +238,6 @@ def _validate_private_file(path: pathlib.Path, mode: int) -> None:
             path=str(path),
             mode=f"{actual_mode:04o}",
         )
-
-
-@contextlib.contextmanager
-def _global_lifecycle_lock(
-    lock_path: pathlib.Path,
-    allowed_roots: Sequence[pathlib.Path],
-) -> Iterator[None]:
-    _ensure_allowed(lock_path, allowed_roots, "transaction_lock")
-    try:
-        with runtime_descriptor.DescriptorSession([lock_path.parent]) as session:
-            bound = session.bind(lock_path)
-            existed = bound.exists()
-            descriptor, _ = bound.open_read_write_create(0o600)
-            if not existed:
-                os.fchmod(descriptor, 0o600)
-                os.fsync(descriptor)
-                bound.fsync_parent()
-            with os.fdopen(descriptor, "r+") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise RuntimeInstallError(
-                        "transaction.lock_unsafe",
-                        "Global lifecycle lock has unsafe ownership or type",
-                        path=str(lock_path),
-                    )
-                mode = stat.S_IMODE(metadata.st_mode)
-                if mode != 0o600:
-                    raise RuntimeInstallError(
-                        "transaction.mode_unsafe",
-                        "Global lifecycle lock must use mode 0600",
-                        path=str(lock_path),
-                        mode=f"{mode:04o}",
-                    )
-                try:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    raise RuntimeInstallError(
-                        "transaction.busy",
-                        "Another runtime lifecycle command owns the global lock",
-                        path=str(lock_path),
-                    ) from error
-                try:
-                    yield
-                finally:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-    except runtime_descriptor.DescriptorError as error:
-        raise _descriptor_error(error) from error
 
 
 def _mutable_state_index(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1224,6 +1178,26 @@ def _mutate_runtime(
                 blockers=stable_blockers,
                 journal=admission_paths.journal,
             )
+        live_status = status_runtime(context, verify_live_artifact=False)
+        live_record = live_status.control_state.get("record")
+        if (
+            live_status.ok
+            and live_status.state in LIVE_STATES
+            and isinstance(live_record, dict)
+            and live_record.get("schemaVersion") == 2
+        ):
+            pre_lock_stop = stop_runtime(context)
+            stop_actions = pre_lock_stop.actions
+            if not pre_lock_stop.ok:
+                return MutationReport(
+                    command=command,
+                    ok=False,
+                    state="blocked",
+                    reason_code=pre_lock_stop.reason_code,
+                    message=pre_lock_stop.message,
+                    artifact=artifact,
+                    stop_actions=stop_actions,
+                )
         global_lock = _absolute(context.lifecycle_lock_path)
         global_lock_root = global_lock.parent
         ensure_private_directory(
@@ -1231,7 +1205,7 @@ def _mutate_runtime(
             (global_lock_root,),
             "transaction_lock_root",
         )
-        with _global_lifecycle_lock(global_lock, (global_lock_root,)):
+        with global_lifecycle_lock(global_lock, (global_lock_root,)):
             plan = _qualify_stable_bundles(
                 _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
                 manifest,
@@ -1271,7 +1245,7 @@ def _mutate_runtime(
             }
             plan_digest = executors[command].plan_digest
             active_journal = _read_active_journal(paths)
-            recovery_stop_actions: tuple[str, ...] = ()
+            recovery_stop_actions = stop_actions
             if active_journal is not None:
                 ensure_private_directory(
                     paths.transaction_root,
@@ -1295,7 +1269,7 @@ def _mutate_runtime(
                     )
                 if validated_journal["state"] in INCOMPLETE_TRANSACTION_STATES:
                     recovery_stop = stop_runtime(context)
-                    recovery_stop_actions = recovery_stop.actions
+                    recovery_stop_actions = (*stop_actions, *recovery_stop.actions)
                     stop_actions = recovery_stop_actions
                     if not recovery_stop.ok:
                         return MutationReport(
@@ -1359,7 +1333,7 @@ def _mutate_runtime(
                         archived_journal=archived_journal,
                     )
             stop = stop_runtime(context)
-            stop_actions = stop.actions
+            stop_actions = (*stop_actions, *stop.actions)
             if not stop.ok:
                 return MutationReport(
                     command=command,

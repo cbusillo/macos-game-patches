@@ -55,7 +55,9 @@ jobs:
             tools/runtime_profile.py \
             tools/runtime_control.py \
             tools/runtime_cli.py \
+            tools/runtime_start.py \
             tools/runtime_control_test.py \
+            tools/runtime_start_test.py \
             tools/runtime_descriptor.py \
             tools/runtime_descriptor_test.py \
             tools/runtime_transaction.py \
@@ -71,6 +73,7 @@ jobs:
       - name: Validate runtime control plane
         run: |
           python3 tools/runtime_control_test.py
+          python3 tools/runtime_start_test.py
           python3 tools/runtime_cli.py --help
 
       - name: Validate runtime transactions
@@ -114,10 +117,12 @@ jobs:
             tools/build_runtime_artifact.py \
             tools/runtime_control.py \
             tools/runtime_cli.py \
+            tools/runtime_start.py \
             tools/runtime_descriptor.py \
             tools/runtime_transaction.py \
             tools/runtime_install.py \
             tools/runtime_control_test.py \
+            tools/runtime_start_test.py \
             tools/runtime_descriptor_test.py \
             tools/runtime_transaction_test.py \
             tools/runtime_install_test.py
@@ -125,6 +130,7 @@ jobs:
       - name: Validate lifecycle fixtures
         run: |
           python3 tools/runtime_control_test.py
+          python3 tools/runtime_start_test.py
           python3 tools/runtime_descriptor_test.py
           python3 tools/runtime_transaction_test.py
           python3 tools/runtime_install_test.py

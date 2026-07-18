@@ -24,6 +24,7 @@ from runtime_control import (
     CommandResult,
     DoctorReport,
     RuntimeContext,
+    StatusReport,
     StopReport,
 )
 
@@ -399,6 +400,15 @@ def patched_lifecycle(
         {"present": False},
         {"alive": False},
     )
+    status = StatusReport(
+        "stopped",
+        "runtime.stopped",
+        "fixture runtime is stopped",
+        artifact,
+        {"present": False},
+        {"alive": False},
+        {"exists": False},
+    )
     with (
         mock.patch.object(
             runtime_install,
@@ -420,12 +430,34 @@ def patched_lifecycle(
             },
         ),
         mock.patch.object(runtime_install, "doctor_runtime", return_value=doctor) as doctor_mock,
+        mock.patch.object(runtime_install, "status_runtime", return_value=status),
         mock.patch.object(runtime_install, "stop_runtime", return_value=stop) as stop_mock,
     ):
         yield context, doctor_mock, stop_mock
 
 
 class RuntimeInstallTests(unittest.TestCase):
+    def test_live_schema_two_supervisor_stops_before_global_lock(self) -> None:
+        with lifecycle_fixture() as fixture:
+            live = StatusReport(
+                "idle",
+                "runtime.idle",
+                "fixture supervisor is live",
+                {"sealId": "a" * 64},
+                {"present": True},
+                {"alive": True},
+                {"record": {"schemaVersion": 2}},
+            )
+            with patched_lifecycle(fixture) as (context, _, stop_mock), mock.patch.object(
+                runtime_install,
+                "status_runtime",
+                return_value=live,
+            ):
+                report = runtime_install.install_runtime(context, fixture.artifact_root)
+            self.assertTrue(report.ok)
+            self.assertGreaterEqual(stop_mock.call_count, 2)
+            self.assertEqual(report.stop_actions.count("already-stopped"), 2)
+
     def test_sealing_gate_has_zero_lifecycle_mutation(self) -> None:
         with lifecycle_fixture() as fixture:
             with patched_lifecycle(fixture, artifact_stage="unsealed") as (
