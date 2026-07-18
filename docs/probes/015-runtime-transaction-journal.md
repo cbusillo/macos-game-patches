@@ -12,7 +12,9 @@ are enabled?
 - First slice: a generic filesystem transaction executor and hardware-free
   fixtures under temporary `.code/` roots.
 - Inputs: already-resolved absolute operations shaped like the artifact
-  install/uninstall plan records.
+  install/uninstall plan records. The executor enriches directory-source
+  records with a canonical `sourceTreeSha256` before semantic plan identity is
+  calculated; the sealed planner itself remains unchanged in this fixture slice.
 - Outputs: an atomic JSON journal, transaction-owned undo payloads, committed or
   rolled-back filesystem state, and stable failure codes.
 - Deferred: production `install`/`uninstall` CLI commands, a declared persistent
@@ -72,7 +74,8 @@ path components before preflight or mutation.
 7. A committed journal with the same semantic plan digest is an idempotent
    success without live forward preflight. Volatile planner observations such
    as `ready`, `exists`, and live hashes do not affect identity; a changed
-   execution field or transaction kind fails closed.
+   execution field, canonical tree source digest, or transaction kind fails
+   closed.
 
 ## Fixture Matrix
 
@@ -131,7 +134,8 @@ injected failures, recovers crashes at intent/mutation/applied and rolling-back
 boundaries, ignores volatile planner observations for committed replay, rejects
 semantic plan or kind drift, and validates every journal-owned cleanup/undo path
 before use. Committed file and tree effects are revalidated against persisted
-content digests before cleanup or idempotent replay succeeds.
+content digests before cleanup or idempotent replay succeeds, while non-marker
+source-tree changes produce semantic plan drift rather than silent reuse.
 
 The JSON journal is not an authentication boundary against an owner who can
 rewrite both the journal and target files. This slice detects structural drift,

@@ -89,6 +89,7 @@ SEMANTIC_OPERATION_FIELDS = (
     "atomic",
     "source",
     "sourceSha256",
+    "sourceTreeSha256",
     "marker",
     "sourceMarkerSha256",
     "backup",
@@ -369,6 +370,10 @@ class TransactionExecutor:
         failure_injector: FailureInjector | None = None,
     ) -> None:
         self.kind = kind
+        self.artifact_root = self._absolute_input_path(artifact_root)
+        self.journal_path = self._absolute_input_path(journal_path)
+        self.transaction_root = self._absolute_input_path(transaction_root)
+        self.allowed_roots = [self._absolute_input_path(root) for root in allowed_roots]
         self.operations: list[dict[str, Any]] = []
         for operation in operations:
             if not isinstance(operation, dict):
@@ -376,11 +381,14 @@ class TransactionExecutor:
                     "transaction.plan_invalid",
                     "Transaction operations must be JSON objects",
                 )
-            self.operations.append(dict(operation))
-        self.artifact_root = self._absolute_input_path(artifact_root)
-        self.journal_path = self._absolute_input_path(journal_path)
-        self.transaction_root = self._absolute_input_path(transaction_root)
-        self.allowed_roots = [self._absolute_input_path(root) for root in allowed_roots]
+            record = dict(operation)
+            if record.get("action") in TREE_SOURCE_ACTIONS and "sourceTreeSha256" not in record:
+                raw_source = record.get("source")
+                if isinstance(record.get("id"), str) and isinstance(raw_source, str):
+                    source = self._source_path(record)
+                    if source.is_dir():
+                        record["sourceTreeSha256"] = tree_sha256(source)
+            self.operations.append(record)
         self.failure_injector = failure_injector
         plan = [semantic_operation(operation) for operation in self.operations]
         self.plan_digest = artifact_contract.sha256_bytes(
@@ -550,6 +558,8 @@ class TransactionExecutor:
             )
         if action in FILE_SOURCE_ACTIONS:
             self._required_sha256(operation, "sourceSha256")
+        if action in TREE_SOURCE_ACTIONS:
+            self._required_sha256(operation, "sourceTreeSha256")
         if action in TREE_MARKER_ACTIONS:
             self._marker_relative(operation)
             self._required_sha256(operation, "sourceMarkerSha256")
@@ -775,6 +785,16 @@ class TransactionExecutor:
                 path=str(source),
             )
         reject_tree_symlinks(source)
+        expected_tree = self._required_sha256(operation, "sourceTreeSha256")
+        actual_tree = tree_sha256(source)
+        if actual_tree != expected_tree:
+            raise TransactionError(
+                "transaction.source_mismatch",
+                "Source tree content does not match the plan",
+                operation=operation["id"],
+                expected=expected_tree,
+                actual=actual_tree,
+            )
         contract = self._tree_contract(operation)
         marker = self._marker_relative(contract)
         source_marker = source.joinpath(*marker.parts)
@@ -1166,6 +1186,8 @@ class TransactionExecutor:
                 != self._required_sha256(contract, "sourceMarkerSha256")
                 or not isinstance(undo.get("appliedTreeSha256"), str)
                 or SHA256_PATTERN.fullmatch(undo["appliedTreeSha256"]) is None
+                or undo.get("appliedTreeSha256")
+                != self._required_sha256(operation, "sourceTreeSha256")
                 or (
                     undo["existed"]
                     and (
@@ -1697,7 +1719,10 @@ class TransactionExecutor:
                 "marker": self._marker_relative(contract).as_posix(),
                 "markerSha256": self._required_sha256(contract, "sourceMarkerSha256"),
                 "originalTreeSha256": tree_sha256(target) if target.is_dir() else None,
-                "appliedTreeSha256": tree_sha256(source),
+                "appliedTreeSha256": self._required_sha256(
+                    operation,
+                    "sourceTreeSha256",
+                ),
                 "phase": "intent",
                 "commitCleanupPaths": [str(original), str(staging), str(rollback_discard)],
             }

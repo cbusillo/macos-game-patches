@@ -356,7 +356,6 @@ class TransactionTests(unittest.TestCase):
                 operation["exists"] = True
             paths["patched_source"].unlink()
             paths["created_source"].unlink()
-            shutil.rmtree(paths["source_tree"])
 
             replay = fixture.executor("install", replay_operations).execute()
             self.assertTrue(replay.ok)
@@ -1040,6 +1039,20 @@ class TransactionTests(unittest.TestCase):
             with self.assertRaises(TransactionError) as drift_raised:
                 fixture.executor("install", operations).execute()
             self.assertEqual(drift_raised.exception.code, "transaction.journal_inconsistent")
+
+        with fixture_layout() as fixture:
+            operations, _ = fixture.prepare_tree_replace()
+            report = fixture.executor("install", operations).execute()
+            self.assertTrue(report.ok)
+            replace_operation = next(
+                operation for operation in operations if operation["action"] == "replace_tree"
+            )
+            source_tree = pathlib.Path(replace_operation["source"])
+            (source_tree / "Contents/Resources/data.bin").write_bytes(b"updated source")
+
+            with self.assertRaises(TransactionError) as source_drift_raised:
+                fixture.executor("install", operations).execute()
+            self.assertEqual(source_drift_raised.exception.code, "transaction.journal_mismatch")
 
 
 if __name__ == "__main__":
