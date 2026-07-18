@@ -391,27 +391,26 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertFalse(fixture.transaction_root.exists())
             self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
 
-    def test_sealed_live_roots_require_path_hardening_before_mutation(self) -> None:
+    def test_sealed_declared_roots_use_descriptor_transactions(self) -> None:
         with lifecycle_fixture() as fixture:
             with patched_lifecycle(fixture) as (context, doctor_mock, stop_mock):
                 plan_mock = cast(mock.Mock, runtime_install._build_plan)
 
                 def live_plan(*_: Any) -> dict[str, Any]:
                     plan = fixture.plan()
-                    plan["allowedTargetRoots"] = [*plan["allowedTargetRoots"], "/Applications"]
+                    plan["allowedTargetRoots"] = [
+                        *plan["allowedTargetRoots"],
+                        str(pathlib.Path.home()),
+                    ]
                     return plan
 
                 plan_mock.side_effect = live_plan
                 report = runtime_install.install_runtime(context, fixture.artifact_root)
-                self.assertFalse(report.ok)
-                self.assertEqual(
-                    report.reason_code,
-                    "transaction.live_path_hardening_required",
-                )
-            doctor_mock.assert_not_called()
-            stop_mock.assert_not_called()
-            self.assertFalse(fixture.transaction_root.exists())
-            self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
+                self.assertTrue(report.ok)
+                self.assertEqual(report.reason_code, "transaction.committed")
+            doctor_mock.assert_called_once()
+            stop_mock.assert_called_once()
+            self.assertEqual(fixture.stock.read_bytes(), b"patched payload")
 
     def test_install_uninstall_replay_and_reinstall_cycle(self) -> None:
         with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (

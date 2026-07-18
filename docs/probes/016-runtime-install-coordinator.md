@@ -192,8 +192,8 @@ until a qualified installed layout exists.
 
 ## Successor Status
 
-Probe 017 now provides the dev7 immutable post-build Developer ID seal and a
-verified exact signed-tree identity. The remaining #61 live-enable work is
-descriptor-anchored target mutation plus physical install/uninstall restoration
-cycles; #62 separately retains stable URL, Launch Services, and privacy-consent
-qualification.
+Probe 017 provides the dev7 immutable post-build Developer ID seal and exact
+signed-tree identity. Probe 018 now provides descriptor-anchored target
+mutation. The remaining #61 live-enable work is three physical
+install/uninstall exact-restoration cycles; #62 separately retains stable URL,
+Launch Services, and privacy-consent qualification.

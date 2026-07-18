@@ -73,6 +73,7 @@ space and open targets, and recovers interrupted work before a retry. Its full
 install/uninstall cycle remains hardware-free and fenced below temporary roots:
 
 ```bash
+python3 tools/runtime_descriptor_test.py
 python3 tools/runtime_install_test.py
 python3 tools/runtime_transaction_test.py
 ```
@@ -88,9 +89,11 @@ The dev7 contract still uses a separate signing step, but readiness now comes
 from verified artifact stage rather than manifest mode alone. Unsealed artifacts
 return `artifact.sealing_required` before any lifecycle mutation; a final sealed
 artifact carries its exact signed tree into the transaction plan. Live user-path
-and physical qualification remain explicit follow-up gates: non-fixture target
-roots return `transaction.live_path_hardening_required` until descriptor-
-anchored mutation lands.
+mutation now walks declared roots with no-follow descriptors, journals target-
+parent identity, and publishes files and trees through exclusive sibling moves.
+The remaining live gate is physical qualification: three install/uninstall
+cycles must restore exact CrossOver, game, runtime, lock, service, and journal
+state before the installed layout is used for game launch.
 
 ## Runtime Control Plane
 

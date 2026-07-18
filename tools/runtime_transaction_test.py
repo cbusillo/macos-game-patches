@@ -513,7 +513,14 @@ class TransactionTests(unittest.TestCase):
                 self.assertEqual(fixture.transaction_temporary_paths(), [])
 
     def test_crash_at_each_tree_boundary_recovers_in_new_executor(self) -> None:
-        for crash_phase in ("after-intent", "after-mutation", "after"):
+        for crash_phase in (
+            "after-intent",
+            "after-tree-staged",
+            "after-tree-original-moved",
+            "after-tree-replacement-installed",
+            "after-mutation",
+            "after",
+        ):
             with self.subTest(crash_phase=crash_phase), fixture_layout() as fixture:
                 operations, _ = fixture.prepare_tree_replace()
                 before = snapshot_tree(fixture.target_root)
@@ -588,14 +595,20 @@ class TransactionTests(unittest.TestCase):
             real_remove = runtime_transaction.remove_path_durable
             crashed = False
 
-            def crash_during_discard(path: pathlib.Path) -> None:
+            def crash_during_discard(
+                path: pathlib.Path,
+                expected_identity: runtime_transaction.runtime_descriptor.FileIdentity | None = None,
+                tree_entries: list[dict[str, Any]] | None = None,
+            ) -> None:
                 nonlocal crashed
-                if not crashed and path.name.endswith(".rollback") and path.is_dir():
+                if (
+                    not crashed
+                    and path.name.endswith(".rollback.descriptor-delete")
+                    and path.is_dir()
+                ):
                     crashed = True
-                    marker = path / MARKER
-                    marker.unlink()
                     raise SimulatedCrash("recursive discard cleanup")
-                real_remove(path)
+                real_remove(path, expected_identity, tree_entries)
 
             with mock.patch.object(
                 runtime_transaction,
@@ -615,6 +628,284 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(report.state, "rolled-back")
             self.assertEqual(snapshot_tree(fixture.target_root), before)
             self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_crash_at_each_file_publication_boundary_recovers_exactly(self) -> None:
+        for crash_phase in (
+            "after-file-staged",
+            "after-file-original-moved",
+            "after-file-replacement-installed",
+        ):
+            with self.subTest(crash_phase=crash_phase), fixture_layout() as fixture:
+                operations, _ = fixture.prepare_install()
+                before = snapshot_tree(fixture.target_root)
+
+                def crash(step_id: str, phase: str) -> None:
+                    if step_id == "replace_stock" and phase == crash_phase:
+                        raise SimulatedCrash(crash_phase)
+
+                with self.assertRaises(SimulatedCrash):
+                    fixture.executor(
+                        "install",
+                        operations,
+                        failure_injector=crash,
+                    ).execute()
+
+                report = fixture.executor("install", operations).recover()
+                self.assertEqual(report.state, "rolled-back")
+                self.assertEqual(snapshot_tree(fixture.target_root), before)
+                self.assertEqual(fixture.transaction_temporary_paths(), [])
+
+    def test_recovery_refuses_replaced_target_parent_without_redirecting(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_install()
+
+            def crash_after_replace(step_id: str, phase: str) -> None:
+                if step_id == "replace_stock" and phase == "after-mutation":
+                    raise SimulatedCrash("replace target parent")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash_after_replace,
+                ).execute()
+
+            original_parent = paths["stock"].parent
+            moved_parent = fixture.target_root / "game.original"
+            original_parent.rename(moved_parent)
+            original_parent.mkdir()
+            replacement = original_parent / "stock.bin"
+            replacement.write_bytes(b"foreign replacement")
+
+            with self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).recover()
+            self.assertEqual(raised.exception.code, "transaction.rollback_failed")
+            self.assertEqual(replacement.read_bytes(), b"foreign replacement")
+            self.assertEqual((moved_parent / "stock.bin").read_bytes(), b"patched payload")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "failed")
+            self.assertEqual(
+                journal["rollbackFailures"][0]["code"],
+                "transaction.path_identity_changed",
+            )
+
+    def test_leaf_substitution_is_preserved_instead_of_overwritten(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_install()
+            real_stage = runtime_transaction.copy_file_staged
+            substituted = False
+
+            def substitute_before_publication(
+                source: pathlib.Path,
+                staging: pathlib.Path,
+            ) -> None:
+                nonlocal substituted
+                if not substituted and source == paths["patched_source"]:
+                    substituted = True
+                    paths["stock"].write_bytes(b"foreign replacement")
+                real_stage(source, staging)
+
+            with mock.patch.object(
+                runtime_transaction,
+                "copy_file_staged",
+                side_effect=substitute_before_publication,
+            ), self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).execute()
+
+            self.assertEqual(raised.exception.code, "transaction.rollback_failed")
+            self.assertEqual(paths["stock"].read_bytes(), b"foreign replacement")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "failed")
+            self.assertEqual(
+                journal["rollbackFailures"][0]["code"],
+                "transaction.undo_foreign",
+            )
+
+    def test_cleanup_quarantine_restores_a_substituted_payload(self) -> None:
+        with fixture_layout() as fixture:
+            operations, paths = fixture.prepare_install()
+            real_rename = runtime_transaction.rename_exclusive
+            substituted = False
+
+            def substitute_during_cleanup(source: pathlib.Path, target: pathlib.Path) -> None:
+                nonlocal substituted
+                if (
+                    not substituted
+                    and source.name.endswith(".original")
+                    and target.name.endswith(".descriptor-delete")
+                    and source.is_file()
+                ):
+                    substituted = True
+                    source.write_bytes(b"foreign cleanup payload")
+                real_rename(source, target)
+
+            with mock.patch.object(
+                runtime_transaction,
+                "rename_exclusive",
+                side_effect=substitute_during_cleanup,
+            ), self.assertRaises(TransactionError) as raised:
+                fixture.executor("install", operations).execute()
+
+            self.assertEqual(raised.exception.code, "transaction.cleanup_failed")
+            self.assertEqual(paths["stock"].read_bytes(), b"patched payload")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "committed")
+            replace_step = next(step for step in journal["steps"] if step["id"] == "replace_stock")
+            original = pathlib.Path(replace_step["undo"]["original"])
+            self.assertEqual(original.read_bytes(), b"foreign cleanup payload")
+            self.assertFalse(runtime_transaction.TransactionExecutor._cleanup_quarantine(original).exists())
+
+    def test_remove_refuses_and_restores_a_same_content_leaf_substitution(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/remove.bin", b"owned payload")
+            target = fixture.target_file("game/remove.bin", source.read_bytes())
+            original_inode = target.stat().st_ino
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "remove_file",
+                    "resource": "remove",
+                    "action": "remove",
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                    "ready": True,
+                }
+            ]
+            real_rename = runtime_transaction.rename_exclusive
+            foreign_inode: int | None = None
+
+            def substitute_before_remove(
+                source_path: pathlib.Path,
+                target_path: pathlib.Path,
+            ) -> None:
+                nonlocal foreign_inode
+                if foreign_inode is None and source_path == target:
+                    foreign = target.with_name("foreign-same-content.bin")
+                    foreign.write_bytes(source.read_bytes())
+                    os.replace(foreign, target)
+                    foreign_inode = target.stat().st_ino
+                real_rename(source_path, target_path)
+
+            with mock.patch.object(
+                runtime_transaction,
+                "rename_exclusive",
+                side_effect=substitute_before_remove,
+            ), self.assertRaises(TransactionError) as raised:
+                fixture.executor("uninstall", operations).execute()
+
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            self.assertIsNotNone(foreign_inode)
+            self.assertNotEqual(foreign_inode, original_inode)
+            self.assertEqual(target.stat().st_ino, foreign_inode)
+            self.assertEqual(target.read_bytes(), b"owned payload")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "rolled-back")
+            self.assertEqual(journal["failure"]["code"], "transaction.target_changed")
+            remove_step = next(step for step in journal["steps"] if step["id"] == "remove_file")
+            self.assertEqual(remove_step["undo"]["phase"], "restored-after-change")
+            self.assertFalse(pathlib.Path(remove_step["undo"]["original"]).exists())
+
+    def test_remove_restores_when_identity_check_fails_after_the_move(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/remove.bin", b"owned payload")
+            target = fixture.target_file("game/remove.bin", source.read_bytes())
+            target_inode = target.stat().st_ino
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "remove_file",
+                    "resource": "remove",
+                    "action": "remove",
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                    "ready": True,
+                }
+            ]
+            real_rename = runtime_transaction.rename_exclusive
+            failed_after_move = False
+
+            def fail_after_move(source_path: pathlib.Path, target_path: pathlib.Path) -> None:
+                nonlocal failed_after_move
+                real_rename(source_path, target_path)
+                if not failed_after_move and source_path == target:
+                    failed_after_move = True
+                    raise TransactionError(
+                        "transaction.path_identity_changed",
+                        "fixture identity race after rename",
+                    )
+
+            with mock.patch.object(
+                runtime_transaction,
+                "rename_exclusive",
+                side_effect=fail_after_move,
+            ), self.assertRaises(TransactionError) as raised:
+                fixture.executor("uninstall", operations).execute()
+
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            self.assertTrue(failed_after_move)
+            self.assertEqual(target.stat().st_ino, target_inode)
+            self.assertEqual(target.read_bytes(), b"owned payload")
+            journal = json.loads(fixture.journal_path.read_text())
+            self.assertEqual(journal["state"], "rolled-back")
+            remove_step = next(step for step in journal["steps"] if step["id"] == "remove_file")
+            self.assertEqual(remove_step["undo"]["phase"], "restored-after-change")
+            self.assertFalse(pathlib.Path(remove_step["undo"]["original"]).exists())
+
+    def test_partial_tree_cleanup_resumes_only_for_the_journaled_identity(self) -> None:
+        for substitution in ("none", "replace-root", "add-child"):
+            with self.subTest(substitution=substitution), fixture_layout() as fixture:
+                operations, _ = fixture.prepare_tree_replace()
+                real_unlink = runtime_transaction.runtime_descriptor.os.unlink
+                crashed = False
+
+                def unlink_then_crash(path: Any, *args: Any, **kwargs: Any) -> None:
+                    nonlocal crashed
+                    real_unlink(path, *args, **kwargs)
+                    if not crashed and path == "data.bin" and kwargs.get("dir_fd") is not None:
+                        crashed = True
+                        raise SimulatedCrash("partial recursive cleanup")
+
+                with mock.patch.object(
+                    runtime_transaction.runtime_descriptor.os,
+                    "unlink",
+                    side_effect=unlink_then_crash,
+                ), self.assertRaises(SimulatedCrash):
+                    fixture.executor("install", operations).execute()
+
+                interrupted = json.loads(fixture.journal_path.read_text())
+                self.assertEqual(interrupted["state"], "committed")
+                self.assertEqual(len(interrupted["cleanupInProgress"]), 1)
+                original = pathlib.Path(next(iter(interrupted["cleanupInProgress"])))
+                quarantine = runtime_transaction.TransactionExecutor._cleanup_quarantine(original)
+                self.assertFalse(original.exists())
+                self.assertTrue(quarantine.is_dir())
+
+                if substitution == "replace-root":
+                    displaced = quarantine.with_name(f"{quarantine.name}.foreign-displaced")
+                    quarantine.rename(displaced)
+                    quarantine.mkdir()
+                    (quarantine / "foreign.bin").write_bytes(b"foreign cleanup payload")
+                    with self.assertRaises(TransactionError) as raised:
+                        fixture.executor("install", operations).execute()
+                    self.assertEqual(raised.exception.code, "transaction.cleanup_failed")
+                    self.assertEqual(
+                        (quarantine / "foreign.bin").read_bytes(),
+                        b"foreign cleanup payload",
+                    )
+                elif substitution == "add-child":
+                    foreign = quarantine / "foreign.bin"
+                    foreign.write_bytes(b"foreign cleanup payload")
+                    with self.assertRaises(TransactionError) as raised:
+                        fixture.executor("install", operations).execute()
+                    self.assertEqual(raised.exception.code, "transaction.cleanup_failed")
+                    self.assertEqual(foreign.read_bytes(), b"foreign cleanup payload")
+                else:
+                    report = fixture.executor("install", operations).execute()
+                    self.assertTrue(report.ok)
+                    self.assertEqual(report.state, "committed")
+                    completed = json.loads(fixture.journal_path.read_text())
+                    self.assertEqual(completed["cleanupInProgress"], {})
+                    self.assertEqual(fixture.transaction_temporary_paths(), [])
 
     def test_crash_during_rollback_resumes_rolling_back_step(self) -> None:
         with fixture_layout() as fixture:

@@ -342,11 +342,11 @@ class LifecycleTests(unittest.TestCase):
                 artifact_summary,
             ),
         ):
-            hardening_blocked = status_runtime(self.context, artifact)
-        self.assertEqual(hardening_blocked.state, "failed")
+            hardening_failed = status_runtime(self.context, artifact)
+        self.assertEqual(hardening_failed.state, "installed")
         self.assertEqual(
-            hardening_blocked.reason_code,
-            "transaction.live_path_hardening_required",
+            hardening_failed.reason_code,
+            "runtime.prerequisites_incomplete",
         )
 
         with mock.patch(

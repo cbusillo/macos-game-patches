@@ -1,10 +1,12 @@
-"""Durable fixture-first filesystem transactions for runtime installation."""
+"""Durable descriptor-anchored filesystem transactions for runtime installation."""
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import datetime as dt
 import fcntl
+import json
 import os
 import pathlib
 import re
@@ -15,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Literal, Sequence
 
 import build_runtime_artifact as artifact_contract
+import runtime_descriptor
 
 
 SUPPORTED_ACTIONS = frozenset(
@@ -125,6 +128,8 @@ TREE_PHASES = frozenset(
         "rollback-restored",
     }
 )
+FILE_PHASES = TREE_PHASES
+REMOVAL_PHASES = frozenset({"intent", "moved", "restored-after-change"})
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -141,6 +146,42 @@ class TransactionError(Exception):
 
 
 FailureInjector = Callable[[str, str], None]
+
+
+_ACTIVE_DESCRIPTOR_SESSION: contextvars.ContextVar[
+    runtime_descriptor.DescriptorSession | None
+] = contextvars.ContextVar("runtime_transaction_descriptor_session", default=None)
+
+
+def _transaction_descriptor_error(error: runtime_descriptor.DescriptorError) -> TransactionError:
+    return TransactionError(error.code, error.message, **error.context)
+
+
+def _descriptor_result(callback: Callable[[], Any]) -> Any:
+    try:
+        return callback()
+    except runtime_descriptor.DescriptorError as error:
+        raise _transaction_descriptor_error(error) from error
+
+
+def _bound_path(path: pathlib.Path) -> runtime_descriptor.BoundPath | None:
+    session = _ACTIVE_DESCRIPTOR_SESSION.get()
+    if session is None:
+        return None
+    return _descriptor_result(lambda: session.bind(path))
+
+
+@contextlib.contextmanager
+def descriptor_scope(roots: Sequence[pathlib.Path]) -> Iterator[None]:
+    try:
+        with runtime_descriptor.DescriptorSession(roots) as session:
+            token = _ACTIVE_DESCRIPTOR_SESSION.set(session)
+            try:
+                yield
+            finally:
+                _ACTIVE_DESCRIPTOR_SESSION.reset(token)
+    except runtime_descriptor.DescriptorError as error:
+        raise _transaction_descriptor_error(error) from error
 
 
 @dataclass(frozen=True)
@@ -178,6 +219,14 @@ def utc_now() -> str:
 
 def path_lexists(path: pathlib.Path) -> bool:
     try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return False
+        raise
+    if bound is not None:
+        return bool(_descriptor_result(bound.exists))
+    try:
         path.lstat()
     except FileNotFoundError:
         return False
@@ -186,7 +235,82 @@ def path_lexists(path: pathlib.Path) -> bool:
     return True
 
 
+def path_is_file(path: pathlib.Path) -> bool:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return False
+        raise
+    if bound is not None:
+        return bool(_descriptor_result(bound.is_file))
+    return path.is_file()
+
+
+def path_is_dir(path: pathlib.Path) -> bool:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return False
+        raise
+    if bound is not None:
+        return bool(_descriptor_result(bound.is_dir))
+    return path.is_dir()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    bound = _bound_path(path)
+    if bound is not None:
+        return str(_descriptor_result(bound.sha256_file))
+    return artifact_contract.sha256_file(path)
+
+
+def load_json(path: pathlib.Path) -> Any:
+    bound = _bound_path(path)
+    if bound is None:
+        try:
+            return artifact_contract.load_json(path)
+        except artifact_contract.ArtifactError as error:
+            raise TransactionError(error.code, error.message, **error.context) from error
+    try:
+        return json.loads(
+            _descriptor_result(bound.read_bytes),
+            object_pairs_hook=artifact_contract.reject_duplicate_keys,
+            parse_constant=artifact_contract.reject_json_constant,
+        )
+    except UnicodeDecodeError as error:
+        raise TransactionError(
+            "json.invalid",
+            "JSON is not valid UTF-8",
+            path=str(path),
+        ) from error
+    except json.JSONDecodeError as error:
+        raise TransactionError(
+            "json.invalid",
+            "JSON parsing failed",
+            path=str(path),
+            line=error.lineno,
+            column=error.colno,
+            detail=error.msg,
+        ) from error
+    except artifact_contract.ArtifactError as error:
+        raise TransactionError(error.code, error.message, **error.context) from error
+
+
 def reject_symlink_components(path: pathlib.Path, *, include_leaf: bool = True) -> None:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return
+        raise
+    if bound is not None:
+        if include_leaf:
+            metadata = _descriptor_result(bound.lstat)
+            if metadata is not None and stat.S_ISLNK(metadata.st_mode):
+                raise TransactionError("path.symlink", "Path contains a symlink", path=str(path))
+        return
     try:
         artifact_contract.reject_symlink_components(path, include_leaf=include_leaf)
     except artifact_contract.ArtifactError as error:
@@ -194,6 +318,10 @@ def reject_symlink_components(path: pathlib.Path, *, include_leaf: bool = True) 
 
 
 def fsync_directory(path: pathlib.Path) -> None:
+    bound = _bound_path(path)
+    if bound is not None:
+        _descriptor_result(bound.fsync_directory)
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -214,6 +342,15 @@ def fsync_tree(root: pathlib.Path) -> None:
 
 
 def remove_path(path: pathlib.Path) -> None:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return
+        raise
+    if bound is not None:
+        _descriptor_result(bound.remove)
+        return
     if not path_lexists(path):
         return
     if path.is_symlink() or path.is_file():
@@ -224,7 +361,26 @@ def remove_path(path: pathlib.Path) -> None:
         path.unlink()
 
 
-def remove_path_durable(path: pathlib.Path) -> None:
+def remove_path_durable(
+    path: pathlib.Path,
+    expected_identity: runtime_descriptor.FileIdentity | None = None,
+    tree_entries: list[dict[str, Any]] | None = None,
+) -> None:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return
+        raise
+    if bound is not None:
+        _descriptor_result(lambda: bound.remove(expected_identity, tree_entries))
+        return
+    if expected_identity is not None or tree_entries is not None:
+        raise TransactionError(
+            "transaction.descriptor_unsupported",
+            "Verified cleanup requires an active descriptor session",
+            path=str(path),
+        )
     if not path_lexists(path):
         return
     parent = path.parent
@@ -236,6 +392,20 @@ def remove_path_durable(path: pathlib.Path) -> None:
 def atomic_write_json(path: pathlib.Path, value: dict[str, Any]) -> None:
     payload = artifact_contract.canonical_json_bytes(value)
     temporary = path.with_name(f".{path.name}.tmp")
+    target_bound = _bound_path(path)
+    if target_bound is not None:
+        temporary_bound = _bound_path(temporary)
+        assert temporary_bound is not None
+        if _descriptor_result(temporary_bound.exists):
+            _descriptor_result(temporary_bound.remove)
+        try:
+            _descriptor_result(lambda: temporary_bound.write_bytes(payload))
+            _descriptor_result(lambda: target_bound.replace_with(temporary_bound))
+        except BaseException:
+            with contextlib.suppress(TransactionError):
+                _descriptor_result(temporary_bound.remove)
+            raise
+        return
     if path_lexists(temporary):
         reject_symlink_components(temporary, include_leaf=False)
         remove_path_durable(temporary)
@@ -257,6 +427,10 @@ def atomic_write_json(path: pathlib.Path, value: dict[str, Any]) -> None:
 
 
 def reject_tree_symlinks(root: pathlib.Path) -> None:
+    bound = _bound_path(root)
+    if bound is not None:
+        _descriptor_result(bound.tree_sha256)
+        return
     reject_symlink_components(root)
     if not root.is_dir():
         return
@@ -267,6 +441,9 @@ def reject_tree_symlinks(root: pathlib.Path) -> None:
 
 
 def tree_sha256(root: pathlib.Path) -> str:
+    bound = _bound_path(root)
+    if bound is not None:
+        return str(_descriptor_result(bound.tree_sha256))
     try:
         return artifact_contract.canonical_tree_sha256(root)
     except artifact_contract.ArtifactError as error:
@@ -282,7 +459,7 @@ def copy_file_atomic(
     target: pathlib.Path,
     staging: pathlib.Path,
 ) -> None:
-    if not target.parent.is_dir():
+    if not path_is_dir(target.parent):
         raise TransactionError(
             "transaction.parent_missing",
             "Atomic file target parent is missing",
@@ -301,6 +478,21 @@ def copy_file_atomic(
             "Atomic file staging path already exists",
             path=str(staging),
         )
+    source_bound = _bound_path(source)
+    if source_bound is not None:
+        target_bound = _bound_path(target)
+        staging_bound = _bound_path(staging)
+        assert target_bound is not None and staging_bound is not None
+        source_digest = sha256_file(source)
+        try:
+            _descriptor_result(lambda: staging_bound.copy_file_from(source_bound))
+            _descriptor_result(lambda: target_bound.rename_exclusive_from(staging_bound))
+        except BaseException:
+            with contextlib.suppress(TransactionError):
+                if path_is_file(staging) and sha256_file(staging) == source_digest:
+                    remove_path_durable(staging)
+            raise
+        return
     try:
         shutil.copy2(source, staging)
         with staging.open("rb") as stream:
@@ -311,6 +503,265 @@ def copy_file_atomic(
         with contextlib.suppress(FileNotFoundError):
             staging.unlink()
         raise
+
+
+def copy_file_staged(source: pathlib.Path, staging: pathlib.Path) -> None:
+    source_bound = _bound_path(source)
+    if source_bound is not None:
+        staging_bound = _bound_path(staging)
+        assert staging_bound is not None
+        _descriptor_result(lambda: staging_bound.copy_file_from(source_bound))
+        return
+    shutil.copy2(source, staging)
+    with staging.open("rb") as stream:
+        os.fsync(stream.fileno())
+    fsync_directory(staging.parent)
+
+
+def copy_tree_staged(source: pathlib.Path, staging: pathlib.Path) -> None:
+    source_bound = _bound_path(source)
+    if source_bound is not None:
+        staging_bound = _bound_path(staging)
+        assert staging_bound is not None
+        _descriptor_result(lambda: staging_bound.copy_tree_from(source_bound))
+        return
+    shutil.copytree(source, staging, copy_function=shutil.copy2)
+    reject_tree_symlinks(staging)
+    fsync_tree(staging)
+
+
+def rename_exclusive(source: pathlib.Path, target: pathlib.Path) -> None:
+    source_bound = _bound_path(source)
+    if source_bound is not None:
+        target_bound = _bound_path(target)
+        assert target_bound is not None
+        _descriptor_result(lambda: target_bound.rename_exclusive_from(source_bound))
+        return
+    if path_lexists(target):
+        raise TransactionError(
+            "transaction.target_changed",
+            "Exclusive rename target already exists",
+            path=str(target),
+        )
+    os.rename(source, target)
+    fsync_directory(target.parent)
+
+
+def make_directory(path: pathlib.Path, mode: int) -> None:
+    bound = _bound_path(path)
+    if bound is not None:
+        _descriptor_result(lambda: bound.make_directory(mode))
+        return
+    path.mkdir(mode=mode, parents=False, exist_ok=False)
+    fsync_directory(path.parent)
+
+
+def parent_identity_payload(
+    path: pathlib.Path,
+    *,
+    allow_missing: bool = False,
+) -> dict[str, int] | None:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if allow_missing and error.code == "transaction.parent_missing":
+            return None
+        raise
+    if bound is None:
+        metadata = path.parent.stat()
+        return runtime_descriptor.FileIdentity.from_stat(metadata).to_payload()
+    return dict(_descriptor_result(bound.parent_identity_payload))
+
+
+def validate_parent_identity_payload(
+    value: Any,
+    *,
+    field: str,
+    allow_missing: bool = False,
+) -> None:
+    if value is None and allow_missing:
+        return
+    _descriptor_result(
+        lambda: runtime_descriptor.FileIdentity.from_payload(value, field=field)
+    )
+
+
+def path_identity(path: pathlib.Path) -> runtime_descriptor.FileIdentity | None:
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            return None
+        raise
+    if bound is not None:
+        return _descriptor_result(bound.identity)
+    try:
+        return runtime_descriptor.FileIdentity.from_stat(path.lstat())
+    except FileNotFoundError:
+        return None
+
+
+def require_path_identity(
+    path: pathlib.Path,
+    expected: runtime_descriptor.FileIdentity,
+) -> None:
+    actual = path_identity(path)
+    if actual != expected:
+        raise TransactionError(
+            "transaction.path_identity_changed",
+            "Cleanup path now resolves to a different filesystem object",
+            path=str(path),
+            expected=expected.to_payload(),
+            actual=actual.to_payload() if actual is not None else None,
+        )
+
+
+def tree_cleanup_manifest(path: pathlib.Path) -> list[dict[str, Any]]:
+    bound = _bound_path(path)
+    if bound is None:
+        raise TransactionError(
+            "transaction.descriptor_unsupported",
+            "Cleanup tree inspection requires an active descriptor session",
+            path=str(path),
+        )
+    return list(_descriptor_result(bound.tree_cleanup_manifest))
+
+
+def validate_cleanup_tree_entries(
+    value: Any,
+    *,
+    field: str,
+) -> list[dict[str, Any]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise TransactionError(
+            "transaction.journal_invalid",
+            "Journal cleanup tree manifest is invalid",
+            field=field,
+        )
+    records: dict[str, dict[str, Any]] = {}
+    for index, record in enumerate(value):
+        record_field = f"{field}[{index}]"
+        if not isinstance(record, dict):
+            raise TransactionError(
+                "transaction.journal_invalid",
+                "Journal cleanup tree record is invalid",
+                field=record_field,
+            )
+        entry_type = record.get("type")
+        expected_keys = (
+            {"path", "type", "mode", "identity", "sha256"}
+            if entry_type == "file"
+            else {"path", "type", "mode", "identity"}
+        )
+        raw_path = record.get("path")
+        mode = record.get("mode")
+        if (
+            entry_type not in {"file", "directory"}
+            or set(record) != expected_keys
+            or not isinstance(raw_path, str)
+            or raw_path in records
+            or type(mode) is not int
+            or not 0 <= mode <= 0o7777
+        ):
+            raise TransactionError(
+                "transaction.journal_invalid",
+                "Journal cleanup tree record is invalid",
+                field=record_field,
+            )
+        if raw_path == ".":
+            relative = pathlib.PurePosixPath()
+        else:
+            relative = pathlib.PurePosixPath(raw_path)
+            if (
+                relative.is_absolute()
+                or relative.as_posix() != raw_path
+                or any(part in {"", ".", ".."} for part in relative.parts)
+            ):
+                raise TransactionError(
+                    "transaction.journal_invalid",
+                    "Journal cleanup tree path is invalid",
+                    field=f"{record_field}.path",
+                )
+        if entry_type == "file" and (
+            not isinstance(record.get("sha256"), str)
+            or SHA256_PATTERN.fullmatch(record["sha256"]) is None
+        ):
+            raise TransactionError(
+                "transaction.journal_invalid",
+                "Journal cleanup tree file digest is invalid",
+                field=f"{record_field}.sha256",
+            )
+        identity = _descriptor_result(
+            lambda: runtime_descriptor.FileIdentity.from_payload(
+                record.get("identity"),
+                field=f"{record_field}.identity",
+            )
+        )
+        expected_file_type = stat.S_IFREG if entry_type == "file" else stat.S_IFDIR
+        if identity.file_type != expected_file_type:
+            raise TransactionError(
+                "transaction.journal_invalid",
+                "Journal cleanup tree identity type is invalid",
+                field=f"{record_field}.identity",
+            )
+        records[raw_path] = record
+    root = records.get(".")
+    if root is None or root["type"] != "directory" or value[0]["path"] != ".":
+        raise TransactionError(
+            "transaction.journal_invalid",
+            "Journal cleanup tree root is invalid",
+            field=field,
+        )
+    for raw_path, record in records.items():
+        if raw_path == ".":
+            continue
+        parent = pathlib.PurePosixPath(raw_path).parent.as_posix()
+        parent_record = records.get(parent)
+        if parent_record is None or parent_record["type"] != "directory":
+            raise TransactionError(
+                "transaction.journal_invalid",
+                "Journal cleanup tree parent is invalid",
+                field=f"{field}.{raw_path}",
+            )
+    return value
+
+
+def require_parent_identity(
+    path: pathlib.Path,
+    value: Any,
+    *,
+    field: str,
+    allow_missing: bool = False,
+) -> None:
+    if value is None and allow_missing:
+        return
+    try:
+        bound = _bound_path(path)
+    except TransactionError as error:
+        if error.code == "transaction.parent_missing":
+            raise TransactionError(
+                "transaction.path_identity_changed",
+                "Journaled descriptor parent is missing",
+                path=str(path.parent),
+                field=field,
+            ) from error
+        raise
+    if bound is None:
+        expected = _descriptor_result(
+            lambda: runtime_descriptor.FileIdentity.from_payload(value, field=field)
+        )
+        actual = runtime_descriptor.FileIdentity.from_stat(path.parent.stat())
+        if actual != expected:
+            raise TransactionError(
+                "transaction.path_identity_changed",
+                "Journaled descriptor parent identity changed",
+                path=str(path.parent),
+                field=field,
+            )
+        return
+    _descriptor_result(lambda: bound.require_parent_identity(value, field=field))
 
 
 def error_payload(error: BaseException) -> dict[str, Any]:
@@ -372,6 +823,12 @@ class TransactionExecutor:
     @property
     def undo_root(self) -> pathlib.Path:
         return self.journal_path.with_name(f"{self.journal_path.name}.undo")
+
+    @contextlib.contextmanager
+    def _descriptors(self) -> Iterator[None]:
+        roots = [self.artifact_root, self.transaction_root, *self.allowed_roots]
+        with descriptor_scope(roots):
+            yield
 
     def _inject(self, step_id: str, phase: str) -> None:
         if self.failure_injector is not None:
@@ -721,11 +1178,12 @@ class TransactionExecutor:
 
     def validate(self) -> None:
         self._validate_structure()
-        self._preflight()
+        with self._descriptors():
+            self._preflight()
 
     def _verify_source_file(self, operation: dict[str, Any]) -> pathlib.Path:
         source = self._source_path(operation)
-        if not source.is_file():
+        if not path_is_file(source):
             raise TransactionError(
                 "transaction.source_missing",
                 "Operation source file is missing",
@@ -733,7 +1191,7 @@ class TransactionExecutor:
                 path=str(source),
             )
         expected = self._required_sha256(operation, "sourceSha256")
-        actual = artifact_contract.sha256_file(source)
+        actual = sha256_file(source)
         if actual != expected:
             raise TransactionError(
                 "transaction.source_mismatch",
@@ -746,7 +1204,7 @@ class TransactionExecutor:
 
     def _verify_source_tree(self, operation: dict[str, Any]) -> pathlib.Path:
         source = self._source_path(operation)
-        if not source.is_dir():
+        if not path_is_dir(source):
             raise TransactionError(
                 "transaction.source_missing",
                 "Operation source tree is missing",
@@ -767,7 +1225,7 @@ class TransactionExecutor:
         contract = self._tree_contract(operation)
         marker = self._marker_relative(contract)
         source_marker = source.joinpath(*marker.parts)
-        if not source_marker.is_file():
+        if not path_is_file(source_marker):
             raise TransactionError(
                 "transaction.source_missing",
                 "Source tree ownership marker is missing",
@@ -775,7 +1233,7 @@ class TransactionExecutor:
                 path=str(source_marker),
             )
         expected = self._required_sha256(contract, "sourceMarkerSha256")
-        actual = artifact_contract.sha256_file(source_marker)
+        actual = sha256_file(source_marker)
         if actual != expected:
             raise TransactionError(
                 "transaction.source_mismatch",
@@ -793,7 +1251,7 @@ class TransactionExecutor:
     ) -> None:
         if not path_lexists(target):
             return
-        if target.is_symlink() or not target.is_dir():
+        if not path_is_dir(target):
             raise TransactionError(
                 "transaction.target_foreign",
                 "Tree target is not an owned directory",
@@ -805,7 +1263,7 @@ class TransactionExecutor:
         marker = self._marker_relative(contract)
         target_marker = target.joinpath(*marker.parts)
         expected = self._required_sha256(contract, "sourceMarkerSha256")
-        if not target_marker.is_file() or artifact_contract.sha256_file(target_marker) != expected:
+        if not path_is_file(target_marker) or sha256_file(target_marker) != expected:
             raise TransactionError(
                 "transaction.target_foreign",
                 "Tree target ownership marker does not match",
@@ -827,7 +1285,7 @@ class TransactionExecutor:
     def _preflight_operation(self, operation: dict[str, Any]) -> None:
         action = operation["action"]
         target = self._mutable_path(operation, "target")
-        if action in PARENT_REQUIRED_ACTIONS and not target.parent.is_dir():
+        if action in PARENT_REQUIRED_ACTIONS and not path_is_dir(target.parent):
             raise TransactionError(
                 "transaction.parent_missing",
                 "Mutation target parent is missing",
@@ -836,7 +1294,7 @@ class TransactionExecutor:
             )
         if action == "assert_sha256":
             expected = self._required_sha256(operation, "expectedSha256")
-            if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+            if not path_is_file(target) or sha256_file(target) != expected:
                 raise TransactionError(
                     "transaction.assertion_failed",
                     "Target hash assertion failed",
@@ -857,14 +1315,14 @@ class TransactionExecutor:
             self._validate_owned_tree(operation, target)
         elif action == "backup":
             backup = self._mutable_path(operation, "backup")
-            if not backup.parent.is_dir():
+            if not path_is_dir(backup.parent):
                 raise TransactionError(
                     "transaction.parent_missing",
                     "Backup target parent is missing",
                     operation=operation["id"],
                     path=str(backup.parent),
                 )
-            if not target.is_file():
+            if not path_is_file(target):
                 raise TransactionError(
                     "transaction.target_missing",
                     "Backup source is missing",
@@ -872,8 +1330,8 @@ class TransactionExecutor:
                     path=str(target),
                 )
             if path_lexists(backup) and (
-                not backup.is_file()
-                or artifact_contract.sha256_file(backup) != artifact_contract.sha256_file(target)
+                not path_is_file(backup)
+                or sha256_file(backup) != sha256_file(target)
             ):
                 raise TransactionError(
                     "transaction.backup_mismatch",
@@ -885,7 +1343,7 @@ class TransactionExecutor:
             self._verify_source_file(operation)
             guard = self._matching_install_guard(operation, "assert_sha256")
             expected = self._required_sha256(guard, "expectedSha256")
-            if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+            if not path_is_file(target) or sha256_file(target) != expected:
                 raise TransactionError(
                     "transaction.target_foreign",
                     "Replacement target no longer matches its stock guard",
@@ -909,17 +1367,17 @@ class TransactionExecutor:
             source = self._verify_source_file(operation)
             backup = self._mutable_path(operation, "backup")
             expected = self._required_sha256(operation, "expectedSha256")
-            target_hash = artifact_contract.sha256_file(target) if target.is_file() else None
+            target_hash = sha256_file(target) if path_is_file(target) else None
             if target_hash == expected:
                 return
-            if target_hash != artifact_contract.sha256_file(source):
+            if target_hash != sha256_file(source):
                 raise TransactionError(
                     "transaction.target_foreign",
                     "Restore target is neither installed nor already restored",
                     operation=operation["id"],
                     path=str(target),
                 )
-            if not backup.is_file() or artifact_contract.sha256_file(backup) != expected:
+            if not path_is_file(backup) or sha256_file(backup) != expected:
                 raise TransactionError(
                     "transaction.backup_mismatch",
                     "Restore backup does not match the expected original",
@@ -929,8 +1387,8 @@ class TransactionExecutor:
         elif action == "remove":
             source = self._verify_source_file(operation)
             if path_lexists(target) and (
-                not target.is_file()
-                or artifact_contract.sha256_file(target) != artifact_contract.sha256_file(source)
+                not path_is_file(target)
+                or sha256_file(target) != sha256_file(source)
             ):
                 raise TransactionError(
                     "transaction.target_foreign",
@@ -971,7 +1429,13 @@ class TransactionExecutor:
         if action == "backup":
             backup = self._mutable_path(operation, "backup")
             return (self._step_temporary_path(index, operation, "staging", sibling_of=backup),)
-        if action in {"replace_file", "create_file", "restore"}:
+        if action in {"replace_file", "restore"}:
+            return (
+                self._step_temporary_path(index, operation, "original", sibling_of=target),
+                self._step_temporary_path(index, operation, "staging", sibling_of=target),
+                self._step_temporary_path(index, operation, "rollback", sibling_of=target),
+            )
+        if action == "create_file":
             return (self._step_temporary_path(index, operation, "staging", sibling_of=target),)
         if action == "replace_tree":
             return (
@@ -992,13 +1456,14 @@ class TransactionExecutor:
             )
         for index, operation in enumerate(self.operations):
             for path in self._sibling_temporary_paths(index, operation):
-                if path_lexists(path):
-                    raise TransactionError(
-                        "transaction.temporary_exists",
-                        "Transaction temporary path already exists",
-                        operation=operation["id"],
-                        path=str(path),
-                    )
+                for candidate in (path, self._cleanup_quarantine(path)):
+                    if path_lexists(candidate):
+                        raise TransactionError(
+                            "transaction.temporary_exists",
+                            "Transaction temporary path already exists",
+                            operation=operation["id"],
+                            path=str(candidate),
+                        )
 
     def _preflight(self) -> None:
         for operation in self.operations:
@@ -1008,7 +1473,7 @@ class TransactionExecutor:
     def _new_journal(self) -> dict[str, Any]:
         timestamp = utc_now()
         return {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "transactionId": uuid.uuid4().hex,
             "kind": self.kind,
             "planDigest": self.plan_digest,
@@ -1030,10 +1495,101 @@ class TransactionExecutor:
             "failure": None,
             "rollbackFailures": [],
             "cleanupFailures": [],
+            "cleanupInProgress": {},
         }
 
     def _invalid_journal(self, message: str, **context: Any) -> TransactionError:
         return TransactionError("transaction.journal_invalid", message, **context)
+
+    def _validate_descriptor_parents(
+        self,
+        undo: dict[str, Any],
+        expected: dict[str, tuple[pathlib.Path, bool]],
+        *,
+        require_current: bool,
+    ) -> None:
+        records = undo.get("descriptorParents")
+        if not isinstance(records, dict) or set(records) != set(expected):
+            raise self._invalid_journal("Transaction journal descriptor parents are invalid")
+        for name, (path, allow_missing) in expected.items():
+            value = records[name]
+            try:
+                validate_parent_identity_payload(
+                    value,
+                    field=f"descriptorParents.{name}",
+                    allow_missing=allow_missing,
+                )
+                if require_current:
+                    require_parent_identity(
+                        path,
+                        value,
+                        field=f"descriptorParents.{name}",
+                        allow_missing=allow_missing,
+                    )
+            except TransactionError as error:
+                if require_current:
+                    raise
+                raise self._invalid_journal(
+                    "Transaction journal descriptor parent is invalid",
+                    parent=name,
+                ) from error
+
+    def _require_undo_descriptor_parents(
+        self,
+        operation: dict[str, Any],
+        undo: dict[str, Any],
+    ) -> None:
+        action = operation["action"]
+        target = self._mutable_path(operation, "target")
+        if action == "backup":
+            self._validate_descriptor_parents(
+                undo,
+                {
+                    "target": (target, False),
+                    "backup": (self._mutable_path(operation, "backup"), False),
+                },
+                require_current=True,
+            )
+        elif action in {"replace_file", "restore"}:
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False)},
+                require_current=True,
+            )
+        elif action in {"create_file", "replace_tree"}:
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False)},
+                require_current=True,
+            )
+        elif action in {"remove", "remove_tree"}:
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, not undo["existed"])},
+                require_current=True,
+            )
+
+    def _require_committed_descriptor_parents(
+        self,
+        operation: dict[str, Any],
+        undo: dict[str, Any],
+    ) -> None:
+        action = operation["action"]
+        target = self._mutable_path(operation, "target")
+        records = undo["descriptorParents"]
+        require_parent_identity(
+            target,
+            records["target"],
+            field="descriptorParents.target",
+            allow_missing=action in {"remove", "remove_tree"} and not undo["existed"],
+        )
+        if action == "backup":
+            backup = self._mutable_path(operation, "backup")
+            require_parent_identity(
+                backup,
+                records["backup"],
+                field="descriptorParents.backup",
+            )
 
     def _validate_undo(
         self,
@@ -1059,6 +1615,7 @@ class TransactionExecutor:
                 "staging",
                 "created",
                 "backupSha256",
+                "descriptorParents",
                 "commitCleanupPaths",
             }
             if set(undo) != expected_keys or undo.get("kind") != "remove-backup":
@@ -1072,10 +1629,26 @@ class TransactionExecutor:
                 or undo.get("commitCleanupPaths") != [str(staging)]
             ):
                 raise self._invalid_journal("Transaction journal backup undo is invalid", index=index)
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False), "backup": (backup, False)},
+                require_current=False,
+            )
             return
         if action in {"replace_file", "restore"}:
-            original = self._step_temporary_path(index, operation, "original")
+            original = self._step_temporary_path(
+                index,
+                operation,
+                "original",
+                sibling_of=target,
+            )
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
+            rollback_discard = self._step_temporary_path(
+                index,
+                operation,
+                "rollback",
+                sibling_of=target,
+            )
             expected_applied = (
                 self._required_sha256(operation, "sourceSha256")
                 if action == "replace_file"
@@ -1099,8 +1672,11 @@ class TransactionExecutor:
                 "target",
                 "original",
                 "staging",
+                "rollbackDiscard",
                 "originalSha256",
                 "appliedSha256",
+                "phase",
+                "descriptorParents",
                 "commitCleanupPaths",
             }
             if set(undo) != expected_keys or undo.get("kind") != "restore-file":
@@ -1109,25 +1685,47 @@ class TransactionExecutor:
                 undo.get("target") != str(target)
                 or undo.get("original") != str(original)
                 or undo.get("staging") != str(staging)
+                or undo.get("rollbackDiscard") != str(rollback_discard)
                 or not isinstance(undo.get("originalSha256"), str)
                 or SHA256_PATTERN.fullmatch(undo["originalSha256"]) is None
                 or undo.get("originalSha256") not in allowed_originals
                 or undo.get("appliedSha256") != expected_applied
-                or undo.get("commitCleanupPaths") != [str(staging)]
+                or undo.get("phase") not in FILE_PHASES
+                or undo.get("commitCleanupPaths")
+                != [str(original), str(staging), str(rollback_discard)]
             ):
                 raise self._invalid_journal("Transaction journal file undo is invalid", index=index)
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False)},
+                require_current=False,
+            )
             return
         if action == "create_file":
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
-            expected = {
-                "kind": "remove-created-file",
-                "target": str(target),
-                "staging": str(staging),
-                "appliedSha256": self._required_sha256(operation, "sourceSha256"),
-                "commitCleanupPaths": [str(staging)],
+            expected_keys = {
+                "kind",
+                "target",
+                "staging",
+                "appliedSha256",
+                "descriptorParents",
+                "commitCleanupPaths",
             }
-            if undo != expected:
+            if (
+                set(undo) != expected_keys
+                or undo.get("kind") != "remove-created-file"
+                or undo.get("target") != str(target)
+                or undo.get("staging") != str(staging)
+                or undo.get("appliedSha256")
+                != self._required_sha256(operation, "sourceSha256")
+                or undo.get("commitCleanupPaths") != [str(staging)]
+            ):
                 raise self._invalid_journal("Transaction journal create undo is invalid", index=index)
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False)},
+                require_current=False,
+            )
             return
         if action == "replace_tree":
             contract = self._tree_contract(operation)
@@ -1151,6 +1749,7 @@ class TransactionExecutor:
                 "originalTreeSha256",
                 "appliedTreeSha256",
                 "phase",
+                "descriptorParents",
                 "commitCleanupPaths",
             }
             if set(undo) != expected_keys or undo.get("kind") != "restore-tree":
@@ -1181,6 +1780,11 @@ class TransactionExecutor:
                 != [str(original), str(staging), str(rollback_discard)]
             ):
                 raise self._invalid_journal("Transaction journal tree undo is invalid", index=index)
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, False)},
+                require_current=False,
+            )
             return
         if action in {"remove", "remove_tree"}:
             original = self._step_temporary_path(index, operation, "removed", sibling_of=target)
@@ -1196,6 +1800,9 @@ class TransactionExecutor:
                     "original",
                     "existed",
                     "expectedSha256",
+                    "targetIdentity",
+                    "phase",
+                    "descriptorParents",
                     "commitCleanupPaths",
                 }
                 expected = {
@@ -1212,6 +1819,9 @@ class TransactionExecutor:
                     "marker",
                     "markerSha256",
                     "expectedTreeSha256",
+                    "targetIdentity",
+                    "phase",
+                    "descriptorParents",
                     "commitCleanupPaths",
                 }
                 expected = {
@@ -1227,7 +1837,18 @@ class TransactionExecutor:
                         "sourceTreeSha256",
                     ),
                 }
-            if set(undo) != expected_keys or not isinstance(undo.get("existed"), bool):
+            if (
+                set(undo) != expected_keys
+                or not isinstance(undo.get("existed"), bool)
+                or undo.get("phase") not in REMOVAL_PHASES
+                or (
+                    not undo["existed"]
+                    and (
+                        undo.get("targetIdentity") is not None
+                        or undo.get("phase") != "intent"
+                    )
+                )
+            ):
                 raise self._invalid_journal("Transaction journal removal undo is invalid", index=index)
             for key, value in expected.items():
                 if undo.get(key) != value:
@@ -1235,6 +1856,24 @@ class TransactionExecutor:
                         "Transaction journal removal undo is invalid",
                         index=index,
                     )
+            if undo["existed"]:
+                identity = _descriptor_result(
+                    lambda: runtime_descriptor.FileIdentity.from_payload(
+                        undo.get("targetIdentity"),
+                        field=f"steps[{index}].undo.targetIdentity",
+                    )
+                )
+                expected_file_type = stat.S_IFREG if action == "remove" else stat.S_IFDIR
+                if identity.file_type != expected_file_type:
+                    raise self._invalid_journal(
+                        "Transaction journal removal identity is invalid",
+                        index=index,
+                    )
+            self._validate_descriptor_parents(
+                undo,
+                {"target": (target, not undo["existed"])},
+                require_current=False,
+            )
             return
         raise self._invalid_journal("Transaction journal undo action is unsupported", index=index)
 
@@ -1253,11 +1892,12 @@ class TransactionExecutor:
             "failure",
             "rollbackFailures",
             "cleanupFailures",
+            "cleanupInProgress",
         }
         if (
             not isinstance(journal, dict)
             or set(journal) != expected_keys
-            or journal.get("schemaVersion") != 1
+            or journal.get("schemaVersion") != 2
         ):
             raise self._invalid_journal("Transaction journal schema is invalid")
         if journal.get("kind") != self.kind or journal.get("planDigest") != self.plan_digest:
@@ -1328,16 +1968,16 @@ class TransactionExecutor:
                     raise self._invalid_journal("Pending journal step contains undo intent", index=index)
             else:
                 self._validate_undo(index, operation, step.get("undo"))
-                if operation["action"] == "replace_tree":
+                if operation["action"] in {"replace_file", "restore", "replace_tree"}:
                     phase = step["undo"]["phase"]
                     if step["status"] == "applied" and phase != "replacement-installed":
                         raise self._invalid_journal(
-                            "Applied tree journal step has an invalid phase",
+                            "Applied replacement journal step has an invalid phase",
                             index=index,
                         )
                     if step["status"] == "rolled-back" and phase != "rollback-restored":
                         raise self._invalid_journal(
-                            "Rolled-back tree journal step has an invalid phase",
+                            "Rolled-back replacement journal step has an invalid phase",
                             index=index,
                         )
                     if phase.startswith("rollback-") and journal["state"] not in {
@@ -1346,7 +1986,7 @@ class TransactionExecutor:
                         "failed",
                     }:
                         raise self._invalid_journal(
-                            "Forward tree journal step has a rollback phase",
+                            "Forward replacement journal step has a rollback phase",
                             index=index,
                         )
         if journal["state"] == "failed" and not any(
@@ -1357,6 +1997,7 @@ class TransactionExecutor:
             raise self._invalid_journal("Transaction journal failure is invalid")
         rollback_failures = journal.get("rollbackFailures")
         cleanup_failures = journal.get("cleanupFailures")
+        cleanup_in_progress = journal.get("cleanupInProgress")
         if not isinstance(rollback_failures, list) or not all(
             isinstance(item, dict) for item in rollback_failures
         ):
@@ -1365,16 +2006,62 @@ class TransactionExecutor:
             isinstance(item, str) for item in cleanup_failures
         ):
             raise self._invalid_journal("Transaction cleanup failures are invalid")
+        possible_cleanup_paths: dict[str, str] = {}
+        for step in steps:
+            undo = step.get("undo") or {}
+            kind = undo.get("kind")
+            if kind is None:
+                continue
+            assert isinstance(kind, str)
+            for path in undo.get("commitCleanupPaths") or []:
+                possible_cleanup_paths[path] = kind
+            if kind == "remove-backup":
+                possible_cleanup_paths[undo["path"]] = kind
+            elif kind == "remove-created-file":
+                possible_cleanup_paths[undo["target"]] = kind
+        if not isinstance(cleanup_in_progress, dict) or not all(
+            isinstance(path, str)
+            and path in possible_cleanup_paths
+            and isinstance(record, dict)
+            and set(record) == {"phase", "identity", "treeEntries"}
+            and record.get("phase") in {"intent", "deleting"}
+            for path, record in cleanup_in_progress.items()
+        ):
+            raise self._invalid_journal("Transaction cleanup progress is invalid")
+        for path, record in cleanup_in_progress.items():
+            identity = _descriptor_result(
+                lambda: runtime_descriptor.FileIdentity.from_payload(
+                    record["identity"],
+                    field=f"cleanupInProgress.{path}.identity",
+                )
+            )
+            tree_entries = validate_cleanup_tree_entries(
+                record["treeEntries"],
+                field=f"cleanupInProgress.{path}.treeEntries",
+            )
+            tree_kind = possible_cleanup_paths[path] in {
+                "restore-tree",
+                "restore-moved-tree",
+            }
+            if tree_kind != (tree_entries is not None):
+                raise self._invalid_journal("Transaction cleanup tree progress is invalid")
+            if tree_entries is not None:
+                root_identity_payload = tree_entries[0]["identity"]
+                root_identity = _descriptor_result(
+                    lambda: runtime_descriptor.FileIdentity.from_payload(
+                        root_identity_payload,
+                        field=f"cleanupInProgress.{path}.treeEntries[0].identity",
+                    )
+                )
+                if root_identity != identity:
+                    raise self._invalid_journal("Transaction cleanup tree identity is invalid")
         return journal
 
     def _load_journal(self) -> dict[str, Any] | None:
         if not path_lexists(self.journal_path):
             return None
         reject_symlink_components(self.journal_path)
-        try:
-            journal = artifact_contract.load_json(self.journal_path)
-        except artifact_contract.ArtifactError as error:
-            raise TransactionError(error.code, error.message, **error.context) from error
+        journal = load_json(self.journal_path)
         return self._validate_journal(journal)
 
     def _save_journal(self, journal: dict[str, Any]) -> None:
@@ -1383,18 +2070,27 @@ class TransactionExecutor:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            descriptor = os.open(self.lock_path, flags, 0o600)
-        except OSError as error:
-            raise TransactionError(
-                "transaction.lock_failed",
-                "Transaction lock could not be opened",
-                path=str(self.lock_path),
-                error=str(error),
-            ) from error
+        bound = _bound_path(self.lock_path)
+        if bound is not None:
+            existed = path_lexists(self.lock_path)
+            descriptor, _ = _descriptor_result(lambda: bound.open_read_write_create(0o600))
+            if not existed:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                bound.fsync_parent()
+        else:
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(self.lock_path, flags, 0o600)
+            except OSError as error:
+                raise TransactionError(
+                    "transaction.lock_failed",
+                    "Transaction lock could not be opened",
+                    path=str(self.lock_path),
+                    error=str(error),
+                ) from error
         with os.fdopen(descriptor, "r+") as stream:
             metadata = os.fstat(stream.fileno())
             if (
@@ -1445,13 +2141,15 @@ class TransactionExecutor:
             action = operation["action"]
             target = self._mutable_path(operation, "target")
             undo = step.get("undo") or {}
+            if action in MUTATING_ACTIONS:
+                self._require_committed_descriptor_parents(operation, undo)
             if action == "backup":
                 backup = self._mutable_path(operation, "backup")
                 expected = undo.get("backupSha256")
                 if (
-                    not backup.is_file()
+                    not path_is_file(backup)
                     or not isinstance(expected, str)
-                    or artifact_contract.sha256_file(backup) != expected
+                    or sha256_file(backup) != expected
                 ):
                     raise TransactionError(
                         "transaction.journal_inconsistent",
@@ -1461,7 +2159,7 @@ class TransactionExecutor:
                     )
             elif action in {"replace_file", "create_file"}:
                 expected = self._required_sha256(operation, "sourceSha256")
-                if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+                if not path_is_file(target) or sha256_file(target) != expected:
                     raise TransactionError(
                         "transaction.journal_inconsistent",
                         "Committed file state does not match the plan",
@@ -1480,7 +2178,7 @@ class TransactionExecutor:
                     ) from error
                 expected = undo.get("appliedTreeSha256")
                 if (
-                    not target.is_dir()
+                    not path_is_dir(target)
                     or not isinstance(expected, str)
                     or tree_sha256(target) != expected
                 ):
@@ -1492,7 +2190,7 @@ class TransactionExecutor:
                     )
             elif action == "restore":
                 expected = self._required_sha256(operation, "expectedSha256")
-                if not target.is_file() or artifact_contract.sha256_file(target) != expected:
+                if not path_is_file(target) or sha256_file(target) != expected:
                     raise TransactionError(
                         "transaction.journal_inconsistent",
                         "Committed restore state does not match the plan",
@@ -1505,7 +2203,292 @@ class TransactionExecutor:
                     "Committed removal target still exists",
                     operation=operation["id"],
                     path=str(target),
+                    )
+
+    def _validate_cleanup_payload(
+        self,
+        undo: dict[str, Any],
+        path: pathlib.Path,
+        *,
+        logical_path: pathlib.Path | None = None,
+    ) -> tuple[runtime_descriptor.FileIdentity, list[dict[str, Any]] | None]:
+        identity = path_identity(path)
+        if identity is None:
+            raise TransactionError(
+                "transaction.path_identity_changed",
+                "Cleanup payload disappeared during validation",
+                path=str(path),
+            )
+
+        def finish(
+            tree_entries: list[dict[str, Any]] | None = None,
+        ) -> tuple[runtime_descriptor.FileIdentity, list[dict[str, Any]] | None]:
+            require_path_identity(path, identity)
+            if tree_entries is not None:
+                root_identity = _descriptor_result(
+                    lambda: runtime_descriptor.FileIdentity.from_payload(
+                        tree_entries[0]["identity"],
+                        field="cleanupTree.root.identity",
+                    )
                 )
+                if root_identity != identity:
+                    raise TransactionError(
+                        "transaction.path_identity_changed",
+                        "Cleanup tree root changed during inspection",
+                        path=str(path),
+                    )
+            return identity, tree_entries
+
+        logical = logical_path or path
+        kind = undo.get("kind")
+        if kind == "remove-backup":
+            expected = undo["backupSha256"]
+            if not path_is_file(path) or sha256_file(path) != expected:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Backup staging cleanup payload changed",
+                    path=str(path),
+                )
+            return finish()
+        if kind == "restore-file":
+            expected = (
+                undo["originalSha256"]
+                if logical == pathlib.Path(undo["original"])
+                else undo["appliedSha256"]
+            )
+            if not path_is_file(path) or sha256_file(path) != expected:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "File cleanup payload changed",
+                    path=str(path),
+                )
+            return finish()
+        if kind == "remove-created-file":
+            if not path_is_file(path) or sha256_file(path) != undo["appliedSha256"]:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Created-file staging cleanup payload changed",
+                    path=str(path),
+                )
+            return finish()
+        if kind == "restore-tree":
+            expected = (
+                undo["originalTreeSha256"]
+                if logical == pathlib.Path(undo["original"])
+                else undo["appliedTreeSha256"]
+            )
+            if expected is None:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Unexpected tree cleanup payload exists",
+                    path=str(path),
+                )
+            self._validate_tree_payload(
+                path,
+                undo["marker"],
+                undo["markerSha256"],
+                expected,
+            )
+            return finish(tree_cleanup_manifest(path))
+        if kind == "restore-moved-file":
+            if not path_is_file(path) or sha256_file(path) != undo["expectedSha256"]:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Removed-file cleanup payload changed",
+                    path=str(path),
+                )
+            return finish()
+        if kind == "restore-moved-tree":
+            self._validate_tree_payload(
+                path,
+                undo["marker"],
+                undo["markerSha256"],
+                undo["expectedTreeSha256"],
+            )
+            return finish(tree_cleanup_manifest(path))
+        raise TransactionError(
+            "transaction.journal_invalid",
+            "Unknown cleanup payload kind",
+            undoKind=kind,
+        )
+
+    @staticmethod
+    def _cleanup_quarantine(path: pathlib.Path) -> pathlib.Path:
+        return path.with_name(f"{path.name}.descriptor-delete")
+
+    def _validate_partial_cleanup_payload(
+        self,
+        undo: dict[str, Any],
+        path: pathlib.Path,
+        expected_tree_entries: list[dict[str, Any]] | None,
+    ) -> None:
+        kind = undo.get("kind")
+        file_kinds = {
+            "remove-backup",
+            "restore-file",
+            "remove-created-file",
+            "restore-moved-file",
+        }
+        tree_kinds = {"restore-tree", "restore-moved-tree"}
+        if kind in file_kinds and path_is_file(path) and expected_tree_entries is None:
+            return
+        if kind in tree_kinds and path_is_dir(path):
+            if expected_tree_entries is None:
+                raise TransactionError(
+                    "transaction.journal_invalid",
+                    "Tree cleanup is missing its journaled manifest",
+                    path=str(path),
+                )
+            expected = {record["path"]: record for record in expected_tree_entries}
+            for record in tree_cleanup_manifest(path):
+                if expected.get(record["path"]) != record:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Partial cleanup tree contains changed or unjournaled content",
+                        path=str(path),
+                        relativePath=record["path"],
+                    )
+            return
+        raise TransactionError(
+            "transaction.undo_foreign",
+            "Partial cleanup quarantine changed type",
+            path=str(path),
+            undoKind=kind,
+        )
+
+    def _set_cleanup_progress(
+        self,
+        journal: dict[str, Any],
+        path: pathlib.Path,
+        *,
+        identity: runtime_descriptor.FileIdentity | None = None,
+        tree_entries: list[dict[str, Any]] | None = None,
+        phase: str | None = None,
+    ) -> None:
+        value = str(path)
+        progress = dict(journal["cleanupInProgress"])
+        if phase is not None:
+            if identity is None:
+                raise AssertionError("Cleanup progress identity is required")
+            progress[value] = {
+                "phase": phase,
+                "identity": identity.to_payload(),
+                "treeEntries": tree_entries,
+            }
+        else:
+            progress.pop(value, None)
+        journal["cleanupInProgress"] = progress
+        self._save_journal(journal)
+
+    def _remove_verified_payload(
+        self,
+        journal: dict[str, Any],
+        undo: dict[str, Any],
+        path: pathlib.Path,
+    ) -> None:
+        quarantine = self._cleanup_quarantine(path)
+        progress = journal["cleanupInProgress"].get(str(path))
+        if progress is None:
+            if path_lexists(quarantine):
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Unjournaled cleanup quarantine already exists",
+                    path=str(path),
+                    quarantine=str(quarantine),
+                )
+            if not path_lexists(path):
+                return
+            identity, tree_entries = self._validate_cleanup_payload(undo, path)
+            self._set_cleanup_progress(
+                journal,
+                path,
+                identity=identity,
+                tree_entries=tree_entries,
+                phase="intent",
+            )
+            progress = journal["cleanupInProgress"][str(path)]
+
+        identity = _descriptor_result(
+            lambda: runtime_descriptor.FileIdentity.from_payload(
+                progress["identity"],
+                field=f"cleanupInProgress.{path}.identity",
+            )
+        )
+        tree_entries = validate_cleanup_tree_entries(
+            progress["treeEntries"],
+            field=f"cleanupInProgress.{path}.treeEntries",
+        )
+        path_exists = path_lexists(path)
+        quarantine_exists = path_lexists(quarantine)
+        if path_exists and quarantine_exists:
+            raise TransactionError(
+                "transaction.undo_foreign",
+                "Cleanup path and quarantine both exist",
+                path=str(path),
+                quarantine=str(quarantine),
+            )
+
+        if progress["phase"] == "intent":
+            if path_exists:
+                current_identity, current_tree_entries = self._validate_cleanup_payload(undo, path)
+                if current_identity != identity:
+                    require_path_identity(path, identity)
+                if current_tree_entries != tree_entries:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Cleanup payload identity manifest changed before quarantine",
+                        path=str(path),
+                    )
+                rename_exclusive(path, quarantine)
+            elif not quarantine_exists:
+                raise TransactionError(
+                    "transaction.undo_foreign",
+                    "Journaled cleanup payload is missing before deletion",
+                    path=str(path),
+                    quarantine=str(quarantine),
+                )
+            try:
+                require_path_identity(quarantine, identity)
+                current_identity, current_tree_entries = self._validate_cleanup_payload(
+                    undo,
+                    quarantine,
+                    logical_path=path,
+                )
+                if current_identity != identity or current_tree_entries != tree_entries:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Cleanup quarantine does not match its journaled identity manifest",
+                        path=str(quarantine),
+                    )
+            except Exception:
+                if not path_lexists(path) and path_lexists(quarantine):
+                    with contextlib.suppress(TransactionError):
+                        rename_exclusive(quarantine, path)
+                        self._set_cleanup_progress(journal, path)
+                raise
+            self._set_cleanup_progress(
+                journal,
+                path,
+                identity=identity,
+                tree_entries=tree_entries,
+                phase="deleting",
+            )
+            quarantine_exists = True
+        elif path_exists:
+            raise TransactionError(
+                "transaction.undo_foreign",
+                "Cleanup payload returned after deletion began",
+                path=str(path),
+                quarantine=str(quarantine),
+            )
+
+        if not quarantine_exists:
+            self._set_cleanup_progress(journal, path)
+            return
+        require_path_identity(quarantine, identity)
+        self._validate_partial_cleanup_payload(undo, quarantine, tree_entries)
+        remove_path_durable(quarantine, identity, tree_entries)
+        self._set_cleanup_progress(journal, path)
 
     def _cleanup_payloads(self, journal: dict[str, Any]) -> None:
         failures: list[str] = []
@@ -1515,7 +2498,7 @@ class TransactionExecutor:
                 path = pathlib.Path(raw_path)
                 try:
                     reject_symlink_components(path, include_leaf=False)
-                    remove_path_durable(path)
+                    self._remove_verified_payload(journal, undo, path)
                 except Exception as error:
                     failures.append(f"{path}: {error}")
         try:
@@ -1539,6 +2522,10 @@ class TransactionExecutor:
 
     def execute(self) -> TransactionReport:
         self._validate_structure()
+        with self._descriptors():
+            return self._execute_with_descriptors()
+
+    def _execute_with_descriptors(self) -> TransactionReport:
         with self._locked():
             journal = self._load_journal()
             if journal is not None:
@@ -1565,8 +2552,7 @@ class TransactionExecutor:
             journal = self._new_journal()
             self._save_journal(journal)
             try:
-                self.undo_root.mkdir(mode=0o700, parents=False, exist_ok=False)
-                fsync_directory(self.undo_root.parent)
+                make_directory(self.undo_root, 0o700)
                 journal["state"] = "running"
                 self._save_journal(journal)
                 for index, operation in enumerate(self.operations):
@@ -1608,8 +2594,9 @@ class TransactionExecutor:
 
     def inspect(self) -> dict[str, Any] | None:
         self._validate_structure()
-        with self._locked():
-            return self._load_journal()
+        with self._descriptors():
+            with self._locked():
+                return self._load_journal()
 
     def archive_terminal(self, history_root: pathlib.Path) -> pathlib.Path:
         self._validate_structure()
@@ -1621,6 +2608,10 @@ class TransactionExecutor:
                 "Transaction history directory must already exist",
                 path=str(history_root),
             )
+        with self._descriptors():
+            return self._archive_terminal_with_descriptors(history_root)
+
+    def _archive_terminal_with_descriptors(self, history_root: pathlib.Path) -> pathlib.Path:
         with self._locked():
             journal = self._load_journal()
             if journal is None:
@@ -1658,13 +2649,16 @@ class TransactionExecutor:
                     "Transaction journal archive already exists",
                     path=str(destination),
                 )
-            os.replace(self.journal_path, destination)
-            fsync_directory(self.journal_path.parent)
+            rename_exclusive(self.journal_path, destination)
             fsync_directory(history_root)
             return destination
 
     def recover(self) -> TransactionReport:
         self._validate_structure()
+        with self._descriptors():
+            return self._recover_with_descriptors()
+
+    def _recover_with_descriptors(self) -> TransactionReport:
         with self._locked():
             journal = self._load_journal()
             if journal is None:
@@ -1715,21 +2709,33 @@ class TransactionExecutor:
                 "path": str(backup),
                 "staging": str(staging),
                 "created": not path_lexists(backup),
-                "backupSha256": artifact_contract.sha256_file(target),
+                "backupSha256": sha256_file(target),
+                "descriptorParents": {
+                    "target": parent_identity_payload(target),
+                    "backup": parent_identity_payload(backup),
+                },
                 "commitCleanupPaths": [str(staging)],
             }
         if action in {"replace_file", "restore"}:
-            original = self._step_temporary_path(index, operation, "original")
-            snapshot_staging = original.with_name(f".{original.name}.staging")
-            self._ensure_transaction_path(snapshot_staging, operation["id"])
-            copy_file_atomic(target, original, snapshot_staging)
+            original = self._step_temporary_path(
+                index,
+                operation,
+                "original",
+                sibling_of=target,
+            )
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
+            rollback_discard = self._step_temporary_path(
+                index,
+                operation,
+                "rollback",
+                sibling_of=target,
+            )
             applied_sha256 = (
                 self._required_sha256(operation, "sourceSha256")
                 if action == "replace_file"
                 else self._required_sha256(operation, "expectedSha256")
             )
-            original_sha256 = artifact_contract.sha256_file(original)
+            original_sha256 = sha256_file(target)
             if action == "replace_file":
                 guard = self._matching_install_guard(operation, "assert_sha256")
                 expected_original = self._required_sha256(guard, "expectedSha256")
@@ -1746,9 +2752,14 @@ class TransactionExecutor:
                 "target": str(target),
                 "original": str(original),
                 "staging": str(staging),
+                "rollbackDiscard": str(rollback_discard),
                 "originalSha256": original_sha256,
                 "appliedSha256": applied_sha256,
-                "commitCleanupPaths": [str(staging)],
+                "phase": "intent",
+                "descriptorParents": {
+                    "target": parent_identity_payload(target),
+                },
+                "commitCleanupPaths": [str(original), str(staging), str(rollback_discard)],
             }
         if action == "create_file":
             staging = self._step_temporary_path(index, operation, "staging", sibling_of=target)
@@ -1757,6 +2768,9 @@ class TransactionExecutor:
                 "target": str(target),
                 "staging": str(staging),
                 "appliedSha256": self._required_sha256(operation, "sourceSha256"),
+                "descriptorParents": {
+                    "target": parent_identity_payload(target),
+                },
                 "commitCleanupPaths": [str(staging)],
             }
         if action == "replace_tree":
@@ -1776,40 +2790,71 @@ class TransactionExecutor:
                 "original": str(original),
                 "staging": str(staging),
                 "rollbackDiscard": str(rollback_discard),
-                "existed": target.is_dir(),
+                "existed": path_is_dir(target),
                 "marker": self._marker_relative(contract).as_posix(),
                 "markerSha256": self._required_sha256(contract, "sourceMarkerSha256"),
-                "originalTreeSha256": tree_sha256(target) if target.is_dir() else None,
+                "originalTreeSha256": tree_sha256(target) if path_is_dir(target) else None,
                 "appliedTreeSha256": self._required_sha256(
                     operation,
                     "sourceTreeSha256",
                 ),
                 "phase": "intent",
+                "descriptorParents": {
+                    "target": parent_identity_payload(target),
+                },
                 "commitCleanupPaths": [str(original), str(staging), str(rollback_discard)],
             }
         if action == "remove":
             original = self._step_temporary_path(index, operation, "removed", sibling_of=target)
+            existed = path_is_file(target)
+            identity = path_identity(target) if existed else None
+            if existed and identity is None:
+                raise TransactionError(
+                    "transaction.path_identity_changed",
+                    "Removal target disappeared while recording transaction intent",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             return {
                 "kind": "restore-moved-file",
                 "target": str(target),
                 "original": str(original),
-                "existed": target.is_file(),
+                "existed": existed,
                 "expectedSha256": self._required_sha256(operation, "sourceSha256"),
+                "targetIdentity": identity.to_payload() if identity is not None else None,
+                "phase": "intent",
+                "descriptorParents": {
+                    "target": parent_identity_payload(target, allow_missing=True),
+                },
                 "commitCleanupPaths": [str(original)],
             }
         if action == "remove_tree":
             original = self._step_temporary_path(index, operation, "removed", sibling_of=target)
+            existed = path_is_dir(target)
+            identity = path_identity(target) if existed else None
+            if existed and identity is None:
+                raise TransactionError(
+                    "transaction.path_identity_changed",
+                    "Removal tree disappeared while recording transaction intent",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             return {
                 "kind": "restore-moved-tree",
                 "target": str(target),
                 "original": str(original),
-                "existed": target.is_dir(),
+                "existed": existed,
                 "marker": self._marker_relative(operation).as_posix(),
                 "markerSha256": self._required_sha256(operation, "sourceMarkerSha256"),
                 "expectedTreeSha256": self._required_sha256(
                     operation,
                     "sourceTreeSha256",
                 ),
+                "targetIdentity": identity.to_payload() if identity is not None else None,
+                "phase": "intent",
+                "descriptorParents": {
+                    "target": parent_identity_payload(target, allow_missing=True),
+                },
                 "commitCleanupPaths": [str(original)],
             }
         raise TransactionError(
@@ -1818,6 +2863,59 @@ class TransactionExecutor:
             operation=operation["id"],
             action=action,
         )
+
+    def _apply_file_replacement(
+        self,
+        operation: dict[str, Any],
+        source: pathlib.Path,
+        target: pathlib.Path,
+        undo: dict[str, Any],
+        journal: dict[str, Any],
+    ) -> None:
+        original = pathlib.Path(undo["original"])
+        staging = pathlib.Path(undo["staging"])
+        rollback_discard = pathlib.Path(undo["rollbackDiscard"])
+        if path_lexists(original) or path_lexists(staging) or path_lexists(rollback_discard):
+            raise TransactionError(
+                "transaction.temporary_exists",
+                "File transaction temporary path already exists",
+                operation=operation["id"],
+            )
+        copy_file_staged(source, staging)
+        if sha256_file(staging) != undo["appliedSha256"]:
+            raise TransactionError(
+                "transaction.write_mismatch",
+                "Staged file does not match its source",
+                operation=operation["id"],
+                path=str(staging),
+            )
+        undo["phase"] = "staged"
+        self._save_journal(journal)
+        self._inject(operation["id"], "after-file-staged")
+        rename_exclusive(target, original)
+        if sha256_file(original) != undo["originalSha256"]:
+            with contextlib.suppress(TransactionError):
+                rename_exclusive(original, target)
+            raise TransactionError(
+                "transaction.target_changed",
+                "File target changed after transaction intent",
+                operation=operation["id"],
+                path=str(target),
+            )
+        undo["phase"] = "original-moved"
+        self._save_journal(journal)
+        self._inject(operation["id"], "after-file-original-moved")
+        rename_exclusive(staging, target)
+        if sha256_file(target) != undo["appliedSha256"]:
+            raise TransactionError(
+                "transaction.write_mismatch",
+                "Installed file does not match its source",
+                operation=operation["id"],
+                path=str(target),
+            )
+        undo["phase"] = "replacement-installed"
+        self._save_journal(journal)
+        self._inject(operation["id"], "after-file-replacement-installed")
 
     def _apply_operation(
         self,
@@ -1830,6 +2928,7 @@ class TransactionExecutor:
         target = self._mutable_path(operation, "target")
         if action in {"assert_sha256", "assert_absent", "assert_absent_or_owned", "retain"}:
             return
+        self._require_undo_descriptor_parents(operation, undo)
         if action == "backup":
             if not undo["created"]:
                 return
@@ -1842,7 +2941,7 @@ class TransactionExecutor:
                     path=str(backup),
                 )
             copy_file_atomic(target, backup, pathlib.Path(undo["staging"]))
-            if artifact_contract.sha256_file(backup) != undo["backupSha256"]:
+            if sha256_file(backup) != undo["backupSha256"]:
                 raise TransactionError(
                     "transaction.write_mismatch",
                     "Backup does not match its source",
@@ -1850,10 +2949,14 @@ class TransactionExecutor:
                     path=str(backup),
                 )
             return
-        if action in {"replace_file", "create_file"}:
+        if action == "replace_file":
+            source = self._verify_source_file(operation)
+            self._apply_file_replacement(operation, source, target, undo, journal)
+            return
+        if action == "create_file":
             source = self._verify_source_file(operation)
             copy_file_atomic(source, target, pathlib.Path(undo["staging"]))
-            if artifact_contract.sha256_file(target) != undo["appliedSha256"]:
+            if sha256_file(target) != undo["appliedSha256"]:
                 raise TransactionError(
                     "transaction.write_mismatch",
                     "Installed file does not match its source",
@@ -1883,9 +2986,7 @@ class TransactionExecutor:
                     "Tree transaction temporary path already exists",
                     operation=operation["id"],
                 )
-            shutil.copytree(source, staging, copy_function=shutil.copy2)
-            reject_tree_symlinks(staging)
-            fsync_tree(staging)
+            copy_tree_staged(source, staging)
             if tree_sha256(staging) != undo["appliedTreeSha256"]:
                 raise TransactionError(
                     "transaction.write_mismatch",
@@ -1895,13 +2996,22 @@ class TransactionExecutor:
                 )
             undo["phase"] = "staged"
             self._save_journal(journal)
+            self._inject(operation["id"], "after-tree-staged")
             if path_lexists(target):
-                os.replace(target, original)
-                fsync_directory(target.parent)
+                rename_exclusive(target, original)
+                if tree_sha256(original) != undo["originalTreeSha256"]:
+                    with contextlib.suppress(TransactionError):
+                        rename_exclusive(original, target)
+                    raise TransactionError(
+                        "transaction.target_changed",
+                        "Tree target changed after transaction intent",
+                        operation=operation["id"],
+                        path=str(target),
+                    )
                 undo["phase"] = "original-moved"
                 self._save_journal(journal)
-            os.replace(staging, target)
-            fsync_directory(target.parent)
+                self._inject(operation["id"], "after-tree-original-moved")
+            rename_exclusive(staging, target)
             if tree_sha256(target) != undo["appliedTreeSha256"]:
                 raise TransactionError(
                     "transaction.write_mismatch",
@@ -1911,24 +3021,25 @@ class TransactionExecutor:
                 )
             undo["phase"] = "replacement-installed"
             self._save_journal(journal)
+            self._inject(operation["id"], "after-tree-replacement-installed")
             return
         if action == "restore":
             backup = self._mutable_path(operation, "backup")
             expected = self._required_sha256(operation, "expectedSha256")
-            if target.is_file() and artifact_contract.sha256_file(target) == expected:
+            if path_is_file(target) and sha256_file(target) == expected:
                 return
-            copy_file_atomic(backup, target, pathlib.Path(undo["staging"]))
-            if artifact_contract.sha256_file(target) != expected:
-                raise TransactionError(
-                    "transaction.write_mismatch",
-                    "Restored file does not match the expected original",
-                    operation=operation["id"],
-                    path=str(target),
-                )
+            self._apply_file_replacement(operation, backup, target, undo, journal)
             return
         if action in {"remove", "remove_tree"}:
             if not path_lexists(target):
                 return
+            if not undo["existed"]:
+                raise TransactionError(
+                    "transaction.target_changed",
+                    "Removal target appeared after transaction intent",
+                    operation=operation["id"],
+                    path=str(target),
+                )
             original = pathlib.Path(undo["original"])
             if path_lexists(original):
                 raise TransactionError(
@@ -1937,8 +3048,49 @@ class TransactionExecutor:
                     operation=operation["id"],
                     path=str(original),
                 )
-            os.replace(target, original)
-            fsync_directory(target.parent)
+            expected_identity = _descriptor_result(
+                lambda: runtime_descriptor.FileIdentity.from_payload(
+                    undo["targetIdentity"],
+                    field=f"{operation['id']}.targetIdentity",
+                )
+            )
+            try:
+                rename_exclusive(target, original)
+                require_path_identity(original, expected_identity)
+                if action == "remove":
+                    if not path_is_file(original) or sha256_file(original) != undo["expectedSha256"]:
+                        raise TransactionError(
+                            "transaction.target_changed",
+                            "Removal target changed after transaction intent",
+                            operation=operation["id"],
+                            path=str(target),
+                        )
+                else:
+                    self._validate_tree_payload(
+                        original,
+                        undo["marker"],
+                        undo["markerSha256"],
+                        undo["expectedTreeSha256"],
+                    )
+            except Exception as error:
+                restored = False
+                if not path_lexists(target) and path_lexists(original):
+                    try:
+                        rename_exclusive(original, target)
+                        restored = True
+                    except TransactionError:
+                        pass
+                if restored:
+                    undo["phase"] = "restored-after-change"
+                    self._save_journal(journal)
+                raise TransactionError(
+                    "transaction.target_changed",
+                    "Removal target changed after transaction intent",
+                    operation=operation["id"],
+                    path=str(target),
+                ) from error
+            undo["phase"] = "moved"
+            self._save_journal(journal)
             return
         raise TransactionError(
             "transaction.action_unsupported",
@@ -1985,7 +3137,7 @@ class TransactionExecutor:
         marker: str,
         expected_sha256: str,
     ) -> None:
-        if not path.is_dir():
+        if not path_is_dir(path):
             raise TransactionError(
                 "transaction.undo_foreign",
                 "Rollback tree is not a directory",
@@ -1994,8 +3146,8 @@ class TransactionExecutor:
         reject_tree_symlinks(path)
         marker_path = path.joinpath(*pathlib.PurePosixPath(marker).parts)
         if (
-            not marker_path.is_file()
-            or artifact_contract.sha256_file(marker_path) != expected_sha256
+            not path_is_file(marker_path)
+            or sha256_file(marker_path) != expected_sha256
         ):
             raise TransactionError(
                 "transaction.undo_foreign",
@@ -2026,84 +3178,139 @@ class TransactionExecutor:
         kind = undo["kind"]
         if kind == "none":
             return
+        operation = next(item for item in self.operations if item["id"] == step["id"])
+        self._require_undo_descriptor_parents(operation, undo)
+
+        def remove_verified(path: pathlib.Path) -> None:
+            self._remove_verified_payload(journal, undo, path)
+
         if kind == "remove-backup":
             staging = pathlib.Path(undo["staging"])
-            remove_path_durable(staging)
+            remove_verified(staging)
             if not undo["created"]:
                 return
             backup = pathlib.Path(undo["path"])
             if path_lexists(backup):
                 if (
-                    not backup.is_file()
-                    or artifact_contract.sha256_file(backup) != undo["backupSha256"]
+                    not path_is_file(backup)
+                    or sha256_file(backup) != undo["backupSha256"]
                 ):
                     raise TransactionError(
                         "transaction.undo_foreign",
                         "Rollback refuses to remove a foreign backup",
                         path=str(backup),
                     )
-                remove_path_durable(backup)
+                remove_verified(backup)
             return
         if kind == "restore-file":
             target = pathlib.Path(undo["target"])
             original = pathlib.Path(undo["original"])
             staging = pathlib.Path(undo["staging"])
-            remove_path_durable(staging)
-            if (
-                not original.is_file()
-                or artifact_contract.sha256_file(original) != undo["originalSha256"]
+            rollback_discard = pathlib.Path(undo["rollbackDiscard"])
+            if path_lexists(staging):
+                if not path_is_file(staging) or sha256_file(staging) != undo["appliedSha256"]:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "File staging payload changed before rollback",
+                        path=str(staging),
+                    )
+                remove_verified(staging)
+            if path_lexists(original):
+                if not path_is_file(original) or sha256_file(original) != undo["originalSha256"]:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "File rollback original payload changed",
+                        path=str(original),
+                    )
+                if path_lexists(target):
+                    if not path_is_file(target) or sha256_file(target) != undo["appliedSha256"]:
+                        raise TransactionError(
+                            "transaction.undo_foreign",
+                            "Rollback refuses to move a foreign file target",
+                            path=str(target),
+                        )
+                    if path_lexists(rollback_discard):
+                        raise TransactionError(
+                            "transaction.undo_foreign",
+                            "File rollback discard already exists",
+                            path=str(rollback_discard),
+                        )
+                    rename_exclusive(target, rollback_discard)
+                    undo["phase"] = "rollback-target-moved"
+                    self._save_journal(journal)
+                rename_exclusive(original, target)
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+            elif undo["phase"] == "rollback-restored":
+                if not path_is_file(target) or sha256_file(target) != undo["originalSha256"]:
+                    raise TransactionError(
+                        "transaction.undo_missing",
+                        "Restored rollback file is missing or changed",
+                        path=str(target),
+                    )
+            elif path_lexists(rollback_discard) and path_lexists(target):
+                if not path_is_file(target) or sha256_file(target) != undo["originalSha256"]:
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Restored rollback file changed",
+                        path=str(target),
+                    )
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+            elif (
+                undo["phase"] in {"intent", "staged"}
+                and path_is_file(target)
+                and sha256_file(target) == undo["originalSha256"]
+                and not path_lexists(rollback_discard)
             ):
+                undo["phase"] = "rollback-restored"
+                self._save_journal(journal)
+            elif path_lexists(target):
                 raise TransactionError(
-                    "transaction.undo_missing",
-                    "File undo payload is missing or changed",
-                    path=str(original),
-                )
-            if path_lexists(target):
-                if not target.is_file():
-                    raise TransactionError(
-                        "transaction.undo_foreign",
-                        "Rollback file target changed type",
-                        path=str(target),
-                    )
-                target_sha256 = artifact_contract.sha256_file(target)
-                if target_sha256 not in {undo["originalSha256"], undo["appliedSha256"]}:
-                    raise TransactionError(
-                        "transaction.undo_foreign",
-                        "Rollback refuses to replace a foreign file",
-                        path=str(target),
-                    )
-                if target_sha256 == undo["originalSha256"]:
-                    return
-            copy_file_atomic(original, target, staging)
-            if artifact_contract.sha256_file(target) != undo["originalSha256"]:
-                raise TransactionError(
-                    "transaction.undo_mismatch",
-                    "Restored rollback file does not match its original",
+                    "transaction.undo_foreign",
+                    "Rollback file target is foreign",
                     path=str(target),
                 )
+            else:
+                raise TransactionError(
+                    "transaction.undo_missing",
+                    "File rollback original payload is missing",
+                    path=str(original),
+                )
+            if path_lexists(rollback_discard):
+                if (
+                    not path_is_file(rollback_discard)
+                    or sha256_file(rollback_discard) != undo["appliedSha256"]
+                ):
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "File rollback discard payload changed",
+                        path=str(rollback_discard),
+                    )
+                remove_verified(rollback_discard)
             return
         if kind == "remove-created-file":
             staging = pathlib.Path(undo["staging"])
-            remove_path_durable(staging)
+            remove_verified(staging)
             target = pathlib.Path(undo["target"])
             if path_lexists(target):
                 if (
-                    not target.is_file()
-                    or artifact_contract.sha256_file(target) != undo["appliedSha256"]
+                    not path_is_file(target)
+                    or sha256_file(target) != undo["appliedSha256"]
                 ):
                     raise TransactionError(
                         "transaction.undo_foreign",
                         "Rollback refuses to remove a foreign created file",
                         path=str(target),
                     )
-                remove_path_durable(target)
+                remove_verified(target)
             return
         if kind == "restore-tree":
             target = pathlib.Path(undo["target"])
             original = pathlib.Path(undo["original"])
             staging = pathlib.Path(undo["staging"])
             rollback_discard = pathlib.Path(undo["rollbackDiscard"])
-            remove_path_durable(staging)
+            remove_verified(staging)
             if undo["existed"]:
                 if path_lexists(original):
                     self._validate_tree_payload(
@@ -2125,15 +3332,13 @@ class TransactionExecutor:
                                 "Tree rollback discard already exists",
                                 path=str(rollback_discard),
                             )
-                        os.replace(target, rollback_discard)
-                        fsync_directory(target.parent)
+                        rename_exclusive(target, rollback_discard)
                         undo["phase"] = "rollback-target-moved"
                         self._save_journal(journal)
-                    os.replace(original, target)
-                    fsync_directory(target.parent)
+                    rename_exclusive(original, target)
                     undo["phase"] = "rollback-restored"
                     self._save_journal(journal)
-                    remove_path_durable(rollback_discard)
+                    remove_verified(rollback_discard)
                 elif undo["phase"] == "rollback-restored":
                     if not path_lexists(target):
                         raise TransactionError(
@@ -2147,7 +3352,7 @@ class TransactionExecutor:
                         undo["markerSha256"],
                         undo["originalTreeSha256"],
                     )
-                    remove_path_durable(rollback_discard)
+                    remove_verified(rollback_discard)
                 elif path_lexists(rollback_discard) and path_lexists(target):
                     self._validate_tree_payload(
                         target,
@@ -2157,7 +3362,7 @@ class TransactionExecutor:
                     )
                     undo["phase"] = "rollback-restored"
                     self._save_journal(journal)
-                    remove_path_durable(rollback_discard)
+                    remove_verified(rollback_discard)
                 elif (
                     undo["phase"] in {"intent", "staged"}
                     and path_lexists(target)
@@ -2184,7 +3389,7 @@ class TransactionExecutor:
                         "Created tree reappeared after rollback",
                         path=str(target),
                     )
-                remove_path_durable(rollback_discard)
+                remove_verified(rollback_discard)
             elif path_lexists(target):
                 if path_lexists(rollback_discard):
                     raise TransactionError(
@@ -2204,17 +3409,16 @@ class TransactionExecutor:
                     undo["markerSha256"],
                     undo["appliedTreeSha256"],
                 )
-                os.replace(target, rollback_discard)
-                fsync_directory(target.parent)
+                rename_exclusive(target, rollback_discard)
                 undo["phase"] = "rollback-target-moved"
                 self._save_journal(journal)
                 undo["phase"] = "rollback-restored"
                 self._save_journal(journal)
-                remove_path_durable(rollback_discard)
+                remove_verified(rollback_discard)
             elif path_lexists(rollback_discard):
                 undo["phase"] = "rollback-restored"
                 self._save_journal(journal)
-                remove_path_durable(rollback_discard)
+                remove_verified(rollback_discard)
             elif undo["phase"] in {"intent", "staged"}:
                 undo["phase"] = "rollback-restored"
                 self._save_journal(journal)
@@ -2230,11 +3434,26 @@ class TransactionExecutor:
                 return
             target = pathlib.Path(undo["target"])
             original = pathlib.Path(undo["original"])
+            if undo["phase"] == "restored-after-change":
+                if path_lexists(original) or not path_lexists(target):
+                    raise TransactionError(
+                        "transaction.undo_foreign",
+                        "Changed removal target was not preserved at its original path",
+                        path=str(target),
+                    )
+                return
+            expected_identity = _descriptor_result(
+                lambda: runtime_descriptor.FileIdentity.from_payload(
+                    undo["targetIdentity"],
+                    field=f"{step['id']}.targetIdentity",
+                )
+            )
             if path_lexists(original):
+                require_path_identity(original, expected_identity)
                 if kind == "restore-moved-file":
                     if (
-                        not original.is_file()
-                        or artifact_contract.sha256_file(original) != undo["expectedSha256"]
+                        not path_is_file(original)
+                        or sha256_file(original) != undo["expectedSha256"]
                     ):
                         raise TransactionError(
                             "transaction.undo_foreign",
@@ -2254,14 +3473,14 @@ class TransactionExecutor:
                         "Rollback target was recreated before restoration",
                         path=str(target),
                     )
-                os.replace(original, target)
-                fsync_directory(target.parent)
+                rename_exclusive(original, target)
                 return
             if path_lexists(target):
+                require_path_identity(target, expected_identity)
                 if kind == "restore-moved-file":
                     if (
-                        not target.is_file()
-                        or artifact_contract.sha256_file(target) != undo["expectedSha256"]
+                        not path_is_file(target)
+                        or sha256_file(target) != undo["expectedSha256"]
                     ):
                         raise TransactionError(
                             "transaction.undo_foreign",

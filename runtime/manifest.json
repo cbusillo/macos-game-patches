@@ -851,7 +851,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "a46da5498e634807ee93a15917a84b43954247c871de7fd39ccbfce87145554c",
+      "sha256": "1971048a8950814d063aed109099b60eca8a4ec210f90aec0ef4719149ccabae",
       "supplyClass": "repo-source"
     },
     {
@@ -861,21 +861,27 @@
       "supplyClass": "repo-source"
     },
     {
+      "id": "runtime_descriptor",
+      "path": "${REPO_ROOT}/tools/runtime_descriptor.py",
+      "sha256": "c9b089781a971a41f5de77617ed21a4e7ca81ea4c5c10cc3d736856ec19715e2",
+      "supplyClass": "repo-source"
+    },
+    {
       "id": "runtime_transaction",
       "path": "${REPO_ROOT}/tools/runtime_transaction.py",
-      "sha256": "f122b5e36a3b0ce1e2fc34fd7ea529f325b30b7c1b03a0f0407e7a712043f0a5",
+      "sha256": "579a7380cbf941a566a9fdca3d1853958440bfff3a8ab6a8ead22f379a857bab",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "8be5fe70c454bf3d48a279b2046071033baa62139b1f37ed6b7ad55a1094e136",
+      "sha256": "e512c61a3387e7f28eeae0bf911e3edda8a2929a2c814c2e19386be1ab0efefc",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "8625feb30cea207f688ea6f1794a830970bc3d69e5ebb23a0ff66ebd8f44b166",
+      "sha256": "81055340a589cc2e3da15b3939d7aff5f11b2e20a0c3ef76172a294f8ebed867",
       "supplyClass": "repo-source"
     },
     {
