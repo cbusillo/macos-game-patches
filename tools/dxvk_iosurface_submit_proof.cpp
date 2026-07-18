@@ -543,6 +543,7 @@ struct DxvkIosurfaceSubmitProof::PoolState {
 
     bool submitTransfer(ID3D11Texture2D *sourceTexture,
                         const D3D11_TEXTURE2D_DESC &sourceDescription,
+                        const SubmitProofStereoRegions *sourceRegions,
                         uint32_t slotIndex,
                         PoolTransferSubmission *submission);
     bool submitSeparateEyeTransfer(
@@ -621,6 +622,7 @@ struct DxvkIosurfaceSubmitProof::PoolInitializationContext {
 bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
     ID3D11Texture2D *sourceTexture,
     const D3D11_TEXTURE2D_DESC &sourceDescription,
+    const SubmitProofStereoRegions *sourceRegions,
     uint32_t slotIndex,
     PoolTransferSubmission *submission) {
     if (sourceTexture == nullptr || submission == nullptr ||
@@ -667,24 +669,59 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
         sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
         sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
         sourceDescription.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    if (sourceDescription.Width < 2 || sourceDescription.Height < 2 ||
+        width < 4 || width % 2 != 0 ||
+        sourceDescription.Width > INT32_MAX ||
+        sourceDescription.Height > INT32_MAX || width > INT32_MAX ||
+        height > INT32_MAX) {
+        return fail("resize-geometry", VK_ERROR_FORMAT_NOT_SUPPORTED);
+    }
+
+    const uint32_t sourceEyeBoundary = sourceDescription.Width / 2;
+    SubmitProofStereoRegions transferRegions = {
+        {0, 0, sourceEyeBoundary, sourceDescription.Height},
+        {
+            sourceEyeBoundary,
+            0,
+            sourceDescription.Width - sourceEyeBoundary,
+            sourceDescription.Height,
+        },
+    };
+    if (sourceRegions != nullptr) {
+        transferRegions = *sourceRegions;
+    }
+    const auto regionFits = [&](const SubmitProofTextureRegion &region) {
+        return region.width > 0 && region.height > 0 &&
+               region.x <= sourceDescription.Width &&
+               region.width <= sourceDescription.Width - region.x &&
+               region.y <= sourceDescription.Height &&
+               region.height <= sourceDescription.Height - region.y;
+    };
+    if (!regionFits(transferRegions.left) ||
+        !regionFits(transferRegions.right) ||
+        transferRegions.left.x + transferRegions.left.width >
+            sourceEyeBoundary ||
+        transferRegions.right.x < sourceEyeBoundary) {
+        return fail("resize-regions", VK_ERROR_FORMAT_NOT_SUPPORTED);
+    }
+    const bool fullStereoRegions =
+        transferRegions.left.x == 0 && transferRegions.left.y == 0 &&
+        transferRegions.left.width == sourceEyeBoundary &&
+        transferRegions.left.height == sourceDescription.Height &&
+        transferRegions.right.x == sourceEyeBoundary &&
+        transferRegions.right.y == 0 &&
+        transferRegions.right.width ==
+            sourceDescription.Width - sourceEyeBoundary &&
+        transferRegions.right.height == sourceDescription.Height;
     if (sourceDescription.Width == width &&
-        sourceDescription.Height == height && sourceBgra) {
+        sourceDescription.Height == height && sourceBgra &&
+        fullStereoRegions) {
         submission->mode = PoolTransferMode::DirectCopy;
         d3dContext->CopyResource(
             slots[slotIndex].handoffTexture.Get(), sourceTexture);
         d3dContext->Flush();
         interopDeviceRaw->vtable->flushRenderingCommands(interopDeviceRaw);
     } else {
-        if (sourceDescription.Width < 4 || sourceDescription.Height < 2 ||
-            sourceDescription.Width % 2 != 0 || width < 4 || width % 2 != 0 ||
-            sourceDescription.Width > INT32_MAX ||
-            sourceDescription.Height > INT32_MAX || width > INT32_MAX ||
-            height > INT32_MAX ||
-            static_cast<uint64_t>(sourceDescription.Width) * height !=
-                static_cast<uint64_t>(width) * sourceDescription.Height) {
-            return fail("resize-geometry", VK_ERROR_FORMAT_NOT_SUPPORTED);
-        }
-
         void *sourceInteropRaw = nullptr;
         HRESULT result = sourceTexture->QueryInterface(
             kIidDxgiVkInteropSurface, &sourceInteropRaw);
@@ -751,7 +788,10 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
         const bool useLinear =
             (sourceFeatures &
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0 &&
-            sourceDescription.Width / 2 > 2 && width / 2 > 2;
+            transferRegions.left.width > 2 &&
+            transferRegions.left.height > 2 &&
+            transferRegions.right.width > 2 &&
+            transferRegions.right.height > 2 && width / 2 > 2 && height > 2;
         submission->mode = useLinear
                                ? PoolTransferMode::StereoLinearBlit
                                : PoolTransferMode::StereoNearestBlit;
@@ -768,31 +808,32 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
             return fail("command-buffer-begin", vkResult);
         }
 
-        const int32_t sourceWidth = static_cast<int32_t>(sourceDescription.Width);
-        const int32_t sourceHeight =
-            static_cast<int32_t>(sourceDescription.Height);
         const int32_t destinationWidth = static_cast<int32_t>(width);
         const int32_t destinationHeight = static_cast<int32_t>(height);
-        const int32_t sourceEyeWidth = sourceWidth / 2;
         const int32_t destinationEyeWidth = destinationWidth / 2;
         auto makeRegion = [&](int32_t sourceX0,
+                              int32_t sourceY0,
                               int32_t sourceX1,
+                              int32_t sourceY1,
                               int32_t destinationX0,
-                              int32_t destinationX1) {
+                              int32_t destinationY0,
+                              int32_t destinationX1,
+                              int32_t destinationY1) {
             VkImageBlit region{};
             region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.srcSubresource.mipLevel = 0;
             region.srcSubresource.baseArrayLayer = 0;
             region.srcSubresource.layerCount = 1;
-            region.srcOffsets[0] = {sourceX0, 0, 0};
-            region.srcOffsets[1] = {sourceX1, sourceHeight, 1};
+            region.srcOffsets[0] = {sourceX0, sourceY0, 0};
+            region.srcOffsets[1] = {sourceX1, sourceY1, 1};
             region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             region.dstSubresource.mipLevel = 0;
             region.dstSubresource.baseArrayLayer = 0;
             region.dstSubresource.layerCount = 1;
-            region.dstOffsets[0] = {destinationX0, 0, 0};
+            region.dstOffsets[0] = {
+                destinationX0, destinationY0, 0};
             region.dstOffsets[1] = {
-                destinationX1, destinationHeight, 1};
+                destinationX1, destinationY1, 1};
             return region;
         };
 
@@ -839,50 +880,177 @@ bool DxvkIosurfaceSubmitProof::PoolState::submitTransfer(
                                forwardBarriers.data());
         }
 
+        const auto leftX0 = static_cast<int32_t>(transferRegions.left.x);
+        const auto leftY0 = static_cast<int32_t>(transferRegions.left.y);
+        const auto leftX1 = static_cast<int32_t>(
+            transferRegions.left.x + transferRegions.left.width);
+        const auto leftY1 = static_cast<int32_t>(
+            transferRegions.left.y + transferRegions.left.height);
+        const auto rightX0 = static_cast<int32_t>(transferRegions.right.x);
+        const auto rightY0 = static_cast<int32_t>(transferRegions.right.y);
+        const auto rightX1 = static_cast<int32_t>(
+            transferRegions.right.x + transferRegions.right.width);
+        const auto rightY1 = static_cast<int32_t>(
+            transferRegions.right.y + transferRegions.right.height);
         if (useLinear) {
-            const std::array<VkImageBlit, 2> interiorRegions = {
-                makeRegion(0,
-                           sourceEyeWidth - 1,
-                           0,
-                           destinationEyeWidth - 1),
-                makeRegion(sourceEyeWidth + 1,
-                           sourceWidth,
-                           destinationEyeWidth + 1,
-                           destinationWidth),
+            const auto borderExtent = [](int32_t sourceExtent,
+                                         int32_t destinationExtent) {
+                const int64_t denominator =
+                    static_cast<int64_t>(sourceExtent) * 2;
+                const int32_t scaled = static_cast<int32_t>(
+                    (static_cast<int64_t>(destinationExtent) +
+                     denominator - 1) /
+                    denominator);
+                return std::min(
+                    std::max(1, scaled), (destinationExtent - 1) / 2);
             };
+            std::array<VkImageBlit, 2> interiorRegions{};
+            std::array<VkImageBlit, 16> borderRegions{};
+            size_t interiorCount = 0;
+            size_t borderCount = 0;
+            const auto appendEyeRegions = [&](int32_t sourceX0,
+                                              int32_t sourceY0,
+                                              int32_t sourceX1,
+                                              int32_t sourceY1,
+                                              int32_t destinationX0,
+                                              int32_t destinationX1) {
+                const int32_t borderX = borderExtent(
+                    sourceX1 - sourceX0,
+                    destinationX1 - destinationX0);
+                const int32_t borderY = borderExtent(
+                    sourceY1 - sourceY0, destinationHeight);
+                const int32_t destinationInnerX0 =
+                    destinationX0 + borderX;
+                const int32_t destinationInnerX1 =
+                    destinationX1 - borderX;
+                const int32_t destinationInnerY0 = borderY;
+                const int32_t destinationInnerY1 =
+                    destinationHeight - borderY;
+
+                interiorRegions[interiorCount++] = makeRegion(
+                    sourceX0 + 1,
+                    sourceY0 + 1,
+                    sourceX1 - 1,
+                    sourceY1 - 1,
+                    destinationInnerX0,
+                    destinationInnerY0,
+                    destinationInnerX1,
+                    destinationInnerY1);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX0 + 1,
+                    sourceY0,
+                    sourceX1 - 1,
+                    sourceY0 + 1,
+                    destinationInnerX0,
+                    0,
+                    destinationInnerX1,
+                    destinationInnerY0);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX0 + 1,
+                    sourceY1 - 1,
+                    sourceX1 - 1,
+                    sourceY1,
+                    destinationInnerX0,
+                    destinationInnerY1,
+                    destinationInnerX1,
+                    destinationHeight);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX0,
+                    sourceY0 + 1,
+                    sourceX0 + 1,
+                    sourceY1 - 1,
+                    destinationX0,
+                    destinationInnerY0,
+                    destinationInnerX0,
+                    destinationInnerY1);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX1 - 1,
+                    sourceY0 + 1,
+                    sourceX1,
+                    sourceY1 - 1,
+                    destinationInnerX1,
+                    destinationInnerY0,
+                    destinationX1,
+                    destinationInnerY1);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX0,
+                    sourceY0,
+                    sourceX0 + 1,
+                    sourceY0 + 1,
+                    destinationX0,
+                    0,
+                    destinationInnerX0,
+                    destinationInnerY0);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX1 - 1,
+                    sourceY0,
+                    sourceX1,
+                    sourceY0 + 1,
+                    destinationInnerX1,
+                    0,
+                    destinationX1,
+                    destinationInnerY0);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX0,
+                    sourceY1 - 1,
+                    sourceX0 + 1,
+                    sourceY1,
+                    destinationX0,
+                    destinationInnerY1,
+                    destinationInnerX0,
+                    destinationHeight);
+                borderRegions[borderCount++] = makeRegion(
+                    sourceX1 - 1,
+                    sourceY1 - 1,
+                    sourceX1,
+                    sourceY1,
+                    destinationInnerX1,
+                    destinationInnerY1,
+                    destinationX1,
+                    destinationHeight);
+            };
+            appendEyeRegions(
+                leftX0, leftY0, leftX1, leftY1, 0, destinationEyeWidth);
+            appendEyeRegions(rightX0,
+                             rightY0,
+                             rightX1,
+                             rightY1,
+                             destinationEyeWidth,
+                             destinationWidth);
             cmdBlitImage(slot.commandBuffer,
                          sourceImage,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          slot.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         static_cast<uint32_t>(interiorRegions.size()),
+                         static_cast<uint32_t>(interiorCount),
                          interiorRegions.data(),
                          VK_FILTER_LINEAR);
-            const std::array<VkImageBlit, 2> seamRegions = {
-                makeRegion(sourceEyeWidth - 1,
-                           sourceEyeWidth,
-                           destinationEyeWidth - 1,
-                           destinationEyeWidth),
-                makeRegion(sourceEyeWidth,
-                           sourceEyeWidth + 1,
-                           destinationEyeWidth,
-                           destinationEyeWidth + 1),
-            };
             cmdBlitImage(slot.commandBuffer,
                          sourceImage,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          slot.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         static_cast<uint32_t>(seamRegions.size()),
-                         seamRegions.data(),
+                         static_cast<uint32_t>(borderCount),
+                         borderRegions.data(),
                          VK_FILTER_NEAREST);
         } else {
             const std::array<VkImageBlit, 2> eyeRegions = {
-                makeRegion(0, sourceEyeWidth, 0, destinationEyeWidth),
-                makeRegion(sourceEyeWidth,
-                           sourceWidth,
+                makeRegion(leftX0,
+                           leftY0,
+                           leftX1,
+                           leftY1,
+                           0,
+                           0,
                            destinationEyeWidth,
-                           destinationWidth),
+                           destinationHeight),
+                makeRegion(rightX0,
+                           rightY0,
+                           rightX1,
+                           rightY1,
+                           destinationEyeWidth,
+                           0,
+                           destinationWidth,
+                           destinationHeight),
             };
             cmdBlitImage(slot.commandBuffer,
                          sourceImage,
@@ -1546,6 +1714,7 @@ void DxvkIosurfaceSubmitProof::shutdown() {
 
 void DxvkIosurfaceSubmitProof::capturePoolFrame(
     ID3D11Texture2D *sourceTexture,
+    const SubmitProofStereoRegions &sourceRegions,
     uint64_t submitSequence,
     uint32_t eye,
     uint64_t videoTimestampNs,
@@ -1556,6 +1725,7 @@ void DxvkIosurfaceSubmitProof::capturePoolFrame(
     capturePoolSources(
         sourceTexture,
         nullptr,
+        &sourceRegions,
         submitSequence,
         eye,
         videoTimestampNs,
@@ -1574,6 +1744,7 @@ void DxvkIosurfaceSubmitProof::capturePoolFramePair(
     capturePoolSources(
         leftTexture,
         rightTexture,
+        nullptr,
         submitSequence,
         0,
         videoTimestampNs,
@@ -2347,10 +2518,43 @@ DxvkIosurfaceSubmitProof::initializePool(
     };
     const uint32_t leftRgbaPixel = rgbaPixel(leftColor);
     const uint32_t rightRgbaPixel = rgbaPixel(rightColor);
+    const uint32_t selfTestEyeWidth = selfTestWidth / 2;
+    const uint32_t selfTestHorizontalInset = selfTestEyeWidth / 8;
+    const uint32_t selfTestVerticalInset = selfTestHeight / 10;
+    const SubmitProofStereoRegions selfTestRgbaRegions = {
+        {
+            selfTestHorizontalInset,
+            selfTestVerticalInset,
+            selfTestEyeWidth - selfTestHorizontalInset * 2,
+            selfTestHeight - selfTestVerticalInset * 2,
+        },
+        {
+            selfTestEyeWidth + selfTestHorizontalInset,
+            selfTestVerticalInset,
+            selfTestEyeWidth - selfTestHorizontalInset * 2,
+            selfTestHeight - selfTestVerticalInset * 2,
+        },
+    };
     for (uint32_t y = 0; y < selfTestHeight; ++y) {
         for (uint32_t x = 0; x < selfTestWidth; ++x) {
+            uint32_t pixel = 0;
+            if (x >= selfTestRgbaRegions.left.x &&
+                x < selfTestRgbaRegions.left.x +
+                        selfTestRgbaRegions.left.width &&
+                y >= selfTestRgbaRegions.left.y &&
+                y < selfTestRgbaRegions.left.y +
+                        selfTestRgbaRegions.left.height) {
+                pixel = leftRgbaPixel;
+            } else if (x >= selfTestRgbaRegions.right.x &&
+                       x < selfTestRgbaRegions.right.x +
+                               selfTestRgbaRegions.right.width &&
+                       y >= selfTestRgbaRegions.right.y &&
+                       y < selfTestRgbaRegions.right.y +
+                               selfTestRgbaRegions.right.height) {
+                pixel = rightRgbaPixel;
+            }
             selfTestRgbaPixels[static_cast<size_t>(y) * selfTestWidth + x] =
-                x < selfTestWidth / 2 ? leftRgbaPixel : rightRgbaPixel;
+                pixel;
         }
     }
     D3D11_TEXTURE2D_DESC selfTestRgbaDescription = selfTestDescription;
@@ -2367,24 +2571,28 @@ DxvkIosurfaceSubmitProof::initializePool(
     for (uint32_t slotIndex = 0; slotIndex < kPoolSlotCount; ++slotIndex) {
         PoolState::Slot &slot = state->slots[slotIndex];
         uint32_t sampleX = state->width / 4;
-        const uint32_t sampleY = state->height / 2;
+        uint32_t sampleY = state->height / 2;
         const std::array<uint8_t, 4> *expected = &leftColor;
         if (slotIndex == 1) {
             sampleX = state->width / 2 - 1;
         } else if (slotIndex == 2) {
-            sampleX = state->width / 2;
+            sampleX = state->width - 1;
+            sampleY = state->height - 1;
             expected = &rightColor;
         }
 
         PoolTransferSubmission transfer{};
         ID3D11Texture2D *transferTexture = selfTestTexture.Get();
         const D3D11_TEXTURE2D_DESC *transferDescription = &selfTestDescription;
+        const SubmitProofStereoRegions *transferRegions = nullptr;
         if (slotIndex == 2) {
             transferTexture = selfTestRgbaTexture.Get();
             transferDescription = &selfTestRgbaDescription;
+            transferRegions = &selfTestRgbaRegions;
         }
         if (!state->submitTransfer(transferTexture,
                                    *transferDescription,
+                                   transferRegions,
                                    slotIndex,
                                    &transfer)) {
             logFunction(
@@ -2714,6 +2922,7 @@ DWORD WINAPI DxvkIosurfaceSubmitProof::poolInitializationEntry(
 void DxvkIosurfaceSubmitProof::capturePoolSources(
     ID3D11Texture2D *leftTexture,
     ID3D11Texture2D *rightTexture,
+    const SubmitProofStereoRegions *sourceRegions,
     uint64_t submitSequence,
     uint32_t eye,
     uint64_t videoTimestampNs,
@@ -2942,7 +3151,11 @@ void DxvkIosurfaceSubmitProof::capturePoolSources(
               slotIndex,
               &transfer)
         : state->submitTransfer(
-              leftTexture, leftDescription, slotIndex, &transfer);
+              leftTexture,
+              leftDescription,
+              sourceRegions,
+              slotIndex,
+              &transfer);
     if (!transferSubmitted) {
         {
             std::lock_guard<std::mutex> lock(state->mutex);

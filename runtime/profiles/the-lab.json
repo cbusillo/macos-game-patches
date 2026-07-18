@@ -20,11 +20,11 @@
   },
   "geometry": {
     "adaptiveViewport": {
-      "enabled": true,
-      "fillRateStepPercent": 15,
+      "enabled": false,
+      "fillRateStepPercent": 0,
       "maximumDimension": 1800,
-      "maximumScale": 1.4,
-      "minimumScale": 0.8
+      "maximumScale": 1.0,
+      "minimumScale": 1.0
     },
     "allowedStereoTransitions": [],
     "eyeMappings": [
@@ -39,7 +39,7 @@
       "height": 1280,
       "width": 1152
     },
-    "sourceMode": "bounded-adaptive",
+    "sourceMode": "fixed-with-transitions",
     "targetStereo": {
       "height": 1792,
       "width": 2880
@@ -49,14 +49,10 @@
   "launch": {
     "arguments": [
       "-popupwindow",
-      "-aqminscale",
-      "0.8",
-      "-aqmaxscale",
-      "1.4",
-      "-aqmaxres",
-      "1800",
+      "-hub",
+      "-noaq",
       "-msaa",
-      "4"
+      "2"
     ],
     "entrypointTarget": "hub",
     "environment": {

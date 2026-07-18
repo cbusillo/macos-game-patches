@@ -127,10 +127,12 @@ struct SubmitDiagnostic {
 struct PoolEyeSubmission {
     bool valid = false;
     bool full_bounds = false;
+    bool has_bounds = false;
     uintptr_t handle = 0;
     uint64_t sequence = 0;
     uint64_t submit_timestamp_ns = 0;
     D3D11_TEXTURE2D_DESC description = {};
+    vr::VRTextureBounds_t bounds = {};
     ComPtr<ID3D11Texture2D> texture;
     alvr_probe::SubmitProofPose pose;
 };
@@ -173,6 +175,10 @@ enum class RejectionKind : size_t {
 HMODULE g_this_module = nullptr;
 HMODULE g_real_openvr = nullptr;
 std::mutex g_log_mutex;
+FILE* g_log_file = nullptr;
+bool g_log_open_attempted = false;
+uint64_t g_log_line_count = 0;
+char g_log_buffer[1024 * 1024] = {};
 std::mutex g_hook_mutex;
 std::unordered_map<void*, CppSubmitFn> g_cpp_submit_by_object;
 std::unordered_map<void*, FlatCompositorTable*> g_c_table_by_original;
@@ -180,15 +186,27 @@ CSubmitFn g_real_c_submit = nullptr;
 
 void log_line(const char* format, ...) {
     std::lock_guard<std::mutex> lock(g_log_mutex);
-    FILE* file = std::fopen("Z:\\tmp\\alvr_openvr_submit_shim.log", "ab");
-    if (!file) {
-        file = stderr;
+    if (!g_log_open_attempted) {
+        g_log_open_attempted = true;
+        g_log_file = std::fopen(
+            "Z:\\tmp\\alvr_openvr_submit_shim.log", "ab");
+        if (g_log_file) {
+            std::setvbuf(
+                g_log_file, g_log_buffer, _IOFBF, sizeof(g_log_buffer));
+            std::fprintf(
+                g_log_file,
+                "submit shim logger mode=persistent-buffered "
+                "flush_interval=256\n");
+        }
     }
+    FILE* file = g_log_file ? g_log_file : stderr;
 
     SYSTEMTIME time;
     GetLocalTime(&time);
-    std::fprintf(
-        file,
+    char line[4096] = {};
+    int prefix_length = std::snprintf(
+        line,
+        sizeof(line),
         "%04u-%02u-%02u %02u:%02u:%02u.%03u ",
         time.wYear,
         time.wMonth,
@@ -198,15 +216,39 @@ void log_line(const char* format, ...) {
         time.wSecond,
         time.wMilliseconds
     );
+    size_t offset = prefix_length > 0
+        ? std::min<size_t>(
+              static_cast<size_t>(prefix_length), sizeof(line) - 2)
+        : 0;
 
     va_list args;
     va_start(args, format);
-    std::vfprintf(file, format, args);
+    int body_length = std::vsnprintf(
+        line + offset, sizeof(line) - offset - 1, format, args);
     va_end(args);
-    std::fputc('\n', file);
+    if (body_length > 0) {
+        offset += std::min<size_t>(
+            static_cast<size_t>(body_length), sizeof(line) - offset - 2);
+    }
+    line[offset++] = '\n';
+    std::fwrite(line, 1, offset, file);
 
-    if (file != stderr) {
-        std::fclose(file);
+    if (g_log_file) {
+        ++g_log_line_count;
+        if (g_log_line_count <= 32 || g_log_line_count % 256 == 0 ||
+            std::strstr(line, " result=closed") != nullptr ||
+            std::strstr(line, "iosurface pool failed") != nullptr) {
+            std::fflush(g_log_file);
+        }
+    } else {
+        std::fflush(stderr);
+    }
+}
+
+void flush_log() {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (g_log_file) {
+        std::fflush(g_log_file);
     }
 }
 
@@ -732,7 +774,7 @@ private:
         const vr::VRTextureBounds_t* bounds
     ) const {
         if (!bounds) {
-            return false;
+            return true;
         }
         constexpr float epsilon = 0.0001f;
         return std::fabs(bounds->uMin) <= epsilon
@@ -820,6 +862,10 @@ private:
             pending.valid = true;
             pending.full_bounds = submit_bounds_cover_full_texture(
                 diagnostic.bounds);
+            pending.has_bounds = diagnostic.bounds != nullptr;
+            if (pending.has_bounds) {
+                pending.bounds = *diagnostic.bounds;
+            }
             pending.handle = reinterpret_cast<uintptr_t>(
                 diagnostic.texture ? diagnostic.texture->handle : nullptr);
             pending.sequence = diagnostic.sequence;
@@ -867,8 +913,10 @@ private:
             && left.description.Format == desc.Format
             && left.full_bounds
             && submit_bounds_cover_full_texture(diagnostic.bounds);
+        const bool right_full_bounds = submit_bounds_cover_full_texture(
+            diagnostic.bounds);
         if (!adjacent || (!same_texture && !compatible_pair)
-            || (same_texture && left.full_bounds)) {
+            || (same_texture && (left.full_bounds || right_full_bounds))) {
             uint64_t dropped = m_pool_pair_drops.fetch_add(
                 1, std::memory_order_relaxed) + 1;
             if (dropped <= 5 || dropped % 120 == 0) {
@@ -897,8 +945,38 @@ private:
             if (!is_bgra_format(desc.Format) && !is_rgba_format(desc.Format)) {
                 return;
             }
+            if (!left.has_bounds || !diagnostic.bounds) {
+                return;
+            }
+            const uint32_t half_width = desc.Width / 2;
+            const CropResult left_crop = texture_crop(
+                left.description, vr::Eye_Left, &left.bounds);
+            const CropResult right_crop = texture_crop(
+                desc, vr::Eye_Right, diagnostic.bounds);
+            if (left_crop.crop.width == 0 || left_crop.crop.height == 0 ||
+                right_crop.crop.width == 0 || right_crop.crop.height == 0 ||
+                left_crop.used_fallback || right_crop.used_fallback ||
+                left_crop.crop.x + left_crop.crop.width > half_width ||
+                right_crop.crop.x < half_width) {
+                return;
+            }
+            const alvr_probe::SubmitProofStereoRegions source_regions = {
+                {
+                    left_crop.crop.x,
+                    left_crop.crop.y,
+                    left_crop.crop.width,
+                    left_crop.crop.height,
+                },
+                {
+                    right_crop.crop.x,
+                    right_crop.crop.y,
+                    right_crop.crop.width,
+                    right_crop.crop.height,
+                },
+            };
             m_iosurface_proof.capturePoolFrame(
                 left.texture.Get(),
+                source_regions,
                 diagnostic.sequence,
                 static_cast<uint32_t>(vr::Eye_Left),
                 submit_timestamp_ns,
@@ -1925,6 +2003,7 @@ extern "C" __declspec(dllexport) uint32_t VR_InitInternal2(
 
 extern "C" __declspec(dllexport) void VR_ShutdownInternal() {
     g_writer.shutdown();
+    flush_log();
     auto fn = real_proc<VR_ShutdownInternalFn>("VR_ShutdownInternal");
     if (fn) {
         fn();

@@ -48,6 +48,7 @@ constexpr size_t kLegacySettings001Slots = 12;
 constexpr size_t kLegacySettings002Slots = 12;
 constexpr size_t kLegacyInput005Slots = 25;
 constexpr size_t kLegacyInput006Slots = 26;
+constexpr size_t kLegacyInput007Slots = 27;
 constexpr uint32_t kVREventPrefixSize = offsetof(vr::VREvent_t, data);
 constexpr const char* kFnTablePrefix = "FnTable:";
 constexpr const char* kLegacySystem011 = "IVRSystem_011";
@@ -74,8 +75,11 @@ constexpr const char* kLegacySettings001 = "IVRSettings_001";
 constexpr const char* kLegacySettings002 = "IVRSettings_002";
 constexpr const char* kLegacyInput005 = "IVRInput_005";
 constexpr const char* kLegacyInput006 = "IVRInput_006";
+constexpr const char* kLegacyInput007 = "IVRInput_007";
 constexpr uint64_t kFakeRefreshRate = 90;
 constexpr double kFakeRefreshHz = 90.0;
+constexpr uint64_t kHotCallInitialLogCount = 16;
+constexpr uint64_t kHotCallLogInterval = 10'000;
 constexpr char kPacingSummaryPrefix[] = "fake pacing summary";
 constexpr int64_t kMicrosecondsPerSecond = 1'000'000;
 constexpr int64_t kRunningStartLeadUs = 3'000;
@@ -215,6 +219,8 @@ enum class FakeActionKind : uint8_t {
     Pose,
     Thumbstick,
     ThumbstickTouch,
+    ThumbstickLeft,
+    ThumbstickRight,
     GripBinary,
     GripAnalog,
     MenuButton,
@@ -1158,6 +1164,10 @@ bool is_legacy_input006_interface(const char* version) {
     return version && std::strcmp(version, kLegacyInput006) == 0;
 }
 
+bool is_legacy_input007_interface(const char* version) {
+    return version && std::strcmp(version, kLegacyInput007) == 0;
+}
+
 bool is_render_models_interface(const char* version) {
     return version
         && (std::strcmp(version, vr::IVRRenderModels_Version) == 0
@@ -1264,6 +1274,11 @@ void log_eye_call(const char* name, vr::EVREye eye) {
     char message[160] = {};
     std::snprintf(message, sizeof(message), "fake call %s eye=%u", name, static_cast<uint32_t>(eye));
     log_line(message);
+}
+
+bool should_log_hot_call(std::atomic<uint64_t>& counter) {
+    uint64_t call = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    return call <= kHotCallInitialLogCount || call % kHotCallLogInterval == 0;
 }
 
 void log_interface(const char* kind, const char* interface_version) {
@@ -1520,22 +1535,28 @@ void* __thiscall fake_ret0(void*) { return nullptr; }
 void* __stdcall fake_c_ret0() { return nullptr; }
 
 void __thiscall fake_get_recommended_render_target_size(void*, uint32_t* width, uint32_t* height) {
-    log_call("IVRSystem::GetRecommendedRenderTargetSize");
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_call("IVRSystem::GetRecommendedRenderTargetSize");
+    }
     if (width) {
         *width = render_target_dimension("ALVR_FAKE_RENDER_TARGET_WIDTH", 1280);
     }
     if (height) {
         *height = render_target_dimension("ALVR_FAKE_RENDER_TARGET_HEIGHT", 720);
     }
-    char message[128] = {};
-    std::snprintf(
-        message,
-        sizeof(message),
-        "IVRSystem::GetRecommendedRenderTargetSize return width=%u height=%u",
-        width ? *width : 0,
-        height ? *height : 0
-    );
-    log_line(message);
+    if (should_log) {
+        char message[128] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRSystem::GetRecommendedRenderTargetSize return width=%u height=%u",
+            width ? *width : 0,
+            height ? *height : 0
+        );
+        log_line(message);
+    }
 }
 
 void __stdcall fake_c_get_recommended_render_target_size(uint32_t* width, uint32_t* height) {
@@ -1641,10 +1662,16 @@ vr::HmdMatrix44_t __stdcall fake_c_legacy_get_projection_matrix(vr::EVREye eye, 
 void __thiscall fake_get_projection_raw(
     void*, vr::EVREye eye, float* left, float* right, float* top, float* bottom
 ) {
-    log_eye_call("IVRSystem::GetProjectionRaw", eye);
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_eye_call("IVRSystem::GetProjectionRaw", eye);
+    }
     bool shared_view = shared_eye_raw(eye, left, right, top, bottom);
     if (shared_view) {
-        log_eye_call("IVRSystem::GetProjectionRaw using shared view", eye);
+        if (should_log) {
+            log_eye_call("IVRSystem::GetProjectionRaw using shared view", eye);
+        }
     } else if (left) {
         *left = -1.0f;
     }
@@ -1657,15 +1684,17 @@ void __thiscall fake_get_projection_raw(
     if (!shared_view && bottom) {
         *bottom = 1.0f;
     }
-    log_projection_raw_values(
-        "IVRSystem::GetProjectionRaw return",
-        eye,
-        left ? *left : 0.0f,
-        right ? *right : 0.0f,
-        top ? *top : 0.0f,
-        bottom ? *bottom : 0.0f,
-        shared_view
-    );
+    if (should_log) {
+        log_projection_raw_values(
+            "IVRSystem::GetProjectionRaw return",
+            eye,
+            left ? *left : 0.0f,
+            right ? *right : 0.0f,
+            top ? *top : 0.0f,
+            bottom ? *bottom : 0.0f,
+            shared_view
+        );
+    }
 }
 
 void __stdcall fake_c_get_projection_raw(vr::EVREye eye, float* left, float* right, float* top, float* bottom) {
@@ -1730,35 +1759,49 @@ vr::DistortionCoordinates_t __stdcall fake_c_legacy_compute_distortion(vr::EVREy
 }
 
 vr::HmdMatrix34_t __thiscall fake_get_eye_to_head_transform(void*, vr::EVREye eye) {
-    log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
+    }
     float eye_x_m = eye == vr::Eye_Left ? -0.032f : 0.032f;
-    if (shared_eye_x(eye, &eye_x_m)) {
+    bool shared_view = shared_eye_x(eye, &eye_x_m);
+    if (shared_view && should_log) {
         log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
     }
     vr::HmdMatrix34_t result = identity34(eye_x_m);
-    char message[128] = {};
-    std::snprintf(
-        message, sizeof(message), "IVRSystem::GetEyeToHeadTransform return eye=%d eye_x_m=%.6f", eye, eye_x_m
-    );
-    log_line(message);
-    log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", result);
-    return result;
-}
-
-vr::HmdMatrix34_t* __thiscall fake_cpp_get_eye_to_head_transform(void*, vr::HmdMatrix34_t* output, vr::EVREye eye) {
-    log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
-    if (output) {
-        float eye_x_m = eye == vr::Eye_Left ? -0.032f : 0.032f;
-        if (shared_eye_x(eye, &eye_x_m)) {
-            log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
-        }
-        *output = identity34(eye_x_m);
+    if (should_log) {
         char message[128] = {};
         std::snprintf(
             message, sizeof(message), "IVRSystem::GetEyeToHeadTransform return eye=%d eye_x_m=%.6f", eye, eye_x_m
         );
         log_line(message);
-        log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", *output);
+        log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", result);
+    }
+    return result;
+}
+
+vr::HmdMatrix34_t* __thiscall fake_cpp_get_eye_to_head_transform(void*, vr::HmdMatrix34_t* output, vr::EVREye eye) {
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_eye_call("IVRSystem::GetEyeToHeadTransform", eye);
+    }
+    if (output) {
+        float eye_x_m = eye == vr::Eye_Left ? -0.032f : 0.032f;
+        bool shared_view = shared_eye_x(eye, &eye_x_m);
+        if (shared_view && should_log) {
+            log_eye_call("IVRSystem::GetEyeToHeadTransform using shared view", eye);
+        }
+        *output = identity34(eye_x_m);
+        if (should_log) {
+            char message[128] = {};
+            std::snprintf(
+                message, sizeof(message), "IVRSystem::GetEyeToHeadTransform return eye=%d eye_x_m=%.6f", eye, eye_x_m
+            );
+            log_line(message);
+            log_matrix34("IVRSystem::GetEyeToHeadTransform matrix", *output);
+        }
     }
     return output;
 }
@@ -1968,7 +2011,10 @@ uint32_t __stdcall fake_c_get_sorted_tracked_device_indices(
 }
 
 vr::EDeviceActivityLevel __thiscall fake_get_activity_level(void*, vr::TrackedDeviceIndex_t) {
-    log_call("IVRSystem::GetTrackedDeviceActivityLevel");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRSystem::GetTrackedDeviceActivityLevel");
+    }
     return vr::k_EDeviceActivityLevel_UserInteraction;
 }
 
@@ -2010,7 +2056,10 @@ vr::TrackedDeviceIndex_t __stdcall fake_c_invalid_device_index(vr::ETrackedContr
 }
 
 vr::ETrackedControllerRole __thiscall fake_invalid_controller_role(void*, vr::TrackedDeviceIndex_t device) {
-    log_call("IVRSystem::GetControllerRoleForTrackedDeviceIndex");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRSystem::GetControllerRoleForTrackedDeviceIndex");
+    }
     return fake_controller_role(device);
 }
 
@@ -2019,7 +2068,10 @@ vr::ETrackedControllerRole __stdcall fake_c_invalid_controller_role(vr::TrackedD
 }
 
 vr::ETrackedDeviceClass __thiscall fake_get_tracked_device_class(void*, vr::TrackedDeviceIndex_t device) {
-    log_call("IVRSystem::GetTrackedDeviceClass");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRSystem::GetTrackedDeviceClass");
+    }
     if (is_fake_hmd(device)) {
         return vr::TrackedDeviceClass_HMD;
     }
@@ -2034,7 +2086,10 @@ vr::ETrackedDeviceClass __stdcall fake_c_get_tracked_device_class(vr::TrackedDev
 }
 
 bool __thiscall fake_is_tracked_device_connected(void*, vr::TrackedDeviceIndex_t device) {
-    log_call_u32("IVRSystem::IsTrackedDeviceConnected device", device);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call_u32("IVRSystem::IsTrackedDeviceConnected device", device);
+    }
     return is_fake_tracked_device(device);
 }
 
@@ -2049,7 +2104,10 @@ void set_property_error(vr::ETrackedPropertyError* error, vr::ETrackedPropertyEr
 }
 
 bool __thiscall fake_get_bool_property(void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::ETrackedPropertyError* error) {
-    log_device_property("IVRSystem::GetBoolTrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetBoolTrackedDeviceProperty", device, prop);
+    }
     if (!is_fake_tracked_device(device)) {
         set_property_error(error, vr::TrackedProp_InvalidDevice);
         return false;
@@ -2081,7 +2139,10 @@ bool __stdcall fake_c_get_bool_property(vr::TrackedDeviceIndex_t device, vr::ETr
 }
 
 float __thiscall fake_get_float_property(void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::ETrackedPropertyError* error) {
-    log_device_property("IVRSystem::GetFloatTrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetFloatTrackedDeviceProperty", device, prop);
+    }
     if (!is_fake_tracked_device(device)) {
         set_property_error(error, vr::TrackedProp_InvalidDevice);
         return 0.0f;
@@ -2115,7 +2176,10 @@ float __stdcall fake_c_get_float_property(vr::TrackedDeviceIndex_t device, vr::E
 }
 
 int32_t __thiscall fake_get_int_property(void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::ETrackedPropertyError* error) {
-    log_device_property("IVRSystem::GetInt32TrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetInt32TrackedDeviceProperty", device, prop);
+    }
     if (!is_fake_tracked_device(device)) {
         set_property_error(error, vr::TrackedProp_InvalidDevice);
         return 0;
@@ -2163,7 +2227,10 @@ int32_t __stdcall fake_c_get_int_property(vr::TrackedDeviceIndex_t device, vr::E
 }
 
 uint64_t __thiscall fake_get_uint64_property(void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::ETrackedPropertyError* error) {
-    log_device_property("IVRSystem::GetUint64TrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetUint64TrackedDeviceProperty", device, prop);
+    }
     if (!is_fake_tracked_device(device)) {
         set_property_error(error, vr::TrackedProp_InvalidDevice);
         return 0;
@@ -2185,7 +2252,10 @@ uint64_t __stdcall fake_c_get_uint64_property(vr::TrackedDeviceIndex_t device, v
 }
 
 vr::HmdMatrix34_t __thiscall fake_get_matrix34_property(void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::ETrackedPropertyError* error) {
-    log_device_property("IVRSystem::GetMatrix34TrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetMatrix34TrackedDeviceProperty", device, prop);
+    }
     set_property_error(error, is_fake_tracked_device(device) ? vr::TrackedProp_UnknownProperty : vr::TrackedProp_InvalidDevice);
     return identity34();
 }
@@ -2197,7 +2267,10 @@ vr::HmdMatrix34_t* __thiscall fake_cpp_get_matrix34_property(
     vr::ETrackedDeviceProperty prop,
     vr::ETrackedPropertyError* error
 ) {
-    log_device_property("IVRSystem::GetMatrix34TrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetMatrix34TrackedDeviceProperty", device, prop);
+    }
     set_property_error(error, is_fake_tracked_device(device) ? vr::TrackedProp_UnknownProperty : vr::TrackedProp_InvalidDevice);
     if (output) {
         *output = identity34();
@@ -2212,7 +2285,10 @@ vr::HmdMatrix34_t __stdcall fake_c_get_matrix34_property(vr::TrackedDeviceIndex_
 uint32_t __thiscall fake_get_array_property(
     void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, vr::PropertyTypeTag_t, void*, uint32_t, vr::ETrackedPropertyError* error
 ) {
-    log_device_property("IVRSystem::GetArrayTrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetArrayTrackedDeviceProperty", device, prop);
+    }
     set_property_error(error, is_fake_tracked_device(device) ? vr::TrackedProp_UnknownProperty : vr::TrackedProp_InvalidDevice);
     return 0;
 }
@@ -2226,7 +2302,10 @@ uint32_t __stdcall fake_c_get_array_property(
 uint32_t __thiscall fake_get_string_property(
     void*, vr::TrackedDeviceIndex_t device, vr::ETrackedDeviceProperty prop, char* value, uint32_t value_size, vr::ETrackedPropertyError* error
 ) {
-    log_device_property("IVRSystem::GetStringTrackedDeviceProperty", device, prop);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_device_property("IVRSystem::GetStringTrackedDeviceProperty", device, prop);
+    }
     if (!is_fake_tracked_device(device)) {
         set_property_error(error, vr::TrackedProp_InvalidDevice);
         return 0;
@@ -2285,7 +2364,10 @@ const char* __stdcall fake_c_get_prop_error_name(vr::ETrackedPropertyError error
 }
 
 bool __thiscall fake_poll_next_event(void*, vr::VREvent_t* event, uint32_t event_size) {
-    log_call_u32("IVRSystem::PollNextEvent size", event_size);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call_u32("IVRSystem::PollNextEvent size", event_size);
+    }
     if (!event || event_size < kVREventPrefixSize) {
         return false;
     }
@@ -2776,42 +2858,60 @@ uint32_t __stdcall fake_c_overlay_pid(vr::VROverlayHandle_t) {
 }
 
 void __thiscall fake_set_tracking_space(void*, vr::ETrackingUniverseOrigin origin) {
-    log_call_u32("IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call_u32("IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    }
     g_tracking_space_origin.store(static_cast<uint32_t>(origin), std::memory_order_relaxed);
 }
 void __stdcall fake_c_set_tracking_space(vr::ETrackingUniverseOrigin origin) {
-    log_call_u32("FnTable:IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call_u32("FnTable:IVRCompositor::SetTrackingSpace", static_cast<uint32_t>(origin));
+    }
     g_tracking_space_origin.store(static_cast<uint32_t>(origin), std::memory_order_relaxed);
 }
 vr::ETrackingUniverseOrigin __thiscall fake_tracking_space(void*) {
-    log_call("IVRCompositor::GetTrackingSpace");
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_call("IVRCompositor::GetTrackingSpace");
+    }
     auto origin = static_cast<vr::ETrackingUniverseOrigin>(
         g_tracking_space_origin.load(std::memory_order_relaxed)
     );
-    char message[128] = {};
-    std::snprintf(
-        message,
-        sizeof(message),
-        "IVRCompositor::GetTrackingSpace return origin=%d",
-        origin
-    );
-    log_line(message);
+    if (should_log) {
+        char message[128] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRCompositor::GetTrackingSpace return origin=%d",
+            origin
+        );
+        log_line(message);
+    }
     return origin;
 }
 
 vr::ETrackingUniverseOrigin __stdcall fake_c_tracking_space() {
-    log_call("FnTable:IVRCompositor::GetTrackingSpace");
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_call("FnTable:IVRCompositor::GetTrackingSpace");
+    }
     auto origin = static_cast<vr::ETrackingUniverseOrigin>(
         g_tracking_space_origin.load(std::memory_order_relaxed)
     );
-    char message[128] = {};
-    std::snprintf(
-        message,
-        sizeof(message),
-        "FnTable:IVRCompositor::GetTrackingSpace return origin=%d",
-        origin
-    );
-    log_line(message);
+    if (should_log) {
+        char message[128] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "FnTable:IVRCompositor::GetTrackingSpace return origin=%d",
+            origin
+        );
+        log_line(message);
+    }
     return origin;
 }
 
@@ -2862,7 +2962,11 @@ vr::EVRCompositorError __thiscall fake_wait_get_poses(
 vr::EVRCompositorError __thiscall fake_get_last_poses(
     void*, vr::TrackedDevicePose_t* render_poses, uint32_t render_count, vr::TrackedDevicePose_t* game_poses, uint32_t game_count
 ) {
-    log_call("IVRCompositor::GetLastPoses");
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_call("IVRCompositor::GetLastPoses");
+    }
     SharedHmdPose render_shared_pose;
     const SharedHmdPose* render_pose_snapshot =
         read_shared_hmd_pose(&render_shared_pose) ? &render_shared_pose : nullptr;
@@ -2872,7 +2976,7 @@ vr::EVRCompositorError __thiscall fake_get_last_poses(
     const SharedHmdPose* game_pose_snapshot =
         read_shared_hmd_pose(&game_shared_pose) ? &game_shared_pose : nullptr;
     fill_poses_with_snapshot(game_poses, game_count, game_pose_snapshot);
-    if (render_poses && render_count > 0) {
+    if (should_log && render_poses && render_count > 0) {
         char message[320] = {};
         std::snprintf(
             message,
@@ -2908,7 +3012,11 @@ vr::EVRCompositorError __stdcall fake_c_get_last_poses(
 vr::EVRCompositorError __thiscall fake_last_pose(
     void*, vr::TrackedDeviceIndex_t device, vr::TrackedDevicePose_t* render_pose, vr::TrackedDevicePose_t* game_pose
 ) {
-    log_call("IVRCompositor::GetLastPoseForTrackedDeviceIndex");
+    static std::atomic<uint64_t> log_count { 0 };
+    bool should_log = should_log_hot_call(log_count);
+    if (should_log) {
+        log_call("IVRCompositor::GetLastPoseForTrackedDeviceIndex");
+    }
     bool hmd_pose = device == vr::k_unTrackedDeviceIndex_Hmd;
     SharedHmdPose render_shared_pose;
     const SharedHmdPose* render_pose_snapshot =
@@ -2929,7 +3037,7 @@ vr::EVRCompositorError __thiscall fake_last_pose(
         ? &game_controller
         : nullptr;
     fill_pose_with_snapshot(game_pose, device, game_pose_snapshot, game_controller_snapshot);
-    if (render_pose) {
+    if (should_log && render_pose) {
         char message[384] = {};
         std::snprintf(
             message,
@@ -2963,14 +3071,20 @@ vr::EVRCompositorError __stdcall fake_c_last_pose(
 vr::EVRCompositorError __thiscall fake_submit(
     void*, vr::EVREye eye, const vr::Texture_t*, const vr::VRTextureBounds_t*, vr::EVRSubmitFlags
 ) {
-    log_eye_call("IVRCompositor::Submit", eye);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_eye_call("IVRCompositor::Submit", eye);
+    }
     return vr::VRCompositorError_None;
 }
 
 vr::EVRCompositorError __stdcall fake_c_submit(
     vr::EVREye eye, vr::Texture_t*, vr::VRTextureBounds_t*, vr::EVRSubmitFlags
 ) {
-    log_eye_call("FnTable:IVRCompositor::Submit", eye);
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_eye_call("FnTable:IVRCompositor::Submit", eye);
+    }
     return vr::VRCompositorError_None;
 }
 
@@ -3116,22 +3230,34 @@ uint32_t __stdcall fake_c_get_last_frame_renderer() {
 }
 
 bool __thiscall fake_can_render_scene(void*) {
-    log_call("IVRCompositor::CanRenderScene -> true");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRCompositor::CanRenderScene -> true");
+    }
     return true;
 }
 
 bool __stdcall fake_c_can_render_scene() {
-    log_call("FnTable:IVRCompositor::CanRenderScene -> true");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("FnTable:IVRCompositor::CanRenderScene -> true");
+    }
     return true;
 }
 
 bool __thiscall fake_should_app_render_with_low_resources(void*) {
-    log_call("IVRCompositor::ShouldAppRenderWithLowResources -> false");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRCompositor::ShouldAppRenderWithLowResources -> false");
+    }
     return false;
 }
 
 bool __stdcall fake_c_should_app_render_with_low_resources() {
-    log_call("FnTable:IVRCompositor::ShouldAppRenderWithLowResources -> false");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("FnTable:IVRCompositor::ShouldAppRenderWithLowResources -> false");
+    }
     return false;
 }
 void __thiscall fake_show_mirror_window(void*) { log_call("IVRCompositor::ShowMirrorWindow"); }
@@ -3394,7 +3520,10 @@ bool __stdcall fake_c_legacy_settings_sync(bool force, vr::EVRSettingsError* err
 }
 
 bool __thiscall fake_settings_get_bool(void*, const char*, const char*, vr::EVRSettingsError* error) {
-    log_call("IVRSettings::GetBool");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRSettings::GetBool");
+    }
     set_settings_error(error);
     return false;
 }
@@ -3404,7 +3533,10 @@ bool __stdcall fake_c_settings_get_bool(const char* section, const char* key, vr
 }
 
 bool __thiscall fake_legacy_settings_get_bool(void*, const char*, const char*, bool default_value, vr::EVRSettingsError* error) {
-    log_call("IVRSettings_001::GetBool");
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        log_call("IVRSettings_001::GetBool");
+    }
     set_settings_error(error);
     return default_value;
 }
@@ -3607,6 +3739,57 @@ FakeActionKind action_kind_for_name(const char* name) {
     if (_stricmp(name, "/actions/mixedreality/in/ExternalCamera") == 0) {
         return FakeActionKind::ExternalCamera;
     }
+
+    const char* leaf = std::strrchr(name, '/');
+    leaf = leaf ? leaf + 1 : name;
+    if (_stricmp(leaf, "Trigger") == 0 ||
+        _stricmp(leaf, "TriggerPos") == 0 ||
+        _stricmp(leaf, "InteractUI") == 0 ||
+        _stricmp(leaf, "GrabPinch") == 0 ||
+        _stricmp(leaf, "NockArrow") == 0 ||
+        _stricmp(leaf, "ChargedAttack") == 0) {
+        return FakeActionKind::Trigger;
+    }
+    if (_stricmp(leaf, "GrabGrip") == 0 ||
+        _stricmp(leaf, "Drop") == 0 ||
+        _stricmp(leaf, "DropBow") == 0) {
+        return FakeActionKind::Grip;
+    }
+    if (_stricmp(leaf, "Menu") == 0) {
+        return FakeActionKind::MenuButton;
+    }
+    if (_stricmp(leaf, "Pose") == 0 ||
+        _stricmp(leaf, "ShipPose") == 0 ||
+        _stricmp(leaf, "TeleportPose") == 0) {
+        return FakeActionKind::Pose;
+    }
+    if (_stricmp(leaf, "RadialMenuPos") == 0 ||
+        _stricmp(leaf, "ScrollPos") == 0) {
+        return FakeActionKind::Thumbstick;
+    }
+    if (_stricmp(leaf, "RadialMenuTouch") == 0 ||
+        _stricmp(leaf, "ScrollTouch") == 0) {
+        return FakeActionKind::ThumbstickTouch;
+    }
+    if (_stricmp(leaf, "ToolButton") == 0 ||
+        _stricmp(leaf, "ButtonLower") == 0) {
+        return FakeActionKind::PrimaryButton;
+    }
+    if (_stricmp(leaf, "ButtonRaise") == 0) {
+        return FakeActionKind::SecondaryButton;
+    }
+    if (_stricmp(leaf, "SnapTurnLeft") == 0) {
+        return FakeActionKind::ThumbstickLeft;
+    }
+    if (_stricmp(leaf, "SnapTurnRight") == 0) {
+        return FakeActionKind::ThumbstickRight;
+    }
+    if (_stricmp(leaf, "Teleport") == 0) {
+        return FakeActionKind::Teleport;
+    }
+    if (_stricmp(leaf, "Haptic") == 0) {
+        return FakeActionKind::Haptic;
+    }
     return FakeActionKind::Unknown;
 }
 
@@ -3636,6 +3819,10 @@ const char* action_kind_name(FakeActionKind kind) {
         return "thumbstick";
     case FakeActionKind::ThumbstickTouch:
         return "thumbstick_touch";
+    case FakeActionKind::ThumbstickLeft:
+        return "thumbstick_left";
+    case FakeActionKind::ThumbstickRight:
+        return "thumbstick_right";
     case FakeActionKind::GripBinary:
         return "grip_binary";
     case FakeActionKind::GripAnalog:
@@ -3761,6 +3948,10 @@ bool digital_action_state(FakeActionKind kind, const SharedControllerSnapshot* c
     case FakeActionKind::ThumbstickTouch:
     case FakeActionKind::PadTouch:
         return button_touched(*controller, vr::k_EButton_SteamVR_Touchpad);
+    case FakeActionKind::ThumbstickLeft:
+        return controller->axes[0][0] < -0.5f;
+    case FakeActionKind::ThumbstickRight:
+        return controller->axes[0][0] > 0.5f;
     case FakeActionKind::PrimaryButtonTouch:
         return button_touched(*controller, vr::k_EButton_A);
     case FakeActionKind::SecondaryButtonTouch:
@@ -3788,6 +3979,7 @@ void analog_action_state(
     case FakeActionKind::Trigger:
         *x = controller->axes[1][0];
         break;
+    case FakeActionKind::Squeeze:
     case FakeActionKind::GripAnalog:
         *x = controller->axes[2][0];
         break;
@@ -3958,7 +4150,15 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
     bool previous_state = false;
     vr::VRInputValueHandle_t active_origin = 1;
 
-    if (restrict_to_device == 1 || restrict_to_device == 2) {
+    if (kind == FakeActionKind::HeadsetOnHead &&
+        (restrict_to_device == 3 ||
+         restrict_to_device == vr::k_ulInvalidInputValueHandle)) {
+        active = true;
+        previous_active = true;
+        state = true;
+        previous_state = true;
+        active_origin = 3;
+    } else if (restrict_to_device == 1 || restrict_to_device == 2) {
         int controller_index = restrict_to_device == 2 ? 1 : 0;
         active = snapshot.current_valid[controller_index]
             || snapshot.current_synthetic_active;
@@ -3998,6 +4198,26 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
     data->activeOrigin = active_origin;
     data->bState = state;
     data->bChanged = active && previous_active && state != previous_state;
+    static std::atomic<uint64_t> log_count { 0 };
+    uint64_t query = log_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (query <= 64 || data->bChanged) {
+        char message[320] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRInput::GetDigitalActionData query=%llu action=%llu kind=%s "
+            "restrict=%llu active=%u state=%u changed=%u origin=%llu",
+            static_cast<unsigned long long>(query),
+            static_cast<unsigned long long>(action),
+            action_kind_name(kind),
+            static_cast<unsigned long long>(restrict_to_device),
+            data->bActive ? 1U : 0U,
+            data->bState ? 1U : 0U,
+            data->bChanged ? 1U : 0U,
+            static_cast<unsigned long long>(data->activeOrigin)
+        );
+        log_line(message);
+    }
     return vr::VRInputError_None;
 }
 
@@ -4056,6 +4276,32 @@ vr::EVRInputError __stdcall fake_c_input_get_analog_action_data(
         data->deltaX = x - previous_x;
         data->deltaY = y - previous_y;
         data->deltaZ = z - previous_z;
+    }
+    static std::atomic<uint64_t> log_count { 0 };
+    uint64_t query = log_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (query <= 64 || std::fabs(data->deltaX) > 0.01f ||
+        std::fabs(data->deltaY) > 0.01f || std::fabs(data->deltaZ) > 0.01f) {
+        char message[384] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRInput::GetAnalogActionData query=%llu action=%llu kind=%s "
+            "restrict=%llu active=%u value=[%.3f,%.3f,%.3f] "
+            "delta=[%.3f,%.3f,%.3f] origin=%llu",
+            static_cast<unsigned long long>(query),
+            static_cast<unsigned long long>(action),
+            action_kind_name(kind),
+            static_cast<unsigned long long>(restrict_to_device),
+            data->bActive ? 1U : 0U,
+            data->x,
+            data->y,
+            data->z,
+            data->deltaX,
+            data->deltaY,
+            data->deltaZ,
+            static_cast<unsigned long long>(data->activeOrigin)
+        );
+        log_line(message);
     }
     return vr::VRInputError_None;
 }
@@ -4225,15 +4471,26 @@ vr::EVRInputError __stdcall fake_c_input_trigger_haptic(
 }
 
 vr::EVRInputError __stdcall fake_c_input_get_action_origins(
-    vr::VRActionSetHandle_t, vr::VRActionHandle_t, vr::VRInputValueHandle_t* origins, uint32_t count
+    vr::VRActionSetHandle_t,
+    vr::VRActionHandle_t action,
+    vr::VRInputValueHandle_t* origins,
+    uint32_t count
 ) {
     if (origins && count > 0) {
-        origins[0] = 1;
-        if (count > 1) {
-            origins[1] = 2;
-        }
-        for (uint32_t index = 2; index < count; ++index) {
-            origins[index] = 0;
+        FakeActionKind kind = action_kind_for_handle(action);
+        if (kind == FakeActionKind::HeadsetOnHead) {
+            origins[0] = 3;
+            for (uint32_t index = 1; index < count; ++index) {
+                origins[index] = 0;
+            }
+        } else {
+            origins[0] = 1;
+            if (count > 1) {
+                origins[1] = 2;
+            }
+            for (uint32_t index = 2; index < count; ++index) {
+                origins[index] = 0;
+            }
         }
     }
     return vr::VRInputError_None;
@@ -4242,7 +4499,10 @@ vr::EVRInputError __stdcall fake_c_input_get_action_origins(
 vr::EVRInputError __stdcall fake_c_input_get_origin_localized_name(
     vr::VRInputValueHandle_t origin, char* name, uint32_t size, int32_t
 ) {
-    copy_string(origin == 2 ? "Right Hand" : "Left Hand", name, size);
+    const char* localized_name = origin == 3
+        ? "Head"
+        : (origin == 2 ? "Right Hand" : "Left Hand");
+    copy_string(localized_name, name, size);
     return vr::VRInputError_None;
 }
 
@@ -4252,7 +4512,34 @@ vr::EVRInputError __stdcall fake_c_input_get_origin_tracked_device_info(
     if (info && size >= sizeof(*info)) {
         std::memset(info, 0, sizeof(*info));
         info->devicePath = origin;
-        info->trackedDeviceIndex = origin == 2 ? 2 : 1;
+        info->trackedDeviceIndex = origin == 3
+            ? vr::k_unTrackedDeviceIndex_Hmd
+            : (origin == 2 ? 2 : 1);
+    }
+    return vr::VRInputError_None;
+}
+
+vr::EVRInputError __stdcall fake_c_input_get_action_binding_info(
+    vr::VRActionHandle_t action,
+    vr::InputBindingInfo_t*,
+    uint32_t,
+    uint32_t,
+    uint32_t* returned_count
+) {
+    static std::atomic<uint64_t> log_count { 0 };
+    if (should_log_hot_call(log_count)) {
+        char message[192] = {};
+        std::snprintf(
+            message,
+            sizeof(message),
+            "IVRInput::GetActionBindingInfo action=%llu kind=%s",
+            static_cast<unsigned long long>(action),
+            action_kind_name(action_kind_for_handle(action))
+        );
+        log_line(message);
+    }
+    if (returned_count) {
+        *returned_count = 0;
     }
     return vr::VRInputError_None;
 }
@@ -4474,6 +4761,18 @@ vr::EVRInputError __thiscall fake_input_get_origin_tracked_device_info(
     void*, vr::VRInputValueHandle_t origin, vr::InputOriginInfo_t* info, uint32_t size
 ) {
     return fake_c_input_get_origin_tracked_device_info(origin, info, size);
+}
+
+vr::EVRInputError __thiscall fake_input_get_action_binding_info(
+    void*,
+    vr::VRActionHandle_t action,
+    vr::InputBindingInfo_t* info,
+    uint32_t info_size,
+    uint32_t info_count,
+    uint32_t* returned_count
+) {
+    return fake_c_input_get_action_binding_info(
+        action, info, info_size, info_count, returned_count);
 }
 
 vr::EVRInputError __thiscall fake_input_show_action_origins(
@@ -4766,6 +5065,8 @@ void* g_settings002_fntable[kLegacySettings002Slots] = {};
 void* g_input005_fntable[kLegacyInput005Slots] = {};
 void* g_input006_vtable[kLegacyInput006Slots] = {};
 void* g_input006_fntable[kLegacyInput006Slots] = {};
+void* g_input007_vtable[kLegacyInput007Slots] = {};
+void* g_input007_fntable[kLegacyInput007Slots] = {};
 bool g_tables_initialized = false;
 
 struct FakeSystemObject {
@@ -4820,6 +5121,7 @@ FakeSettingsObject g_settings = { g_settings_vtable };
 FakeSettingsObject g_settings001 = { g_settings001_vtable };
 FakeSettingsObject g_settings002 = { g_settings002_vtable };
 FakeInputObject g_input006 = { g_input006_vtable };
+FakeInputObject g_input007 = { g_input007_vtable };
 
 void ensure_tables_initialized() {
     if (g_tables_initialized) {
@@ -6005,6 +6307,20 @@ void ensure_tables_initialized() {
     g_input006_fntable[24] = reinterpret_cast<void*>(&fake_c_input_show_bindings_for_action_set);
     g_input006_fntable[25] = reinterpret_cast<void*>(&fake_c_input_is_using_legacy_input);
 
+    for (size_t index = 0; index < 23; ++index) {
+        g_input007_vtable[index] = g_input006_vtable[index];
+        g_input007_fntable[index] = g_input006_fntable[index];
+    }
+    g_input007_vtable[23] = reinterpret_cast<void*>(&fake_input_get_action_binding_info);
+    g_input007_vtable[24] = reinterpret_cast<void*>(&fake_input_show_action_origins);
+    g_input007_vtable[25] = reinterpret_cast<void*>(&fake_input_show_bindings_for_action_set);
+    g_input007_vtable[26] = reinterpret_cast<void*>(&fake_input_is_using_legacy_input);
+
+    g_input007_fntable[23] = reinterpret_cast<void*>(&fake_c_input_get_action_binding_info);
+    g_input007_fntable[24] = reinterpret_cast<void*>(&fake_c_input_show_action_origins);
+    g_input007_fntable[25] = reinterpret_cast<void*>(&fake_c_input_show_bindings_for_action_set);
+    g_input007_fntable[26] = reinterpret_cast<void*>(&fake_c_input_is_using_legacy_input);
+
     g_tables_initialized = true;
 }
 
@@ -6016,7 +6332,8 @@ bool is_known_interface(const char* interface_version) {
         || is_chaperone_interface(interface_version) || is_chaperone_setup_interface(interface_version)
         || is_overlay_interface(interface_version) || is_applications_interface(interface_version)
         || is_settings_interface(interface_version)
-        || is_legacy_input006_interface(interface_version)) {
+        || is_legacy_input006_interface(interface_version)
+        || is_legacy_input007_interface(interface_version)) {
         return true;
     }
     if (std::strncmp(interface_version, kFnTablePrefix, std::strlen(kFnTablePrefix)) != 0) {
@@ -6030,7 +6347,8 @@ bool is_known_interface(const char* interface_version) {
         || is_applications_interface(version)
         || is_settings_interface(version)
         || is_legacy_input005_interface(version)
-        || is_legacy_input006_interface(version);
+        || is_legacy_input006_interface(version)
+        || is_legacy_input007_interface(version);
 }
 
 } // namespace
@@ -6171,6 +6489,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         log_interface("IVRInput", interface_version);
         return &g_input006;
     }
+    if (is_legacy_input007_interface(interface_version)) {
+        log_interface("IVRInput", interface_version);
+        return &g_input007;
+    }
     if (interface_version
         && std::strncmp(interface_version, kFnTablePrefix, std::strlen(kFnTablePrefix)) == 0) {
         const char* version = interface_version + std::strlen(kFnTablePrefix);
@@ -6265,6 +6587,10 @@ extern "C" __declspec(dllexport) void* VR_GetGenericInterface(
         if (is_legacy_input006_interface(version)) {
             log_interface("FnTable IVRInput", interface_version);
             return g_input006_fntable;
+        }
+        if (is_legacy_input007_interface(version)) {
+            log_interface("FnTable IVRInput", interface_version);
+            return g_input007_fntable;
         }
     }
     if (error) {
