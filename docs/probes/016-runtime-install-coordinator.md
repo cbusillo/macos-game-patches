@@ -189,3 +189,11 @@ layout `start` work.
 GitHub issue #61. After this coordinator lands, #62 becomes the next active
 dependency for a transaction-compatible signed bundle; #60 remains blocked
 until a qualified installed layout exists.
+
+## Successor Status
+
+Probe 017 now provides the dev7 immutable post-build Developer ID seal and a
+verified exact signed-tree identity. The remaining #61 live-enable work is
+descriptor-anchored target mutation plus physical install/uninstall restoration
+cycles; #62 separately retains stable URL, Launch Services, and privacy-consent
+qualification.

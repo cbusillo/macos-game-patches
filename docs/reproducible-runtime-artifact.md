@@ -2,7 +2,8 @@
 
 This document defines the manifest-backed artifact boundary for the
 owner-operated Mac ALVR runtime. GitHub issue #58 owns implementation status;
-this file records the durable build, provenance, and ownership contract.
+issue #62 owns the Developer ID final-sealing extension. This file records the
+durable build, provenance, sealing, and ownership contract.
 
 ## Purpose
 
@@ -26,14 +27,16 @@ trees automatically.
 - Treat sibling Git checkouts as source identities pinned by remote and commit.
 - Classify every staged binary as a pinned-Git, repo-source, or opaque-local
   build output; pin each by content hash and link it to its build recipe.
-- Produce an unsigned deterministic bridge application payload. Developer ID
-  signing and the stable installed CDHash remain a separate sealing boundary.
+- Produce an immutable deterministic unsealed artifact, then Developer ID sign
+  only a verified private copy and publish a second immutable final artifact.
+- Bind the source seal, contract hashes, pre-sign tree, final signed tree,
+  Developer ID authority, Team ID, bundle identifier, CDHash, and no-timestamp
+  policy into canonical final-sealing provenance.
 - Publish artifacts atomically into a content-addressed directory under
   `.code/runtime-artifacts/`.
 - Keep plan resolution read-only and authoritative. Issue #61 consumes those
-  exact operations through a separate lifecycle coordinator; the current
-  separate-step artifact remains mutation-gated until its post-sign tree can be
-  verified.
+  exact operations through a separate lifecycle coordinator. Unsealed artifacts
+  remain mutation-gated; only a verified final-stage artifact can become ready.
 - Never fetch or download dependencies while validating or building.
 - Keep executable prerequisite commands and allowed mutation roots in trusted
   builder policy rather than allowing the manifest to widen its own authority.
@@ -107,9 +110,11 @@ mac-alvr-runtime-<version>-<full-seal>/
   payload/
     macos/
       ALVRMacOSBridge.app/
+        Contents/_CodeSignature/CodeResources  # sealed stage only
         Contents/Info.plist
         Contents/MacOS/alvr_macos_bridge
         Contents/Resources/runtime-owner.json
+        Contents/Resources/runtime-sealing.json # sealed stage only
       libMoltenVK.dylib
     unix/
       alvr_iosurface_bridge.so
@@ -132,6 +137,7 @@ mac-alvr-runtime-<version>-<full-seal>/
     artifact.json
     build-inputs.json
     files.sha256
+    sealing.json             # sealed stage only
 ```
 
 The seal is the SHA-256 of the canonical manifest hash, lock hash, and sorted
@@ -141,6 +147,13 @@ canonical contract copies, and sealed build-input provenance. Only
 self-reference. Absolute source paths, timestamps, usernames, and hostnames are
 excluded.
 
+An unsealed artifact is already immutable and content-addressed; its metadata
+stage is `unsealed`. `seal` verifies and copies that artifact into a private
+publication directory, writes a source-seal attestation inside the app bundle,
+signs the copy, verifies the complete bundle, and computes a new final content
+address with stage `sealed`. It never edits the source artifact or an installed
+tree.
+
 `build-inputs.json` records the declared build command, actual Git commits and
 trees, tracked source hashes, prerequisite results, normalized binary metadata,
 signatures, and the separate sealing policy. `verify` cross-checks that sealed
@@ -148,6 +161,14 @@ record against the contract and payload rather than trusting metadata alone. It
 also rejects undeclared files or directories, generated configuration or plans
 that differ from the contract, noncanonical JSON, and incorrect published
 modes.
+
+For a final artifact, `verify` additionally checks the complete app resource
+envelope with `codesign --verify --strict --deep --all-architectures`, the
+Mach-O architecture, exact Developer ID leaf authority, Team ID, bundle and
+executable identifiers, CDHash, absent timestamp, signed source attestation,
+final executable hash, and canonical final bundle-tree digest. The only
+signing-created file admitted by contract is the canonical
+`Contents/_CodeSignature/CodeResources` path.
 
 Artifact files are published as `0444` or `0555` without copied timestamps. All
 directories become `0555`; files and directories are flushed before atomic
@@ -211,8 +232,25 @@ python3 tools/build_runtime_artifact.py build \
   --output-root .code/runtime-artifacts
 ```
 
-Stages into a locked temporary directory, computes the seal, writes canonical
-provenance, makes the artifact read-only, and atomically publishes it.
+Stages into a locked temporary directory, computes the unsealed content address,
+writes canonical provenance, makes the artifact read-only, and atomically
+publishes it.
+
+### Developer ID Seal
+
+```bash
+python3 tools/build_runtime_artifact.py seal \
+  --artifact .code/runtime-artifacts/<unsealed-artifact> \
+  --output-root .code/runtime-artifacts
+```
+
+The identity, Team ID, bundle ID, output paths, and no-timestamp policy come
+only from the checked-in contract; callers cannot override them. The command
+requires the checked-in manifest and lock to match the source artifact, copies
+the verified source under the same publication lock used by `build`, writes the
+signed attestation, runs Developer ID signing, verifies the resulting bundle,
+and publishes a new read-only `sealed` content address. Re-sealing a final-stage
+artifact and in-place mutation are refused.
 
 ### Dry-Run Ownership Plan
 
@@ -229,7 +267,9 @@ by the transaction executor. It reports complete install/uninstall plans, the
 resolved mutable-state inventory, readiness, and blockers, even when the current
 host is not in an installable state. It rejects an artifact built from a
 different external manifest or lock. The command emits JSON and performs no
-mutation.
+mutation. An unsealed artifact reports `installReady=false` and
+`uninstallReady=false` with an `artifact.sealing_required` blocker even when
+every target operation is otherwise ready.
 
 ### Transactional Lifecycle Commands
 
@@ -252,12 +292,16 @@ per-filesystem capacity, and passes planner operations unchanged to the durable
 executor. Matching committed work is an idempotent success; interrupted work is
 rolled back and archived before the operator retries the requested direction.
 
-The dev6 manifest declares persistent transaction and content-namespaced backup
-locations, but still uses `separate-step` signing. Both lifecycle commands
-therefore return `artifact.sealing_required` before creating directories,
-stopping services, writing journals, or changing targets. The signing/privacy
-workstream must provide a verified post-sign bundle tree before live mutation is
-eligible.
+The dev7 manifest retains separate-step signing without weakening admission.
+Both lifecycle commands return `artifact.sealing_required` before creating
+directories, stopping services, writing journals, or changing targets when the
+verified artifact stage is `unsealed`. A verified `sealed` artifact carries its
+exact post-sign bundle tree into the transaction plan. Non-fixture target roots
+still return `transaction.live_path_hardening_required` before lifecycle lock
+creation, service stop, journal write, or target mutation. Descriptor-anchored
+mutation and physical qualification remain explicit gates before user-path
+enablement. `doctor` and stopped `status` surface the same blocker rather than
+reporting the sealed artifact as ready.
 
 ### Verify And Compare
 
@@ -270,8 +314,14 @@ python3 tools/build_runtime_artifact.py compare \
   .code/runtime-build-b/<artifact>
 ```
 
-`verify` recalculates all content records and the seal. `compare` requires two
-independent artifacts to have identical seals and file records.
+`verify` recalculates all content records and the seal, then verifies final
+Developer ID evidence when the stage is `sealed`. `compare` requires two
+independent artifacts at the same stage to have identical seals and file
+records. Unsealed builds are deterministic and must compare equal. Developer ID
+CMS bytes can vary between valid no-timestamp signing operations even when the
+source seal, signed attestation, CodeResources, and CDHash remain identical, so
+each final tree receives its own exact content address and an exact sealed-stage
+`compare` intentionally reports those byte-level differences.
 
 ### Self-Test
 
@@ -283,7 +333,10 @@ Creates bounded temporary fixtures and covers valid, missing, hash-mismatched,
 wrong-type, unsafe-destination, symlink, wrong-commit, tracked/untracked dirty
 worktree, atomic-build, read-only publication, exact-plan, contract mismatch,
 exact modes, undeclared directories, tamper detection, and two-build-equivalence
-behavior. It does not use CrossOver or Apple tooling and runs in CI.
+behavior. Deterministic test doubles also cover the unsealed gate, post-build
+seal, final-stage plan readiness, CMS byte variance with stable code identity,
+stale publication cleanup, relocation, re-seal refusal, and signed-tree tamper
+detection. It does not use CrossOver or Apple tooling and runs in CI.
 
 ## Binding Rules
 
@@ -315,17 +368,19 @@ classes include:
 - `source.hash`, `source.untracked`, `input.missing`, `input.hash`, and
   `input.type`;
 - `input.signature` and `prerequisite.mismatch`;
+- `sealing.identity`, `sealing.signature`, and `sealing.source_mismatch`;
 - `artifact.publish`, `artifact.verify`, and `artifact.compare`;
 - `plan.unresolved` for incomplete or unsafe dry-run plans; and
 - `artifact.sealing_required`, `transaction.busy`, `transaction.retry_required`,
-  `plan.blocked`, `runtime.target_busy`, and `capacity.insufficient` for
-  lifecycle admission failures; and
+  `transaction.live_path_hardening_required`, `plan.blocked`,
+  `runtime.target_busy`, and `capacity.insufficient` for lifecycle admission
+  failures; and
 - `internal.error` for unexpected failures that are still returned as JSON.
 
 There is no continue-anyway override for integrity, identity, architecture, or
 path failures.
 
-## Validation Gate
+## Validation Gates
 
 Issue #58 is complete when:
 
@@ -336,10 +391,23 @@ Issue #58 is complete when:
    modifying the host.
 5. The existing probe runner and frame-path sources remain unchanged.
 
+Issue #62's final-sealing slice additionally requires:
+
+1. two independently signed copies to preserve the source seal, signed
+   attestation, CodeResources, and CDHash; varying CMS bytes must produce
+   distinct exact final tree and artifact seal values rather than being
+   normalized away;
+2. an unsealed artifact to remain lifecycle-gated before every mutation;
+3. a final artifact to verify after relocation and enter planning as `sealed`;
+4. source-seal, signed-attestation, CodeResources, executable, identity, and
+   final-tree tampering to fail closed; and
+5. the stable installed bundle URL and privacy-consent behavior to remain a
+   separate physical qualification gate.
+
 ## Non-Goals
 
 - rebuilding or downloading CrossOver, DXVK, or MoltenVK source trees;
-- signing or registering the bridge application;
+- registering, notarizing, or publicly distributing the bridge application;
 - enabling real CrossOver or game mutation before a transaction-compatible
   signed artifact passes the lifecycle gate;
 - starting ALVR, a game, or the Vision Pro client;

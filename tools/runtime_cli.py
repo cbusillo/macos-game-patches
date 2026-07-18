@@ -107,6 +107,8 @@ def render_status(report: StatusReport) -> str:
         f"message={report.message}",
     ]
     if report.artifact:
+        if report.artifact.get("stage"):
+            lines.append(f"artifact_stage={report.artifact['stage']}")
         if report.artifact.get("sealId"):
             lines.append(f"artifact_seal={report.artifact['sealId']}")
         if report.artifact.get("path"):
@@ -144,6 +146,8 @@ def render_mutation(report: MutationReport) -> str:
         f"message={report.message}",
     ]
     if report.artifact is not None:
+        if report.artifact.get("stage"):
+            lines.append(f"artifact_stage={report.artifact['stage']}")
         if report.artifact.get("sealId"):
             lines.append(f"artifact_seal={report.artifact['sealId']}")
         if report.artifact.get("path"):

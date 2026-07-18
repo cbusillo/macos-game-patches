@@ -1058,7 +1058,7 @@ def _mutate_runtime(
         manifest, _, manifest_hash, lock_hash = load_runtime_contract(context)
         artifact_path = _absolute(artifact_path)
         artifact = verify_artifact_reference(context, artifact_path)
-        if manifest["sealing"]["mode"] == "separate-step":
+        if artifact.get("stage") != "sealed":
             return MutationReport(
                 command=command,
                 ok=False,
@@ -1066,6 +1066,29 @@ def _mutate_runtime(
                 reason_code="artifact.sealing_required",
                 message=(
                     "The runtime artifact requires a verified post-sign tree before lifecycle mutation"
+                ),
+                artifact=artifact,
+            )
+        admission_plan = _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash)
+        if admission_plan.get("requiresSealing") is not False:
+            return MutationReport(
+                command=command,
+                ok=False,
+                state="blocked",
+                reason_code="artifact.sealing_required",
+                message=(
+                    "The runtime artifact requires a verified post-sign tree before lifecycle mutation"
+                ),
+                artifact=artifact,
+            )
+        if not artifact_contract.plan_is_fixture_only(admission_plan):
+            return MutationReport(
+                command=command,
+                ok=False,
+                state="blocked",
+                reason_code="transaction.live_path_hardening_required",
+                message=(
+                    "Verified sealed artifacts remain fixture-only until descriptor-anchored target mutation is implemented"
                 ),
                 artifact=artifact,
             )

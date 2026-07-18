@@ -52,10 +52,22 @@ Qualified local validation and builds use ignored bindings documented in
 `docs/reproducible-runtime-artifact.md` for the deterministic payload,
 provenance, sealing boundary, and read-only install/uninstall plan contract.
 
+Issue #62 adds a second immutable publication stage for the signed bridge:
+
+```bash
+python3 tools/build_runtime_artifact.py build --bindings .code/runtime-bindings.json
+python3 tools/build_runtime_artifact.py seal --artifact <unsealed-artifact>
+python3 tools/build_runtime_artifact.py verify --artifact <sealed-artifact>
+```
+
+`seal` copies rather than edits its input, applies the contract-owned Developer
+ID identity with timestamps disabled, verifies the complete app bundle, and
+publishes a new final content address with signed source and tree provenance.
+
 ## Runtime Transactions
 
 Issue #61 converts that read-only plan into fail-closed filesystem transactions.
-The dev6 coordinator now verifies planner-owned paths, serializes both
+The coordinator verifies planner-owned paths, serializes both
 directions through one lifecycle lock, archives terminal journals, checks free
 space and open targets, and recovers interrupted work before a retry. Its full
 install/uninstall cycle remains hardware-free and fenced below temporary roots:
@@ -72,10 +84,13 @@ python3 tools/runtime_cli.py install --artifact <artifact>
 python3 tools/runtime_cli.py uninstall --artifact <artifact>
 ```
 
-The current dev6 contract still uses separate-step Developer ID signing, so
-both commands return `artifact.sealing_required` before any lifecycle mutation.
-Issue #62 must provide a verified post-sign tree identity before real
-CrossOver/game paths can be enabled.
+The dev7 contract still uses a separate signing step, but readiness now comes
+from verified artifact stage rather than manifest mode alone. Unsealed artifacts
+return `artifact.sealing_required` before any lifecycle mutation; a final sealed
+artifact carries its exact signed tree into the transaction plan. Live user-path
+and physical qualification remain explicit follow-up gates: non-fixture target
+roots return `transaction.live_path_hardening_required` until descriptor-
+anchored mutation lands.
 
 ## Runtime Control Plane
 

@@ -17,13 +17,16 @@ import runtime_cli
 from runtime_control import (
     CheckResult,
     CommandResult,
+    ControlError,
     DoctorReport,
     RuntimeContext,
+    doctor_runtime,
     evaluate_command_prerequisite,
     evaluate_plist_prerequisite,
     resolve_context_paths,
     status_runtime,
     stop_runtime,
+    verify_artifact_reference,
 )
 
 
@@ -299,10 +302,12 @@ class LifecycleTests(unittest.TestCase):
             "id": "mac-alvr-runtime",
             "version": "1.0.0-test",
             "sealId": "a" * 64,
+            "stage": "sealed",
         }
         core_passes = (
             CheckResult("repository.contract", "pass", "pass", "repair"),
             CheckResult("artifact.verify", "pass", "pass", "repair"),
+            CheckResult("artifact.stage", "pass", "pass", "repair"),
             CheckResult("artifact.contract", "pass", "pass", "repair"),
         )
         with mock.patch(
@@ -326,8 +331,31 @@ class LifecycleTests(unittest.TestCase):
             "runtime_control.doctor_runtime",
             return_value=DoctorReport(
                 (
+                    *core_passes,
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "fail",
+                        "fail",
+                        "repair",
+                    ),
+                ),
+                artifact_summary,
+            ),
+        ):
+            hardening_blocked = status_runtime(self.context, artifact)
+        self.assertEqual(hardening_blocked.state, "failed")
+        self.assertEqual(
+            hardening_blocked.reason_code,
+            "transaction.live_path_hardening_required",
+        )
+
+        with mock.patch(
+            "runtime_control.doctor_runtime",
+            return_value=DoctorReport(
+                (
                     CheckResult("repository.contract", "pass", "pass", "repair"),
                     CheckResult("artifact.verify", "fail", "fail", "repair"),
+                    CheckResult("artifact.stage", "unknown", "unknown", "repair"),
                     CheckResult("artifact.contract", "unknown", "unknown", "repair"),
                 )
             ),
@@ -335,6 +363,72 @@ class LifecycleTests(unittest.TestCase):
             invalid = status_runtime(self.context, artifact)
         self.assertEqual(invalid.state, "failed")
         self.assertEqual(invalid.reason_code, "artifact.invalid")
+
+    def test_doctor_rejects_unsealed_artifact_readiness(self) -> None:
+        artifact = self.root / "unsealed-artifact"
+        manifest_hash = "b" * 64
+        lock_hash = "c" * 64
+        metadata = {
+            "artifact": {"id": "mac-alvr-runtime", "version": "1.0.0-test"},
+            "sealId": "a" * 64,
+            "stage": "unsealed",
+            "manifestSha256": manifest_hash,
+            "lockSha256": lock_hash,
+        }
+        with (
+            mock.patch(
+                "runtime_control.load_runtime_contract",
+                return_value=({"prerequisites": []}, {}, manifest_hash, lock_hash),
+            ),
+            mock.patch("runtime_control.artifact_contract.verify_artifact", return_value=metadata),
+            mock.patch("runtime_control.artifact_contract.resolve_bindings", return_value={}),
+            mock.patch(
+                "runtime_control.check_control_tool",
+                side_effect=lambda identifier, _: CheckResult(
+                    f"tool.{identifier}",
+                    "pass",
+                    "pass",
+                    "repair",
+                ),
+            ),
+            mock.patch("runtime_control.resolve_runtime_paths", return_value=self.paths),
+            mock.patch(
+                "runtime_control.check_state_root",
+                return_value=CheckResult("runtime.state_root", "pass", "pass", "repair"),
+            ),
+        ):
+            report = doctor_runtime(self.context, artifact)
+        self.assertFalse(report.ok)
+        assert report.artifact is not None
+        self.assertEqual(report.artifact["stage"], "unsealed")
+        stage_check = next(check for check in report.checks if check.id == "artifact.stage")
+        self.assertEqual(stage_check.status, "fail")
+        with mock.patch("runtime_control.doctor_runtime", return_value=report):
+            status = status_runtime(self.context, artifact)
+        self.assertEqual(status.state, "failed")
+        self.assertEqual(status.reason_code, "artifact.sealing_required")
+
+    def test_live_artifact_reference_requires_sealed_stage(self) -> None:
+        artifact = self.root / "unsealed-artifact"
+        manifest_hash = "b" * 64
+        lock_hash = "c" * 64
+        metadata = {
+            "artifact": {"id": "mac-alvr-runtime", "version": "1.0.0-test"},
+            "sealId": "a" * 64,
+            "stage": "unsealed",
+            "manifestSha256": manifest_hash,
+            "lockSha256": lock_hash,
+        }
+        with (
+            mock.patch(
+                "runtime_control.load_runtime_contract",
+                return_value=({}, {}, manifest_hash, lock_hash),
+            ),
+            mock.patch("runtime_control.artifact_contract.verify_artifact", return_value=metadata),
+        ):
+            with self.assertRaises(ControlError) as raised:
+                verify_artifact_reference(self.context, artifact, require_sealed=True)
+        self.assertEqual(raised.exception.code, "artifact.sealing_required")
 
     def test_stale_lock_is_reported_and_removed(self) -> None:
         self.create_lock("2000")

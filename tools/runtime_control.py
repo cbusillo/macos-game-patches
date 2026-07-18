@@ -652,9 +652,18 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             CheckResult(
                 "artifact.verify",
                 "fail",
-                "Sealed runtime artifact verification failed",
+                "Runtime artifact verification failed",
                 "Replace the artifact with an exact verified build; do not bypass seal verification.",
                 {"path": str(artifact_path), **artifact_failure_details(error)},
+            )
+        )
+        checks.append(
+            CheckResult(
+                "artifact.stage",
+                "unknown",
+                "Artifact final-sealing stage could not be evaluated",
+                "Verify the artifact before evaluating Developer ID final-stage readiness.",
+                {"path": str(artifact_path)},
             )
         )
         checks.append(
@@ -672,16 +681,37 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             "id": metadata["artifact"]["id"],
             "version": metadata["artifact"]["version"],
             "sealId": metadata["sealId"],
+            "stage": metadata["stage"],
         }
         checks.append(
             CheckResult(
                 "artifact.verify",
                 "pass",
-                "Sealed runtime artifact is exact and immutable",
+                "Runtime artifact is exact and immutable",
                 "Replace the artifact with an exact verified build; do not bypass seal verification.",
                 artifact_summary,
             )
         )
+        if metadata["stage"] == "sealed":
+            checks.append(
+                CheckResult(
+                    "artifact.stage",
+                    "pass",
+                    "Developer ID final-stage artifact is verified",
+                    "Seal the immutable artifact before lifecycle use.",
+                    artifact_summary,
+                )
+            )
+        else:
+            checks.append(
+                CheckResult(
+                    "artifact.stage",
+                    "fail",
+                    "Artifact is immutable but still requires Developer ID final sealing",
+                    "Run the artifact seal command and use the resulting final content address.",
+                    artifact_summary,
+                )
+            )
         if metadata["manifestSha256"] == manifest_hash and metadata["lockSha256"] == lock_hash:
             checks.append(
                 CheckResult(
@@ -731,6 +761,65 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
                 {"path": str(context.bindings_path), "bindingCount": len(bindings)},
             )
         )
+
+    if metadata is None or bindings is None or metadata["stage"] != "sealed":
+        checks.append(
+            CheckResult(
+                "transaction.path_hardening",
+                "unknown",
+                "Live target-path hardening cannot be evaluated yet",
+                "Verify a final-stage artifact and valid plan bindings first.",
+            )
+        )
+    elif metadata["manifestSha256"] != manifest_hash or metadata["lockSha256"] != lock_hash:
+        checks.append(
+            CheckResult(
+                "transaction.path_hardening",
+                "unknown",
+                "Live target-path hardening cannot be evaluated for another contract",
+                "Use an artifact built from the checked-in manifest and lockfile.",
+            )
+        )
+    else:
+        try:
+            plan = artifact_contract.build_plan(
+                manifest,
+                artifact_path,
+                context.bindings_path,
+                expected_manifest_hash=manifest_hash,
+                expected_lock_hash=lock_hash,
+            )
+        except artifact_contract.ArtifactError as error:
+            checks.append(
+                CheckResult(
+                    "transaction.path_hardening",
+                    "fail",
+                    "Runtime ownership plan could not be resolved safely",
+                    "Fix the artifact or plan bindings before lifecycle use.",
+                    artifact_failure_details(error),
+                )
+            )
+        else:
+            if artifact_contract.plan_is_fixture_only(plan):
+                checks.append(
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "pass",
+                        "Resolved mutation authority is confined to the fixture root",
+                        "Keep fixture validation below the repository .code root.",
+                        {"fixtureRoot": plan["fixtureRoot"]},
+                    )
+                )
+            else:
+                checks.append(
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "fail",
+                        "Live target roots require descriptor-anchored mutation",
+                        "Complete issue #61 path hardening before mutating CrossOver, game, or user runtime paths.",
+                        {"allowedTargetRoots": plan["allowedTargetRoots"]},
+                    )
+                )
 
     for item in manifest["prerequisites"]:
         if item["kind"] == "command":
@@ -1226,7 +1315,12 @@ def resolve_context_paths(
     return manifest, bindings, paths
 
 
-def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -> dict[str, Any]:
+def verify_artifact_reference(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    *,
+    require_sealed: bool = False,
+) -> dict[str, Any]:
     _, _, manifest_hash, lock_hash = load_runtime_contract(context)
     artifact_path = pathlib.Path(os.path.abspath(artifact.expanduser()))
     try:
@@ -1234,7 +1328,7 @@ def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -
     except artifact_contract.ArtifactError as error:
         raise ControlError(
             "artifact.invalid",
-            "Runtime state references an invalid sealed artifact",
+            "Runtime state references an invalid runtime artifact",
             artifactError=artifact_failure_details(error),
             path=str(artifact_path),
         ) from error
@@ -1248,11 +1342,19 @@ def verify_artifact_reference(context: RuntimeContext, artifact: pathlib.Path) -
             expectedManifestSha256=manifest_hash,
             expectedLockSha256=lock_hash,
         )
+    if require_sealed and metadata["stage"] != "sealed":
+        raise ControlError(
+            "artifact.sealing_required",
+            "Runtime state artifact requires Developer ID final sealing",
+            path=str(artifact_path),
+            stage=metadata["stage"],
+        )
     return {
         "path": str(artifact_path),
         "id": metadata["artifact"]["id"],
         "version": metadata["artifact"]["version"],
         "sealId": metadata["sealId"],
+        "stage": metadata["stage"],
     }
 
 
@@ -1365,7 +1467,11 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
                 control_state,
             )
         try:
-            artifact_summary = verify_artifact_reference(context, pathlib.Path(record["artifactPath"]))
+            artifact_summary = verify_artifact_reference(
+                context,
+                pathlib.Path(record["artifactPath"]),
+                require_sealed=True,
+            )
         except ControlError as error:
             return failed_status(
                 error.code,
@@ -1385,7 +1491,11 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
             )
         if artifact is not None:
             try:
-                requested_artifact = verify_artifact_reference(context, artifact)
+                requested_artifact = verify_artifact_reference(
+                    context,
+                    artifact,
+                    require_sealed=True,
+                )
             except ControlError as error:
                 return failed_status(
                     error.code,
@@ -1454,7 +1564,8 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
     core_checks = {
         check.id: check.status
         for check in doctor.checks
-        if check.id in {"repository.contract", "artifact.verify", "artifact.contract"}
+        if check.id
+        in {"repository.contract", "artifact.verify", "artifact.stage", "artifact.contract"}
     }
     if any(
         core_checks.get(check_id) != "pass"
@@ -1463,6 +1574,30 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
         return failed_status(
             "artifact.invalid",
             "Requested runtime artifact is invalid or belongs to another contract",
+            service,
+            lock,
+            control_state,
+            doctor.checks,
+            doctor.artifact,
+        )
+    if core_checks.get("artifact.stage") != "pass":
+        return failed_status(
+            "artifact.sealing_required",
+            "Requested runtime artifact requires Developer ID final sealing",
+            service,
+            lock,
+            control_state,
+            doctor.checks,
+            doctor.artifact,
+        )
+    path_hardening = next(
+        (check for check in doctor.checks if check.id == "transaction.path_hardening"),
+        None,
+    )
+    if path_hardening is not None and path_hardening.status == "fail":
+        return failed_status(
+            "transaction.live_path_hardening_required",
+            "Requested runtime artifact is sealed but live target paths are not hardened",
             service,
             lock,
             control_state,
