@@ -102,3 +102,4 @@ Use this shape:
 - [013 - The Lab packaged-runtime qualification](013-the-lab-profile-qualification.md)
 - [014 - Runtime control plane foundation](014-runtime-control-plane-foundation.md)
 - [015 - Runtime transaction journal](015-runtime-transaction-journal.md)
+- [016 - Runtime install coordinator](016-runtime-install-coordinator.md)

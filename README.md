@@ -54,18 +54,28 @@ provenance, sealing boundary, and read-only install/uninstall plan contract.
 
 ## Runtime Transactions
 
-Issue #61 is converting that read-only plan into fail-closed filesystem
-transactions. The first slice is fixture-only: it validates every resolved
-action, writes a durable journal before mutation, rolls back in reverse order,
-and recovers interrupted work without touching production CrossOver or game
-paths:
+Issue #61 converts that read-only plan into fail-closed filesystem transactions.
+The dev6 coordinator now verifies planner-owned paths, serializes both
+directions through one lifecycle lock, archives terminal journals, checks free
+space and open targets, and recovers interrupted work before a retry. Its full
+install/uninstall cycle remains hardware-free and fenced below temporary roots:
 
 ```bash
+python3 tools/runtime_install_test.py
 python3 tools/runtime_transaction_test.py
 ```
 
-Production `install` and `uninstall` commands remain follow-up work after the
-journal and backup locations are declared in the next sealed artifact contract.
+Production-shaped commands are available:
+
+```bash
+python3 tools/runtime_cli.py install --artifact <artifact>
+python3 tools/runtime_cli.py uninstall --artifact <artifact>
+```
+
+The current dev6 contract still uses separate-step Developer ID signing, so
+both commands return `artifact.sealing_required` before any lifecycle mutation.
+Issue #62 must provide a verified post-sign tree identity before real
+CrossOver/game paths can be enabled.
 
 ## Runtime Control Plane
 

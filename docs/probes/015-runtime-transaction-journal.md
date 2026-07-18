@@ -107,7 +107,7 @@ or the user runtime state root.
 ## Expected Artifacts
 
 - reusable transaction module with no production CLI entrypoint;
-- 12 deterministic install, uninstall, rollback, recovery, path-safety,
+- 15 deterministic install, uninstall, rollback, recovery, path-safety,
   journal-integrity, and idempotence fixtures;
 - journal examples under ignored temporary paths during tests;
 - updated CI and repository validation metadata;
@@ -128,14 +128,17 @@ or the user runtime state root.
 
 ## Result
 
-The fixture implementation passes all 12 tests on macOS and Linux. It commits
+The fixture implementation passes all 15 tests on macOS and Linux. It commits
 every resolved action shape, restores byte-for-byte target snapshots after
 injected failures, recovers crashes at intent/mutation/applied and rolling-back
 boundaries, ignores volatile planner observations for committed replay, rejects
 semantic plan or kind drift, and validates every journal-owned cleanup/undo path
 before use. Committed file and tree effects are revalidated against persisted
-content digests before cleanup or idempotent replay succeeds, while non-marker
-source-tree changes produce semantic plan drift rather than silent reuse.
+content digests before cleanup or idempotent replay succeeds. Equivalent
+artifact relocation preserves plan identity through content hashes, changed
+source content still produces semantic drift, modified remove-tree rollback
+payloads fail closed, and an unchanged original file no longer needs a second
+write during rollback.
 
 The JSON journal is not an authentication boundary against an owner who can
 rewrite both the journal and target files. This slice detects structural drift,

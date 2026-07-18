@@ -16,7 +16,7 @@
     "description": "Unsigned deterministic payload for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev5"
+    "version": "1.0.0-dev6"
   },
   "artifacts": [
     {
@@ -206,12 +206,6 @@
       "name": "RUNTIME_STATE_ROOT",
       "phases": ["plan"],
       "required": true
-    },
-    {
-      "default": "${REPO_ROOT}/.code/runtime-backups/plan",
-      "name": "BACKUP_ROOT",
-      "phases": ["plan"],
-      "required": true
     }
   ],
   "generatedFiles": [
@@ -359,7 +353,7 @@
     },
     {
       "action": "backup",
-      "backup": "${BACKUP_ROOT}/libMoltenVK.dylib",
+      "backup": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/crossover_moltenvk-5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056.dylib",
       "id": "backup_stock_moltenvk",
       "resource": "crossover_moltenvk",
       "target": "${CROSSOVER_APP}/Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
@@ -381,7 +375,7 @@
     },
     {
       "action": "backup",
-      "backup": "${BACKUP_ROOT}/openvr_api.dll",
+      "backup": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/game_openvr-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c.dll",
       "id": "backup_stock_openvr",
       "resource": "game_openvr",
       "target": "${FREEDOM_OPENVR_DIR}/openvr_api.dll"
@@ -512,13 +506,13 @@
       "action": "retain",
       "id": "retain_stock_moltenvk_backup",
       "resource": "crossover_moltenvk",
-      "target": "${BACKUP_ROOT}/libMoltenVK.dylib"
+      "target": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/crossover_moltenvk-5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056.dylib"
     },
     {
       "action": "retain",
       "id": "retain_stock_openvr_backup",
       "resource": "game_openvr",
-      "target": "${BACKUP_ROOT}/openvr_api.dll"
+      "target": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/game_openvr-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c.dll"
     },
     {
       "action": "retain",
@@ -551,7 +545,7 @@
       "id": "backup_root",
       "kind": "directory",
       "lifecycle": "retained",
-      "location": "${BACKUP_ROOT}",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups",
       "owner": "runtime"
     },
     {
@@ -559,6 +553,27 @@
       "kind": "directory",
       "lifecycle": "retained",
       "location": "${NATIVE_BRIDGE_BUNDLE}",
+      "owner": "runtime"
+    },
+    {
+      "id": "bridge_bundle_root",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${REPO_ROOT}/.code/state/alvr-macos-bridge",
+      "owner": "runtime"
+    },
+    {
+      "id": "crossover_moltenvk_backup",
+      "kind": "file",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/crossover_moltenvk-5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056.dylib",
+      "owner": "runtime"
+    },
+    {
+      "id": "game_openvr_backup",
+      "kind": "file",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/game_openvr-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c.dll",
       "owner": "runtime"
     },
     {
@@ -583,6 +598,13 @@
       "owner": "runtime"
     },
     {
+      "id": "lifecycle_root",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime",
+      "owner": "runtime"
+    },
+    {
       "id": "mach_service",
       "kind": "mach-service",
       "lifecycle": "transient",
@@ -601,6 +623,48 @@
       "kind": "directory",
       "lifecycle": "transient",
       "location": "${RUNTIME_STATE_ROOT}",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_history",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/transactions/history",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_journal",
+      "kind": "file",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/transactions/transaction.json",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_journal_lock",
+      "kind": "file",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/transactions/transaction.json.lock",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_lock",
+      "kind": "file",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/runtime.lock",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_root",
+      "kind": "directory",
+      "lifecycle": "retained",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/transactions",
+      "owner": "runtime"
+    },
+    {
+      "id": "transaction_undo",
+      "kind": "directory",
+      "lifecycle": "transient",
+      "location": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/transactions/transaction.json.undo",
       "owner": "runtime"
     },
     {
@@ -779,13 +843,37 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "af643c9944dafc26d22a2308c7dbda9a1519950b3b5d0f5b85b35648968e9a0f",
+      "sha256": "1574b4527041eaaffb9332b226ba1e1db7f58e39e889362e8cd8f701ad34236f",
       "supplyClass": "repo-source"
     },
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "5ac3115d6a1c45e77d361f03d8d92e7afbf560b5880a3ead7438bf8d9904569b",
+      "sha256": "f7ed386894d11bf61ceb6c3fdfca069f847e0e4a7cb57313c5e3a8472d759787",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_transaction",
+      "path": "${REPO_ROOT}/tools/runtime_transaction.py",
+      "sha256": "f122b5e36a3b0ce1e2fc34fd7ea529f325b30b7c1b03a0f0407e7a712043f0a5",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_install",
+      "path": "${REPO_ROOT}/tools/runtime_install.py",
+      "sha256": "f1fad6c5cef5942385133c2e0f5a442c3294b2d436553f0c77f2a0c6667deffc",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_control",
+      "path": "${REPO_ROOT}/tools/runtime_control.py",
+      "sha256": "bbbd215e7acf2535942d19dcbbe6e017b6359c58f0b21cff67fc2f5c27ff1907",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_cli",
+      "path": "${REPO_ROOT}/tools/runtime_cli.py",
+      "sha256": "98f2474c7746fc775ec7d0ecdac2cc2d034b5364526a980cb55590fd3170e917",
       "supplyClass": "repo-source"
     },
     {
@@ -805,7 +893,7 @@
     {
       "action": "restore",
       "atomic": true,
-      "backup": "${BACKUP_ROOT}/libMoltenVK.dylib",
+      "backup": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/crossover_moltenvk-5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056.dylib",
       "expectedSha256": "5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056",
       "id": "restore_stock_moltenvk",
       "resource": "crossover_moltenvk",
@@ -815,7 +903,7 @@
     {
       "action": "restore",
       "atomic": true,
-      "backup": "${BACKUP_ROOT}/openvr_api.dll",
+      "backup": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/game_openvr-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c.dll",
       "expectedSha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c",
       "id": "restore_stock_openvr",
       "resource": "game_openvr",
@@ -883,13 +971,13 @@
       "action": "retain",
       "id": "retain_stock_moltenvk_backup_after_restore",
       "resource": "crossover_moltenvk",
-      "target": "${BACKUP_ROOT}/libMoltenVK.dylib"
+      "target": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/crossover_moltenvk-5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056.dylib"
     },
     {
       "action": "retain",
       "id": "retain_stock_openvr_backup_after_restore",
       "resource": "game_openvr",
-      "target": "${BACKUP_ROOT}/openvr_api.dll"
+      "target": "${HOME}/Library/Application Support/alvr/runtime-state/mac-alvr-runtime/backups/game_openvr-d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c.dll"
     },
     {
       "action": "retain",

@@ -57,7 +57,9 @@ jobs:
             tools/runtime_cli.py \
             tools/runtime_control_test.py \
             tools/runtime_transaction.py \
-            tools/runtime_transaction_test.py
+            tools/runtime_transaction_test.py \
+            tools/runtime_install.py \
+            tools/runtime_install_test.py
 
       - name: Validate runtime profiles
         run: |
@@ -71,6 +73,9 @@ jobs:
 
       - name: Validate runtime transactions
         run: python3 tools/runtime_transaction_test.py
+
+      - name: Validate runtime lifecycle coordination
+        run: python3 tools/runtime_install_test.py
 
       - name: Validate runtime artifact contract
         run: |
@@ -91,3 +96,28 @@ jobs:
 
       - name: Secret scan tracked files
         run: gitleaks detect --source . --no-git --redact --verbose
+
+  runtime-lifecycle-macos:
+    name: Runtime Lifecycle (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compile lifecycle tools
+        run: |
+          python3 -m py_compile \
+            tools/build_runtime_artifact.py \
+            tools/runtime_control.py \
+            tools/runtime_cli.py \
+            tools/runtime_transaction.py \
+            tools/runtime_install.py \
+            tools/runtime_control_test.py \
+            tools/runtime_transaction_test.py \
+            tools/runtime_install_test.py
+
+      - name: Validate lifecycle fixtures
+        run: |
+          python3 tools/runtime_control_test.py
+          python3 tools/runtime_transaction_test.py
+          python3 tools/runtime_install_test.py

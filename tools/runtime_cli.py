@@ -1,4 +1,4 @@
-"""Diagnose, inspect, and stop the Mac ALVR runtime."""
+"""Diagnose, inspect, install, uninstall, and stop the Mac ALVR runtime."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from runtime_control import (
     status_runtime,
     stop_runtime,
 )
+from runtime_install import MutationReport, install_runtime, uninstall_runtime
 
 
 _JSON_ERRORS = False
@@ -69,6 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop_parser = subparsers.add_parser("stop", help="idempotently remove exact owned runtime state")
     add_common_arguments(stop_parser)
+
+    install_parser = subparsers.add_parser(
+        "install",
+        help="transactionally install a verified runtime artifact",
+    )
+    add_common_arguments(install_parser)
+    install_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="runtime artifact")
+
+    uninstall_parser = subparsers.add_parser(
+        "uninstall",
+        help="transactionally restore and remove a verified runtime artifact",
+    )
+    add_common_arguments(uninstall_parser)
+    uninstall_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="runtime artifact")
     return parser
 
 
@@ -122,7 +137,41 @@ def render_stop(report: StopReport) -> str:
     return "\n".join(lines)
 
 
-def emit(value: dict[str, Any], *, as_json: bool, text: str, stream: Any = sys.stdout) -> None:
+def render_mutation(report: MutationReport) -> str:
+    lines = [
+        f"state={report.state}",
+        f"reason={report.reason_code}",
+        f"message={report.message}",
+    ]
+    if report.artifact is not None:
+        if report.artifact.get("sealId"):
+            lines.append(f"artifact_seal={report.artifact['sealId']}")
+        if report.artifact.get("path"):
+            lines.append(f"artifact_path={report.artifact['path']}")
+    if report.transaction_id:
+        lines.append(f"transaction_id={report.transaction_id}")
+    if report.plan_digest:
+        lines.append(f"plan_digest={report.plan_digest}")
+    if report.journal:
+        lines.append(f"journal={report.journal}")
+    if report.archived_journal:
+        lines.append(f"archived_journal={report.archived_journal}")
+    for blocker in report.blockers:
+        lines.append(f"blocker={blocker.get('id')}: {blocker.get('reason')}")
+    for action in report.stop_actions:
+        lines.append(f"stop_action={action}")
+    for operation in report.applied:
+        lines.append(f"applied={operation}")
+    for operation in report.rolled_back:
+        lines.append(f"rolled_back={operation}")
+    for failure in report.cleanup_failures:
+        lines.append(f"cleanup_failure={failure}")
+    return "\n".join(lines)
+
+
+def emit(value: dict[str, Any], *, as_json: bool, text: str, stream: Any = None) -> None:
+    if stream is None:
+        stream = sys.stdout
     if as_json:
         print(json.dumps(value, indent=2, sort_keys=True), file=stream)
     else:
@@ -165,6 +214,22 @@ def main(argv: list[str] | None = None) -> int:
                 text=render_status(status_report),
             )
             return 0 if status_report.ok else 1
+        if arguments.command == "install":
+            install_report = install_runtime(context, arguments.artifact)
+            emit(
+                install_report.to_dict(),
+                as_json=arguments.json,
+                text=render_mutation(install_report),
+            )
+            return 0 if install_report.ok else 1
+        if arguments.command == "uninstall":
+            uninstall_report = uninstall_runtime(context, arguments.artifact)
+            emit(
+                uninstall_report.to_dict(),
+                as_json=arguments.json,
+                text=render_mutation(uninstall_report),
+            )
+            return 0 if uninstall_report.ok else 1
         stop_report = stop_runtime(context)
         emit(stop_report.to_dict(), as_json=arguments.json, text=render_stop(stop_report))
         return 0 if stop_report.ok else 1
