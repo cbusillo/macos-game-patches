@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import tempfile
 import unittest
 from collections.abc import Iterator
@@ -1512,6 +1513,69 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "transaction.rolled_back")
             self.assertEqual(snapshot_tree(target_tree), prior_snapshot)
             self.assertFalse(tail_target.exists())
+
+    def test_developer_id_exchange_cleans_read_only_prior_tree(self) -> None:
+        for interrupt_cleanup in (False, True):
+            with self.subTest(interrupt_cleanup=interrupt_cleanup), fixture_layout() as fixture:
+                operations, target_tree, _ = fixture.prepare_managed_tree_replace()
+                source_tree = pathlib.Path(operations[1]["source"])
+                for tree in (source_tree, target_tree):
+                    for path in tree.rglob("*"):
+                        if path.is_file():
+                            path.chmod(0o444)
+                    for path in sorted(
+                        (item for item in tree.rglob("*") if item.is_dir()),
+                        key=lambda item: len(item.parts),
+                        reverse=True,
+                    ):
+                        path.chmod(0o555)
+                    tree.chmod(0o555)
+                source_tree_sha256 = artifact_contract.canonical_tree_sha256(source_tree)
+                target_tree_sha256 = artifact_contract.canonical_tree_sha256(target_tree)
+                operations[0]["sourceTreeSha256"] = source_tree_sha256
+                operations[0]["qualifiedTargetTreeSha256"] = target_tree_sha256
+                operations[1]["sourceTreeSha256"] = source_tree_sha256
+                validator = lambda _path, _operation: {"kind": "developer-id"}
+
+                if interrupt_cleanup:
+                    real_unlink = runtime_transaction.runtime_descriptor.os.unlink
+                    crashed = False
+
+                    def unlink_then_crash(path: Any, *args: Any, **kwargs: Any) -> None:
+                        nonlocal crashed
+                        real_unlink(path, *args, **kwargs)
+                        if not crashed and path == "data.bin" and kwargs.get("dir_fd") is not None:
+                            crashed = True
+                            raise SimulatedCrash("read-only recursive cleanup")
+
+                    with mock.patch.object(
+                        runtime_transaction.runtime_descriptor.os,
+                        "unlink",
+                        side_effect=unlink_then_crash,
+                    ), self.assertRaises(SimulatedCrash):
+                        fixture.executor(
+                            "install",
+                            operations,
+                            tree_ownership_validator=validator,
+                        ).execute()
+                    interrupted = json.loads(fixture.journal_path.read_text())
+                    original = pathlib.Path(next(iter(interrupted["cleanupInProgress"])))
+                    quarantine = runtime_transaction.TransactionExecutor._cleanup_quarantine(
+                        original
+                    )
+                    self.assertEqual(stat.S_IMODE(quarantine.stat().st_mode), 0o755)
+
+                report = fixture.executor(
+                    "install",
+                    operations,
+                    tree_ownership_validator=validator,
+                ).execute()
+                self.assertTrue(report.ok)
+                self.assertEqual(
+                    artifact_contract.canonical_tree_sha256(target_tree),
+                    source_tree_sha256,
+                )
+                self.assertFalse(fixture.transaction_temporary_paths())
 
     def test_developer_id_exchange_crashes_keep_the_stable_target_present(self) -> None:
         with fixture_layout() as fixture:

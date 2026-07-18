@@ -859,13 +859,13 @@
     {
       "id": "runtime_descriptor",
       "path": "${REPO_ROOT}/tools/runtime_descriptor.py",
-      "sha256": "b9d4f753ea1ffe49d617067ceec05c9d0e697bc581941ef8f014b92991141fed",
+      "sha256": "c3370a8ec0b10b83079bcaeeea0709204f3b1b3406d306e2ffc2d7842a4c6b3b",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_transaction",
       "path": "${REPO_ROOT}/tools/runtime_transaction.py",
-      "sha256": "2bcd6251faae7bb1bd809db1c3ebfa02f6fb9afc75318f7524eed82a8d6192d1",
+      "sha256": "2cfd1b9e1c5d4d6ee289758db18da3cd67c65c15663ef00fe54ecbbad6e850f9",
       "supplyClass": "repo-source"
     },
     {
