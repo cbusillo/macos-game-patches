@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import pathlib
 import shutil
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
+import runtime_descriptor
 import runtime_transaction
 from runtime_control import (
     ControlError,
@@ -129,6 +131,10 @@ def _artifact_error(error: artifact_contract.ArtifactError) -> RuntimeInstallErr
     return RuntimeInstallError(error.code, error.message, **error.context)
 
 
+def _descriptor_error(error: runtime_descriptor.DescriptorError) -> RuntimeInstallError:
+    return RuntimeInstallError(error.code, error.message, **error.context)
+
+
 def _ensure_allowed(
     path: pathlib.Path,
     allowed_roots: Sequence[pathlib.Path],
@@ -141,7 +147,12 @@ def _ensure_allowed(
 
 
 def _validate_private_directory(path: pathlib.Path) -> None:
-    metadata = path.lstat()
+    try:
+        with runtime_descriptor.DescriptorSession([path]) as session:
+            metadata = session.bind(path).lstat()
+    except runtime_descriptor.DescriptorError as error:
+        raise _descriptor_error(error) from error
+    assert metadata is not None
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise RuntimeInstallError(
             "transaction.path_unsafe",
@@ -173,45 +184,37 @@ def ensure_private_directory(
 ) -> None:
     path = _absolute(path)
     _ensure_allowed(path, allowed_roots, operation)
-    try:
-        artifact_contract.reject_symlink_components(path, include_leaf=False)
-    except artifact_contract.ArtifactError as error:
-        raise _artifact_error(error) from error
-    if path.exists():
-        _validate_private_directory(path)
-        return
-    missing: list[pathlib.Path] = []
-    cursor = path
-    while not cursor.exists():
-        missing.append(cursor)
-        if cursor.parent == cursor:
-            raise RuntimeInstallError(
-                "transaction.path_unsafe",
-                "Runtime-owned directory has no existing ancestor",
-                path=str(path),
-            )
-        cursor = cursor.parent
-    try:
-        artifact_contract.reject_symlink_components(cursor)
-    except artifact_contract.ArtifactError as error:
-        raise _artifact_error(error) from error
-    if not cursor.is_dir():
+    roots = [_absolute(root) for root in allowed_roots]
+    candidates = [root for root in roots if path == root or path.is_relative_to(root)]
+    if not candidates:
         raise RuntimeInstallError(
-            "transaction.parent_missing",
-            "Runtime-owned directory ancestor is not a directory",
-            path=str(cursor),
+            "transaction.path_unsafe",
+            "Runtime-owned directory is outside its allowed roots",
+            path=str(path),
         )
-    for directory in reversed(missing):
-        try:
-            os.mkdir(directory, 0o700)
-            runtime_transaction.fsync_directory(directory.parent)
-        except FileExistsError:
-            pass
-        _validate_private_directory(directory)
+    authority = max(candidates, key=lambda item: len(item.parts))
+    try:
+        runtime_descriptor.ensure_private_directory(
+            path,
+            authority,
+            owner_uid=os.getuid(),
+        )
+    except runtime_descriptor.DescriptorError as error:
+        raise _descriptor_error(error) from error
 
 
 def _validate_private_file(path: pathlib.Path, mode: int) -> None:
-    metadata = path.lstat()
+    try:
+        with runtime_descriptor.DescriptorSession([path.parent]) as session:
+            metadata = session.bind(path).lstat()
+    except runtime_descriptor.DescriptorError as error:
+        raise _descriptor_error(error) from error
+    if metadata is None:
+        raise RuntimeInstallError(
+            "transaction.path_unsafe",
+            "Runtime-owned metadata file is missing",
+            path=str(path),
+        )
     if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise RuntimeInstallError(
             "transaction.path_unsafe",
@@ -243,52 +246,44 @@ def _global_lifecycle_lock(
 ) -> Iterator[None]:
     _ensure_allowed(lock_path, allowed_roots, "transaction_lock")
     try:
-        artifact_contract.reject_symlink_components(lock_path, include_leaf=False)
-    except artifact_contract.ArtifactError as error:
-        raise _artifact_error(error) from error
-    existed = lock_path.exists()
-    flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(lock_path, flags, 0o600)
-    except OSError as error:
-        raise RuntimeInstallError(
-            "transaction.lock_failed",
-            "Global lifecycle lock could not be opened",
-            path=str(lock_path),
-            error=str(error),
-        ) from error
-    with os.fdopen(descriptor, "r+") as stream:
-        metadata = os.fstat(stream.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise RuntimeInstallError(
-                "transaction.lock_unsafe",
-                "Global lifecycle lock has unsafe ownership or type",
-                path=str(lock_path),
-            )
-        mode = stat.S_IMODE(metadata.st_mode)
-        if mode != 0o600:
-            raise RuntimeInstallError(
-                "transaction.mode_unsafe",
-                "Global lifecycle lock must use mode 0600",
-                path=str(lock_path),
-                mode=f"{mode:04o}",
-            )
-        if not existed:
-            runtime_transaction.fsync_directory(lock_path.parent)
-        try:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RuntimeInstallError(
-                "transaction.busy",
-                "Another runtime lifecycle command owns the global lock",
-                path=str(lock_path),
-            ) from error
-        try:
-            yield
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        with runtime_descriptor.DescriptorSession([lock_path.parent]) as session:
+            bound = session.bind(lock_path)
+            existed = bound.exists()
+            descriptor, _ = bound.open_read_write_create(0o600)
+            if not existed:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                bound.fsync_parent()
+            with os.fdopen(descriptor, "r+") as stream:
+                metadata = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    raise RuntimeInstallError(
+                        "transaction.lock_unsafe",
+                        "Global lifecycle lock has unsafe ownership or type",
+                        path=str(lock_path),
+                    )
+                mode = stat.S_IMODE(metadata.st_mode)
+                if mode != 0o600:
+                    raise RuntimeInstallError(
+                        "transaction.mode_unsafe",
+                        "Global lifecycle lock must use mode 0600",
+                        path=str(lock_path),
+                        mode=f"{mode:04o}",
+                    )
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise RuntimeInstallError(
+                        "transaction.busy",
+                        "Another runtime lifecycle command owns the global lock",
+                        path=str(lock_path),
+                    ) from error
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except runtime_descriptor.DescriptorError as error:
+        raise _descriptor_error(error) from error
 
 
 def _mutable_state_index(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -433,20 +428,28 @@ def _executor(
 
 
 def _read_active_journal(paths: LifecyclePaths) -> dict[str, Any] | None:
-    if not paths.journal.exists():
-        return None
     try:
-        artifact_contract.reject_symlink_components(paths.journal)
-    except artifact_contract.ArtifactError as error:
-        raise _artifact_error(error) from error
+        with runtime_descriptor.DescriptorSession([paths.transaction_root]) as session:
+            journal = session.bind(paths.journal)
+            if not journal.exists():
+                return None
+            payload = journal.read_bytes()
+    except runtime_descriptor.DescriptorError as error:
+        if error.code in {"transaction.parent_missing", "transaction.root_missing"}:
+            return None
+        raise _descriptor_error(error) from error
     _validate_private_file(paths.journal, 0o600)
     try:
-        value = artifact_contract.load_json(paths.journal)
-    except artifact_contract.ArtifactError as error:
+        value = json.loads(
+            payload,
+            object_pairs_hook=artifact_contract.reject_duplicate_keys,
+            parse_constant=artifact_contract.reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, artifact_contract.ArtifactError) as error:
         raise RuntimeInstallError(
             "transaction.journal_invalid",
             "Active lifecycle journal is not valid JSON",
-            artifactError={"code": error.code, **error.context},
+            detail=str(error),
         ) from error
     if not isinstance(value, dict):
         raise RuntimeInstallError(
@@ -1078,17 +1081,6 @@ def _mutate_runtime(
                 reason_code="artifact.sealing_required",
                 message=(
                     "The runtime artifact requires a verified post-sign tree before lifecycle mutation"
-                ),
-                artifact=artifact,
-            )
-        if not artifact_contract.plan_is_fixture_only(admission_plan):
-            return MutationReport(
-                command=command,
-                ok=False,
-                state="blocked",
-                reason_code="transaction.live_path_hardening_required",
-                message=(
-                    "Verified sealed artifacts remain fixture-only until descriptor-anchored target mutation is implemented"
                 ),
                 artifact=artifact,
             )

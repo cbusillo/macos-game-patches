@@ -104,3 +104,4 @@ Use this shape:
 - [015 - Runtime transaction journal](015-runtime-transaction-journal.md)
 - [016 - Runtime install coordinator](016-runtime-install-coordinator.md)
 - [017 - Runtime artifact sealing](017-runtime-artifact-sealing.md)
+- [018 - Runtime descriptor path hardening](018-runtime-descriptor-path-hardening.md)

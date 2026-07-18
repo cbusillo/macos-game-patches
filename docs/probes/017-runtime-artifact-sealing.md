@@ -82,8 +82,6 @@ must still exercise canonical provenance, path safety, and lifecycle gating.
 ## Known Failure Signatures
 
 - unsealed artifact: `artifact.sealing_required`;
-- sealed artifact with non-fixture target authority:
-  `transaction.live_path_hardening_required`;
 - unavailable or ambiguous identity: `sealing.identity`;
 - failed signature verification or identity mismatch: `sealing.signature`;
 - changed source artifact: `sealing.source_mismatch`;
@@ -134,8 +132,8 @@ normalized away, while stable code identity remains independently visible.
 
 ## Next Action
 
-Resume #61's live-enable remainder with descriptor-anchored target mutation,
-then run the sealed artifact through three install/uninstall exact-restoration
-cycles. In parallel, continue #62's stable bundle URL, Launch Services, Local
-Network consent, reboot, and logout/login qualification. Only after both paths
-pass should #60's bounded `start` supervisor consume the installed layout.
+Probe 018 now provides descriptor-anchored no-follow target mutation. Run the
+sealed artifact through three install/uninstall exact-restoration cycles. In
+parallel, continue #62's stable bundle URL, Launch Services, Local Network
+consent, reboot, and logout/login qualification. Only after both paths pass
+should #60's bounded `start` supervisor consume the installed layout.

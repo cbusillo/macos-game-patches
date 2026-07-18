@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Protocol, Sequence
 
 import build_runtime_artifact as artifact_contract
+import runtime_descriptor
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -800,24 +801,34 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
                 )
             )
         else:
-            if artifact_contract.plan_is_fixture_only(plan):
+            fixture_only = artifact_contract.plan_is_fixture_only(plan)
+            try:
+                authority_probes = [
+                    runtime_descriptor.probe_authority_root(pathlib.Path(root))
+                    for root in plan["allowedTargetRoots"]
+                ]
+            except runtime_descriptor.DescriptorError as error:
                 checks.append(
                     CheckResult(
                         "transaction.path_hardening",
-                        "pass",
-                        "Resolved mutation authority is confined to the fixture root",
-                        "Keep fixture validation below the repository .code root.",
-                        {"fixtureRoot": plan["fixtureRoot"]},
+                        "fail",
+                        "A declared mutation root cannot be opened safely by descriptors",
+                        "Remove symlinks or unsupported path components before lifecycle use.",
+                        {"code": error.code, **error.context},
                     )
                 )
             else:
                 checks.append(
                     CheckResult(
                         "transaction.path_hardening",
-                        "fail",
-                        "Live target roots require descriptor-anchored mutation",
-                        "Complete issue #61 path hardening before mutating CrossOver, game, or user runtime paths.",
-                        {"allowedTargetRoots": plan["allowedTargetRoots"]},
+                        "pass",
+                        "Declared mutation roots pass the no-follow descriptor capability probe",
+                        "Keep every lifecycle target inside the manifest's declared authority roots.",
+                        {
+                            "allowedTargetRoots": plan["allowedTargetRoots"],
+                            "authorityProbes": authority_probes,
+                            "fixtureOnly": fixture_only,
+                        },
                     )
                 )
 
@@ -1584,20 +1595,6 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
         return failed_status(
             "artifact.sealing_required",
             "Requested runtime artifact requires Developer ID final sealing",
-            service,
-            lock,
-            control_state,
-            doctor.checks,
-            doctor.artifact,
-        )
-    path_hardening = next(
-        (check for check in doctor.checks if check.id == "transaction.path_hardening"),
-        None,
-    )
-    if path_hardening is not None and path_hardening.status == "fail":
-        return failed_status(
-            "transaction.live_path_hardening_required",
-            "Requested runtime artifact is sealed but live target paths are not hardened",
             service,
             lock,
             control_state,

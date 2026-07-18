@@ -297,11 +297,16 @@ Both lifecycle commands return `artifact.sealing_required` before creating
 directories, stopping services, writing journals, or changing targets when the
 verified artifact stage is `unsealed`. A verified `sealed` artifact carries its
 exact post-sign bundle tree into the transaction plan. Non-fixture target roots
-still return `transaction.live_path_hardening_required` before lifecycle lock
-creation, service stop, journal write, or target mutation. Descriptor-anchored
-mutation and physical qualification remain explicit gates before user-path
-enablement. `doctor` and stopped `status` surface the same blocker rather than
-reporting the sealed artifact as ready.
+now use no-follow root/parent descriptors, journaled parent identity, exact
+descriptor hashing, and exclusive sibling staging/original/rollback moves.
+`doctor` reports that transaction boundary as passing after the sealed plan
+resolves. The coordinator quiesces owned runtime state and rejects open targets
+before mutation; descriptor hardening fails closed on observable drift but is
+not an authentication boundary against an intentionally hostile same-UID owner
+rewriting the journal or racing the final POSIX unlink. Physical qualification
+remains explicit: do not use the installed
+layout for game launch until three real install/uninstall cycles restore exact
+CrossOver, game, runtime, lock, service, and journal state.
 
 ### Verify And Compare
 
@@ -371,10 +376,11 @@ classes include:
 - `sealing.identity`, `sealing.signature`, and `sealing.source_mismatch`;
 - `artifact.publish`, `artifact.verify`, and `artifact.compare`;
 - `plan.unresolved` for incomplete or unsafe dry-run plans; and
-- `artifact.sealing_required`, `transaction.busy`, `transaction.retry_required`,
-  `transaction.live_path_hardening_required`, `plan.blocked`,
-  `runtime.target_busy`, and `capacity.insufficient` for lifecycle admission
-  failures; and
+- `artifact.sealing_required`, `transaction.descriptor_unsupported`,
+  `transaction.path_identity_changed`, `transaction.target_changed`,
+  `transaction.busy`, `transaction.retry_required`, `plan.blocked`,
+  `runtime.target_busy`, and `capacity.insufficient` for lifecycle admission or
+  descriptor-transaction failures; and
 - `internal.error` for unexpected failures that are still returned as JSON.
 
 There is no continue-anyway override for integrity, identity, architecture, or
