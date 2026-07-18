@@ -52,12 +52,20 @@ jobs:
             tools/vr_stack_cleanup.py \
             tools/launch_freedom_crossover.py \
             tools/build_runtime_artifact.py \
-            tools/runtime_profile.py
+            tools/runtime_profile.py \
+            tools/runtime_control.py \
+            tools/runtime_cli.py \
+            tools/runtime_control_test.py
 
       - name: Validate runtime profiles
         run: |
           python3 tools/runtime_profile.py check
           python3 tools/runtime_profile.py self-test
+
+      - name: Validate runtime control plane
+        run: |
+          python3 tools/runtime_control_test.py
+          python3 tools/runtime_cli.py --help
 
       - name: Validate runtime artifact contract
         run: |

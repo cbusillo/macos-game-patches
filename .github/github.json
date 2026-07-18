@@ -7,6 +7,7 @@
   },
   "runtimeAssumptions": {
     "runtimeV1Boundary": "The first release is a single-machine, single-signing-identity, owner-operated CLI runtime for curated unmodified OpenVR/D3D11 games. It uses user-owned CrossOver, Steam, games, Apple tooling, and hardware; manually authored profiles; manual Vision Pro client launch; and the custom fake_openvr_real/openvr_submit_shim runtime rather than the real SteamVR compositor. Public distribution, OpenXR-only titles, direct Vulkan capture, other controllers, and automatic profile discovery are out of scope.",
+    "controlPlaneFoundation": "The first issue #60 slice provides artifact-aware doctor, synchronized live status, and idempotent exact-owned stop commands. It preserves the launchd/Mach data plane, never trusts cached PIDs as stop targets, does not silently self-heal from doctor, and leaves start, Vision Pro waiting/connection transitions, game-process ownership, and bounded recovery for follow-up slices.",
     "secondTitleGeneralityGate": "The Lab build 7242747 now produces visible eye imagery through the packaged D3D11/OpenVR path. Exact IVRInput_007 support removes the black submitted-resource blocker, and same-texture eye bounds now propagate into border-clamped Vulkan blits. Two consecutive post-merge runs of the sealed dev5 artifact passed 5,400 disconnected frames with visible-content validation at 89.817 and 90.006 FPS steady tails, zero producer/native drops, and zero pose gaps. Separately, an earlier source-backed physical candidate was user-confirmed clear. The gate remains open until PS VR2 Sense gameplay and at least 89.5 FPS physical steady-tail cadence pass together; direct Vulkan capture, a real SteamVR compositor, game binary changes, maintained game forks, and anti-cheat bypasses remain hard cut lines.",
     "gameplayControllers": "PS VR2 Sense controllers paired directly to Apple Vision Pro with visionOS 26-or-newer accessory tracking and the ALVR PSVR2Sense profile; the qualified device runs visionOS 27.0 beta",
     "freedomSourceGeometry": "Freedom can switch its submitted side-by-side texture from 3240x1800 to 2808x1560 at level load; the native IOSurface pool remains fixed at 3240x1800 and the focused gate expects that transition explicitly",
@@ -30,6 +31,7 @@
     "runtimeArtifactManifest": "runtime/manifest.json",
     "runtimeArtifactLock": "runtime/manifest.lock.json",
     "runtimeArtifactBindings": "runtime/bindings.example.json",
+    "runtimeControlPlaneFoundation": "docs/probes/014-runtime-control-plane-foundation.md",
     "activeRuntimePlan": "GitHub issue #56: Plan: Reproducible Mac ALVR Runtime",
     "historicalAlvrPlan": "GitHub issue #36: Plan: GPU-resident Mac ALVR bridge",
     "historicalTextureHandoffPlan": "GitHub issue #53: Plan: Production DXVK IOSurface handoff pool",
@@ -45,6 +47,8 @@
     "freedomLocalWindowRegression": "docs/probes/010-freedom-local-window-regression.md",
     "openBrushControllerSmoke": "docs/probes/011-open-brush-controller-smoke.md",
     "steamVrTutorialUnityPerformanceControl": "docs/probes/012-steamvr-tutorial-unity-performance-control.md",
+    "theLabProfileQualification": "docs/probes/013-the-lab-profile-qualification.md",
+    "runtimeControlPlaneProbe": "docs/probes/014-runtime-control-plane-foundation.md",
     "crossoverDxvkPatches": "patches/crossover-dxvk/README.md",
     "crossoverMoltenVkPatches": "patches/crossover-moltenvk/README.md",
     "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
@@ -56,7 +60,7 @@
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py tools/runtime_control.py tools/runtime_cli.py tools/runtime_control_test.py",
       "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
@@ -78,6 +82,13 @@
       "fixtures": "python3 tools/runtime_profile.py self-test",
       "preflight": "python3 tools/runtime_profile.py preflight --profile <profile> --artifact <artifact> --mode smoke",
       "probe": "python3 tools/runtime_profile.py probe --profile <profile> --artifact <artifact> --mode <smoke|disconnected|physical>"
+    },
+    "runtimeControl": {
+      "fixtures": "python3 tools/runtime_control_test.py",
+      "help": "python3 tools/runtime_cli.py --help",
+      "doctor": "python3 tools/runtime_cli.py doctor --artifact <artifact> [--json]",
+      "status": "python3 tools/runtime_cli.py status [--artifact <artifact>] [--json]",
+      "stop": "python3 tools/runtime_cli.py stop [--json]"
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
@@ -122,7 +133,8 @@
     "2026-07-18: issue #67 visible-eye correction passed a 5,400-frame disconnected The Lab run at a 90.006 FPS steady tail with zero producer/native drops, zero pose-generation gaps, eventual visible content, and exact cleanup; a physical run was user-confirmed clear",
     "2026-07-18: issue #67 remains open because the transport-only 16,200-frame physical run used fallback tracking and ended at an 89.414 FPS tail, so PS VR2 Sense gameplay and physical cadence still require one combined acceptance run",
     "2026-07-18: post-review hardening passed the cropped RGBA corner startup test and 1,800 visible disconnected frames with zero drops, zero pose gaps, and exact cleanup; its 84.202 FPS tail is correctness evidence only",
-    "2026-07-18: sealed dev5 post-merge qualification preserved one 79.521 FPS cadence miss, rejected lower-resolution, no-MSAA, and reduced-logging variants as unstable, then passed two consecutive unchanged 5,400-frame runs at 89.817 and 90.006 FPS tails with visible content, zero producer/native drops, zero pose gaps, no post-close submissions, and exact cleanup"
+    "2026-07-18: sealed dev5 post-merge qualification preserved one 79.521 FPS cadence miss, rejected lower-resolution, no-MSAA, and reduced-logging variants as unstable, then passed two consecutive unchanged 5,400-frame runs at 89.817 and 90.006 FPS tails with visible content, zero producer/native drops, zero pose gaps, no post-close submissions, and exact cleanup",
+    "2026-07-18: issue #60 control-plane foundation passed 21 macOS and Linux fixtures, Python compile, artifact/profile checks and self-tests, JSON validation, actionlint, markdownlint, sealed dev5 doctor with 16 passing checks, ready status, two idempotent stop runs, and a final Gemini security review with no findings"
   ],
   "githubSignals": {
     "postMerge": {
