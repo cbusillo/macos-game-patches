@@ -107,18 +107,13 @@ zero-mutation live-path hardening and unsealed doctor-readiness checks.
 
 Qualified local validation passed on Mac16,9 with macOS 27.0, Xcode 27.0,
 CrossOver 26.2, the four pinned Git trees, and all eight locked runtime inputs.
-Two independent builds produced the same unsealed source seal:
-`45492e7857b187f0277dd99c3dcd0708ea5321cf1ae211cdecb22aa6cb6fd93a`.
+Two independent builds produced the same unsealed source seal.
 
 Two separate real Developer ID operations produced valid final artifacts with
-distinct exact seals, `73183f11047e7d1e52a3a7555fd8ae611a1d87a52b49d0dbc30e2020728c99b6`
-and `91c05efe8118d12a09f5dc1f01b4c6de9e44e88a5e1fc6456fbb50919f1c54b5`.
-The embedded CMS bytes differed, so the executable and complete tree hashes
-correctly received different content addresses. Both retained the same source
-tree, signed attestation, CodeResources SHA-256
-`c9c0fabbe38e21aaf2534774a766fc293c58aa0cd208ac051840b234dc872251`,
-Developer ID authority, Team ID, bundle identifier, and CDHash
-`ce46c1df418421fb3eb845a09f0cfe6d095d2ab1`.
+distinct exact seals. The embedded CMS bytes differed, so the executable and
+complete tree hashes correctly received different content addresses. Both
+retained the same source tree, signed attestation, CodeResources, Developer ID
+authority, Team ID, bundle identifier, and CDHash.
 
 The selected final artifact verified after relocation and resolved a read-only
 plan with `artifactStage=sealed`, `requiresSealing=false`, and no planner
