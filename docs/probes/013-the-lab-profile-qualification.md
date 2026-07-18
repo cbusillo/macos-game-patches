@@ -428,6 +428,43 @@ startup pixel tests, including the cropped RGBA output corner at
 drops, zero pose gaps, and exact cleanup. Its `84.202 FPS` tail is correctness
 evidence only and does not replace the required cadence run.
 
+### Sealed Dev5 Post-Merge Qualification
+
+The canonical post-merge profile and sealed dev5 artifact were rerun without
+source, profile, artifact, or gate changes. The first attempt in this series,
+`the-lab/real-native-encode-20260718T024801Z`, submitted and encoded
+`5400/5400` frames with visible-content validation, zero native drops, and zero
+pose-generation gaps, but its final 300-frame window reached only `79.521 FPS`.
+Exact cleanup passed. This remains preserved negative cadence evidence.
+
+Resolution, MSAA, and logging diagnostics did not justify lowering quality or
+weakening the gate. Reduced eye sizes ended between `83.895` and `86.316 FPS`;
+the short 2x-MSAA baseline reached `75.448 FPS`; a short no-MSAA run reached
+`88.305 FPS`, but the full no-MSAA run fell to `69.795 FPS` and introduced two
+steady producer drops. Reducing DXVK logging cut its log volume but produced a
+`50.294 FPS` tail on the successful retry; the D3D11 log fell from `34500` to
+`278` lines. These were temporary diagnostic variants with relaxed cadence
+bounds, not qualification passes.
+
+Two consecutive exact reruns then passed the unchanged `89.5 FPS` gate:
+
+- `the-lab/real-native-encode-20260718T030850Z` submitted and encoded
+  `5400/5400` frames with visible-content validation and reached `89.817 FPS`
+  over the final 300 frames.
+- `the-lab/real-native-encode-20260718T031058Z` submitted and encoded
+  `5400/5400` frames with visible-content validation and reached `90.006 FPS`
+  over the final 300 frames.
+
+Both passes used artifact seal
+`50999eee45412dbc2272159759ad5c046e3264914d7e7728aac87099972b649f`,
+reported zero producer/native drops, zero pose-generation gaps, no post-close
+submissions, visible-content validation, and exact cleanup. The evidence does
+not implicate IOSurface handoff, encoding, artifact identity, geometry, or
+cleanup; the remaining variability is in host/game cadence. The fixed
+`1152x1280` per-eye source with 2x MSAA remains the canonical candidate profile.
+The open acceptance item is still one worn physical run that combines live PS
+VR2 Sense gameplay with the same final-window cadence gate.
+
 Reproducible artifact-backed commands after the dev5 artifact is sealed:
 
 ```bash
