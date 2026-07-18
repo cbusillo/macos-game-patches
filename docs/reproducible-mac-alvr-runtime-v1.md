@@ -192,8 +192,10 @@ The following contracts may be wrapped or extracted but not weakened:
 9. The per-user launchd service retains kernel audit-trailer sender
    authentication, send-once reply validation, session nonce, slot identity,
    generation checks, and live PID/signature verification.
-10. The already-authorized stable signed bundle URL remains fixed until #62
-    proves a consent-preserving replacement.
+10. The already-authorized stable signed bundle URL remains fixed. Runtime
+    upgrades atomically exchange a verified prior Developer ID bundle at that
+    URL, and uninstall retains the exact current signed bundle for #62's
+    Launch Services and privacy-consent qualification.
 11. Stop, crash, partial startup, and uninstall restore original hashes and
     leave no owned job, plist, lock, process, staged game file, or bridge state.
 12. Physical Vision Pro observation and PS VR2 Sense gameplay remain required;

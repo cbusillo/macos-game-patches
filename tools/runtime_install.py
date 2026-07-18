@@ -10,7 +10,7 @@ import pathlib
 import shutil
 import stat
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal, Sequence, cast
+from typing import Any, Callable, Iterator, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
@@ -402,10 +402,103 @@ def _build_plan(
         raise _artifact_error(error) from error
 
 
+def _refresh_plan_readiness(plan: dict[str, Any], kind: MutationKind) -> None:
+    operations = plan.get(kind)
+    if not isinstance(operations, list):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Resolved plan is missing lifecycle operations",
+            kind=kind,
+        )
+    blockers = [
+        operation["id"]
+        for operation in operations
+        if isinstance(operation, dict)
+        and isinstance(operation.get("id"), str)
+        and operation.get("ready") is not True
+    ]
+    sealing_blockers = ["artifact.sealing_required"] if plan.get("requiresSealing") is not False else []
+    plan[f"{kind}Ready"] = not sealing_blockers and not blockers
+    plan[f"{kind}Blockers"] = [*sealing_blockers, *blockers]
+
+
+def _inspect_stable_bundle(
+    bundle: pathlib.Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    return artifact_contract.inspect_signed_bundle(bundle, manifest)
+
+
+def _qualify_stable_bundles(
+    plan: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    bundle_inspector: Callable[[pathlib.Path, dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    operations = plan.get("install")
+    if not isinstance(operations, list):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Resolved plan is missing lifecycle operations",
+            kind="install",
+        )
+    inspector = bundle_inspector or _inspect_stable_bundle
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise RuntimeInstallError(
+                "plan.invalid",
+                "Resolved lifecycle operation is invalid",
+            )
+        if (
+            operation.get("action") != "assert_absent_or_owned"
+            or operation.get("ownershipPolicy") != "developer-id-bundle"
+            or operation.get("ownership") != "qualification-required"
+        ):
+            continue
+        target_value = operation.get("target")
+        observed_tree = operation.get("targetTreeSha256")
+        if not isinstance(target_value, str) or not isinstance(observed_tree, str):
+            raise RuntimeInstallError(
+                "plan.invalid",
+                "Developer ID bundle qualification is missing its target identity",
+                operation=operation.get("id"),
+            )
+        target = _absolute(target_value)
+        try:
+            evidence = inspector(target, manifest)
+        except artifact_contract.ArtifactError as error:
+            operation["ownership"] = "foreign"
+            operation["ready"] = False
+            operation["blockedReason"] = f"{error.code}: {error.message}"
+            operation["ownershipFailure"] = {
+                "code": error.code,
+                "message": error.message,
+                "context": error.context,
+            }
+            continue
+        confirmed_tree = artifact_contract.canonical_tree_sha256(target)
+        if confirmed_tree != observed_tree:
+            operation["ownership"] = "changed"
+            operation["ready"] = False
+            operation["blockedReason"] = (
+                "existing tree changed during Developer ID lifecycle qualification"
+            )
+            continue
+        operation["ownership"] = "managed-signed-prior"
+        operation["qualifiedTargetTreeSha256"] = observed_tree
+        operation["ownershipEvidence"] = evidence
+        operation["ready"] = True
+        operation.pop("blockedReason", None)
+    _refresh_plan_readiness(plan, "install")
+    return plan
+
+
 def _executor(
     kind: MutationKind,
     plan: dict[str, Any],
     paths: LifecyclePaths,
+    *,
+    tree_ownership_validator: runtime_transaction.TreeOwnershipValidator | None = None,
 ) -> runtime_transaction.TransactionExecutor:
     operations = plan.get(kind)
     if not isinstance(operations, list):
@@ -424,6 +517,7 @@ def _executor(
         journal_path=paths.journal,
         transaction_root=paths.transaction_root,
         allowed_roots=paths.allowed_roots,
+        tree_ownership_validator=tree_ownership_validator,
     )
 
 
@@ -622,18 +716,45 @@ def _plan_blockers(plan: dict[str, Any], kind: MutationKind) -> tuple[dict[str, 
     blockers: list[dict[str, Any]] = []
     for blocker_id in blocker_ids:
         operation = indexed.get(blocker_id)
-        blockers.append(
-            {
-                "id": blocker_id,
-                "action": operation.get("action") if operation is not None else None,
-                "reason": (
-                    operation.get("blockedReason")
-                    if operation is not None
-                    else "planner did not provide the blocked operation"
-                ),
-            }
-        )
+        blocker = {
+            "id": blocker_id,
+            "action": operation.get("action") if operation is not None else None,
+            "reason": (
+                operation.get("blockedReason")
+                if operation is not None
+                else "planner did not provide the blocked operation"
+            ),
+        }
+        if operation is not None and isinstance(operation.get("ownershipFailure"), dict):
+            blocker["details"] = operation["ownershipFailure"]
+        blockers.append(blocker)
     return tuple(blockers)
+
+
+def _stable_bundle_blockers(
+    plan: dict[str, Any],
+    kind: MutationKind,
+) -> tuple[dict[str, Any], ...]:
+    install = plan.get("install")
+    operations = plan.get(kind)
+    if not isinstance(install, list) or not isinstance(operations, list):
+        raise RuntimeInstallError("plan.invalid", "Resolved install plan is missing")
+    stable_resources = {
+        operation.get("resource")
+        for operation in install
+        if isinstance(operation, dict)
+        and operation.get("ownershipPolicy") == "developer-id-bundle"
+    }
+    blocker_ids = {
+        operation.get("id")
+        for operation in operations
+        if isinstance(operation, dict)
+        and operation.get("resource") in stable_resources
+        and operation.get("ready") is not True
+    }
+    return tuple(
+        blocker for blocker in _plan_blockers(plan, kind) if blocker["id"] in blocker_ids
+    )
 
 
 def _parent_blockers(plan: dict[str, Any], kind: MutationKind) -> tuple[dict[str, Any], ...]:
@@ -1059,6 +1180,9 @@ def _mutate_runtime(
     stop_actions: tuple[str, ...] = ()
     try:
         manifest, _, manifest_hash, lock_hash = load_runtime_contract(context)
+        tree_ownership_validator: runtime_transaction.TreeOwnershipValidator = (
+            lambda bundle, _operation: _inspect_stable_bundle(bundle, manifest)
+        )
         artifact_path = _absolute(artifact_path)
         artifact = verify_artifact_reference(context, artifact_path)
         if artifact.get("stage") != "sealed":
@@ -1072,7 +1196,10 @@ def _mutate_runtime(
                 ),
                 artifact=artifact,
             )
-        admission_plan = _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash)
+        admission_plan = _qualify_stable_bundles(
+            _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+            manifest,
+        )
         if admission_plan.get("requiresSealing") is not False:
             return MutationReport(
                 command=command,
@@ -1084,6 +1211,19 @@ def _mutate_runtime(
                 ),
                 artifact=artifact,
             )
+        admission_paths = lifecycle_paths(admission_plan)
+        stable_blockers = _stable_bundle_blockers(admission_plan, command)
+        if stable_blockers and _read_active_journal(admission_paths) is None:
+            return MutationReport(
+                command=command,
+                ok=False,
+                state="blocked",
+                reason_code="plan.blocked",
+                message="Stable bundle ownership could not be admitted",
+                artifact=artifact,
+                blockers=stable_blockers,
+                journal=admission_paths.journal,
+            )
         global_lock = _absolute(context.lifecycle_lock_path)
         global_lock_root = global_lock.parent
         ensure_private_directory(
@@ -1092,7 +1232,10 @@ def _mutate_runtime(
             "transaction_lock_root",
         )
         with _global_lifecycle_lock(global_lock, (global_lock_root,)):
-            plan = _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash)
+            plan = _qualify_stable_bundles(
+                _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+                manifest,
+            )
             if plan.get("requiresSealing") is not False:
                 return MutationReport(
                     command=command,
@@ -1113,8 +1256,18 @@ def _mutate_runtime(
                     expected=str(global_lock),
                 )
             executors: dict[MutationKind, runtime_transaction.TransactionExecutor] = {
-                "install": _executor("install", plan, paths),
-                "uninstall": _executor("uninstall", plan, paths),
+                "install": _executor(
+                    "install",
+                    plan,
+                    paths,
+                    tree_ownership_validator=tree_ownership_validator,
+                ),
+                "uninstall": _executor(
+                    "uninstall",
+                    plan,
+                    paths,
+                    tree_ownership_validator=tree_ownership_validator,
+                ),
             }
             plan_digest = executors[command].plan_digest
             active_journal = _read_active_journal(paths)
@@ -1227,14 +1380,22 @@ def _mutate_runtime(
             )
             if command == "install":
                 _provision_install_directories(plan, paths)
-            live_plan = _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash)
+            live_plan = _qualify_stable_bundles(
+                _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+                manifest,
+            )
             live_paths = lifecycle_paths(live_plan)
             if live_paths != paths:
                 raise RuntimeInstallError(
                     "plan.drift",
                     "Lifecycle paths changed while the global lock was held",
                 )
-            executor = _executor(command, live_plan, live_paths)
+            executor = _executor(
+                command,
+                live_plan,
+                live_paths,
+                tree_ownership_validator=tree_ownership_validator,
+            )
             plan_digest = executor.plan_digest
             live_blockers = _admission_blockers(live_plan, command)
             if live_plan.get(f"{command}Ready") is not True or live_blockers:

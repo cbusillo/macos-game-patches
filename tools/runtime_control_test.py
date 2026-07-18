@@ -12,6 +12,7 @@ import unittest
 from collections.abc import Sequence
 from unittest import mock
 
+import build_runtime_artifact as artifact_contract
 import runtime_cli
 
 from runtime_control import (
@@ -190,14 +191,15 @@ class LifecycleTests(unittest.TestCase):
         code_root.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="runtime-control-lifecycle-", dir=code_root)
         self.root = pathlib.Path(self.temp.name).resolve()
+        self.repo_root_patch = mock.patch.object(artifact_contract, "REPO_ROOT", self.root)
+        self.repo_root_patch.start()
         self.runner = LifecycleRunner()
         self.alive_pids: set[int] = set()
         self.bindings_path = self.root / "bindings.json"
         self.bindings_path.write_text(
             json.dumps(
                 {
-                    "RUNTIME_STATE_ROOT": str(self.root / "state"),
-                    "NATIVE_BRIDGE_BUNDLE": str(self.root / "ALVRMacOSBridge.app"),
+                    "RUNTIME_STATE_ROOT": str(self.root / ".code/state/runtime"),
                 }
             )
         )
@@ -210,6 +212,7 @@ class LifecycleTests(unittest.TestCase):
         _, _, self.paths = resolve_context_paths(self.context)
 
     def tearDown(self) -> None:
+        self.repo_root_patch.stop()
         self.temp.cleanup()
 
     def create_bridge(self) -> None:
@@ -516,6 +519,7 @@ class LifecycleTests(unittest.TestCase):
         real_program = real_bundle / "Contents" / "MacOS" / "alvr_macos_bridge"
         real_program.parent.mkdir(parents=True)
         real_program.write_bytes(b"fixture bridge")
+        self.paths.bridge_bundle.parent.mkdir(parents=True)
         self.paths.bridge_bundle.symlink_to(real_bundle, target_is_directory=True)
         self.create_plist()
         self.runner.live_program = real_program

@@ -132,7 +132,29 @@ class LifecycleFixture:
             backup_hash is None or backup_hash == stock_hash
         )
         created_absent = not self.created.exists()
-        tree_ready = not self.bridge_bundle.exists() or self._tree_owned()
+        bridge_exists = self.bridge_bundle.exists()
+        bridge_marker_hash = (
+            artifact_contract.sha256_file(self.bridge_bundle / MARKER)
+            if (self.bridge_bundle / MARKER).is_file()
+            else None
+        )
+        bridge_tree_hash = (
+            artifact_contract.canonical_tree_sha256(self.bridge_bundle)
+            if self.bridge_bundle.is_dir()
+            else None
+        )
+        if not bridge_exists:
+            tree_ready = True
+            tree_ownership = "absent"
+        elif bridge_marker_hash != self.marker_sha256:
+            tree_ready = False
+            tree_ownership = "foreign"
+        elif bridge_tree_hash == self.tree_sha256:
+            tree_ready = True
+            tree_ownership = "artifact-owned"
+        else:
+            tree_ready = False
+            tree_ownership = "qualification-required"
         install: list[dict[str, Any]] = [
             {
                 "id": "assert_stock",
@@ -193,28 +215,45 @@ class LifecycleFixture:
                 "source": str(self.source_tree),
                 "sourceTreeSha256": self.tree_sha256,
                 "marker": MARKER,
+                "ownershipPolicy": "developer-id-bundle",
                 "sourceMarkerSha256": self.marker_sha256,
                 "target": str(self.bridge_bundle),
+                "exists": bridge_exists,
+                "ownership": tree_ownership,
+                **(
+                    {"targetMarkerSha256": bridge_marker_hash}
+                    if bridge_marker_hash is not None
+                    else {}
+                ),
+                **(
+                    {"targetTreeSha256": bridge_tree_hash}
+                    if bridge_tree_hash is not None
+                    else {}
+                ),
                 "ready": tree_ready,
-                **({} if tree_ready else {"blockedReason": "bridge tree is modified"}),
+                **(
+                    {}
+                    if tree_ready
+                    else {"blockedReason": "bridge tree requires lifecycle qualification"}
+                ),
             },
             {
                 "id": "replace_bridge",
                 "resource": "bridge",
                 "action": "replace_tree",
                 "atomic": True,
+                "retainOnUninstall": True,
                 "source": str(self.source_tree),
                 "sourceTreeSha256": self.tree_sha256,
                 "target": str(self.bridge_bundle),
-                "ready": tree_ready,
-                **({} if tree_ready else {"blockedReason": "bridge tree is modified"}),
+                "ready": True,
             },
         ]
         restore_ready = stock_hash == self.stock_sha256 or (
             stock_hash == self.patched_sha256 and backup_hash == self.stock_sha256
         )
         remove_ready = created_hash in {None, artifact_contract.sha256_file(self.created_source)}
-        uninstall_tree_ready = not self.bridge_bundle.exists() or self._tree_owned()
+        uninstall_tree_ready = self._tree_owned()
         uninstall: list[dict[str, Any]] = [
             {
                 "id": "restore_stock",
@@ -240,9 +279,9 @@ class LifecycleFixture:
                 **({} if remove_ready else {"blockedReason": "runtime file is modified"}),
             },
             {
-                "id": "remove_bridge",
+                "id": "retain_bridge",
                 "resource": "bridge",
-                "action": "remove_tree",
+                "action": "retain_tree",
                 "source": str(self.source_tree),
                 "sourceTreeSha256": self.tree_sha256,
                 "marker": MARKER,
@@ -368,6 +407,18 @@ def patched_lifecycle(
         ),
         mock.patch.object(runtime_install, "verify_artifact_reference", return_value=artifact),
         mock.patch.object(runtime_install, "_build_plan", side_effect=lambda *args: fixture.plan()) as plan,
+        mock.patch.object(
+            runtime_install,
+            "_inspect_stable_bundle",
+            return_value={
+                "kind": "developer-id",
+                "identifier": "example.fixture",
+                "teamIdentifier": "FIXTURETEAM",
+                "cdhash": "d" * 40,
+                "authority": "Developer ID Application: Fixture",
+                "timestamp": False,
+            },
+        ),
         mock.patch.object(runtime_install, "doctor_runtime", return_value=doctor) as doctor_mock,
         mock.patch.object(runtime_install, "stop_runtime", return_value=stop) as stop_mock,
     ):
@@ -438,7 +489,7 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertTrue(uninstalled.ok)
             self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
             self.assertFalse(fixture.created.exists())
-            self.assertFalse(fixture.bridge_bundle.exists())
+            self.assertTrue(fixture._tree_owned())
             self.assertTrue(fixture.backup.is_file())
             self.assertIsNotNone(uninstalled.archived_journal)
 
@@ -450,6 +501,76 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertTrue(reinstalled.ok)
             self.assertNotEqual(reinstalled.transaction_id, installed.transaction_id)
             self.assertEqual(len(list(fixture.history_root.glob("*.json"))), 2)
+
+    def test_verified_prior_bundle_migrates_and_is_retained(self) -> None:
+        with lifecycle_fixture() as fixture:
+            fixture._tree(fixture.bridge_bundle)
+            fixture.bridge_root.chmod(0o700)
+            prior_payload = fixture.bridge_bundle / "Contents/Resources/data.bin"
+            prior_payload.write_bytes(b"prior signed tree payload")
+            prior_tree = artifact_contract.canonical_tree_sha256(fixture.bridge_bundle)
+            self.assertNotEqual(prior_tree, fixture.tree_sha256)
+
+            with patched_lifecycle(fixture) as (context, _, stop_mock):
+                installed = runtime_install.install_runtime(context, fixture.artifact_root)
+                self.assertTrue(installed.ok, installed.to_dict())
+                self.assertTrue(fixture._tree_owned())
+
+                uninstalled = runtime_install.uninstall_runtime(context, fixture.artifact_root)
+                self.assertTrue(uninstalled.ok)
+                self.assertTrue(fixture._tree_owned())
+                self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
+                self.assertFalse(fixture.created.exists())
+                self.assertEqual(stop_mock.call_count, 2)
+
+    def test_invalid_prior_bundle_signature_blocks_without_target_mutation(self) -> None:
+        with lifecycle_fixture() as fixture:
+            fixture._tree(fixture.bridge_bundle)
+            fixture.bridge_root.chmod(0o700)
+            prior_payload = fixture.bridge_bundle / "Contents/Resources/data.bin"
+            prior_payload.write_bytes(b"untrusted prior tree payload")
+            prior_tree = artifact_contract.canonical_tree_sha256(fixture.bridge_bundle)
+
+            with patched_lifecycle(fixture) as (context, doctor_mock, stop_mock):
+                with mock.patch.object(
+                    runtime_install,
+                    "_inspect_stable_bundle",
+                    side_effect=artifact_contract.ArtifactError(
+                        "sealing.signature",
+                        "fixture signature is invalid",
+                    ),
+                ):
+                    report = runtime_install.install_runtime(context, fixture.artifact_root)
+
+            self.assertFalse(report.ok)
+            self.assertEqual(report.reason_code, "plan.blocked")
+            self.assertEqual(
+                artifact_contract.canonical_tree_sha256(fixture.bridge_bundle),
+                prior_tree,
+            )
+            self.assertFalse(fixture.journal.exists())
+            self.assertFalse(fixture.global_lock.exists())
+            doctor_mock.assert_not_called()
+            stop_mock.assert_not_called()
+
+    def test_three_cycles_restore_non_anchor_state_and_retain_bundle(self) -> None:
+        with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (
+            context,
+            _,
+            _,
+        ):
+            for _ in range(3):
+                installed = runtime_install.install_runtime(context, fixture.artifact_root)
+                self.assertTrue(installed.ok)
+                self.assertEqual(fixture.stock.read_bytes(), b"patched payload")
+                self.assertTrue(fixture.created.is_file())
+                self.assertTrue(fixture._tree_owned())
+
+                uninstalled = runtime_install.uninstall_runtime(context, fixture.artifact_root)
+                self.assertTrue(uninstalled.ok)
+                self.assertEqual(fixture.stock.read_bytes(), b"stock payload")
+                self.assertFalse(fixture.created.exists())
+                self.assertTrue(fixture._tree_owned())
 
     def test_interrupted_install_recovers_before_uninstall(self) -> None:
         with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (
@@ -463,8 +584,15 @@ class RuntimeInstallTests(unittest.TestCase):
                 kind: runtime_install.MutationKind,
                 plan: dict[str, Any],
                 paths: runtime_install.LifecyclePaths,
+                *,
+                tree_ownership_validator: runtime_transaction.TreeOwnershipValidator | None = None,
             ) -> runtime_transaction.TransactionExecutor:
-                executor = real_executor(kind, plan, paths)
+                executor = real_executor(
+                    kind,
+                    plan,
+                    paths,
+                    tree_ownership_validator=tree_ownership_validator,
+                )
                 if kind == "install":
                     def crash(step_id: str, phase: str) -> None:
                         if step_id == "replace_stock" and phase == "after-mutation":
@@ -509,6 +637,8 @@ class RuntimeInstallTests(unittest.TestCase):
             _,
             _,
         ):
+            fixture._tree(fixture.bridge_bundle)
+            fixture.bridge_root.chmod(0o700)
             fixture.global_lock_root.mkdir(mode=0o700, exist_ok=True)
             holder_script = """
 import fcntl
@@ -595,12 +725,15 @@ os.close(descriptor)
             _,
             _,
         ):
-            installed = runtime_install.install_runtime(context, fixture.artifact_root)
-            self.assertTrue(installed.ok)
+            fixture._tree(fixture.bridge_bundle)
+            fixture.bridge_root.chmod(0o700)
+            (fixture.bridge_bundle / "Contents/Resources/data.bin").write_bytes(
+                b"prior signed tree payload"
+            )
             runner = RecordingClosedTargetRunner()
             context.runner = runner
-            uninstalled = runtime_install.uninstall_runtime(context, fixture.artifact_root)
-            self.assertTrue(uninstalled.ok)
+            installed = runtime_install.install_runtime(context, fixture.artifact_root)
+            self.assertTrue(installed.ok)
             inspected = {argument for call in runner.calls for argument in call}
             self.assertIn(
                 str(fixture.bridge_bundle / "Contents/Resources/data.bin"),
@@ -619,8 +752,15 @@ os.close(descriptor)
                 kind: runtime_install.MutationKind,
                 plan: dict[str, Any],
                 paths: runtime_install.LifecyclePaths,
+                *,
+                tree_ownership_validator: runtime_transaction.TreeOwnershipValidator | None = None,
             ) -> runtime_transaction.TransactionExecutor:
-                executor = real_executor(kind, plan, paths)
+                executor = real_executor(
+                    kind,
+                    plan,
+                    paths,
+                    tree_ownership_validator=tree_ownership_validator,
+                )
                 if kind == "install":
                     def crash(step_id: str, phase: str) -> None:
                         if step_id == "replace_stock" and phase == "after-mutation":

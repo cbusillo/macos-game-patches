@@ -194,6 +194,7 @@ until a qualified installed layout exists.
 
 Probe 017 provides the dev7 immutable post-build Developer ID seal and exact
 signed-tree identity. Probe 018 now provides descriptor-anchored target
-mutation. The remaining #61 live-enable work is three physical
-install/uninstall exact-restoration cycles; #62 separately retains stable URL,
-Launch Services, and privacy-consent qualification.
+mutation. Probe 019 adds verified prior-bundle migration, atomic same-path
+exchange, and uninstall retention. The remaining #61 live-enable work is three
+physical install/uninstall exact-restoration cycles; #62 separately owns Launch
+Services and privacy-consent qualification at the retained stable URL.

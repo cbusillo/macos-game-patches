@@ -190,6 +190,16 @@ uninstall file mutations are also represented in paired operation templates:
 
 The builder never writes to those locations.
 
+The stable bridge is a stricter paired contract. Its target is the literal
+consent-preserving repository URL rather than a plan binding. The install guard
+requires the signed ownership marker and `developer-id-bundle` policy, the
+replacement source must be the declared sealed bundle, and the uninstall
+operation is `retain_tree`. A prior version is accepted only after the lifecycle
+verifies its Developer ID authority, Team ID, bundle ID, signature validity, and
+no-timestamp policy. The durable transaction binds the observed prior tree,
+revalidates identity at intent, and uses descriptor-backed atomic exchange so
+the stable URL always names either the exact prior or exact current tree.
+
 ## Commands
 
 ### Structural Check
@@ -292,21 +302,23 @@ per-filesystem capacity, and passes planner operations unchanged to the durable
 executor. Matching committed work is an idempotent success; interrupted work is
 rolled back and archived before the operator retries the requested direction.
 
-The dev7 manifest retains separate-step signing without weakening admission.
+The dev8 manifest retains separate-step signing without weakening admission.
 Both lifecycle commands return `artifact.sealing_required` before creating
 directories, stopping services, writing journals, or changing targets when the
 verified artifact stage is `unsealed`. A verified `sealed` artifact carries its
 exact post-sign bundle tree into the transaction plan. Non-fixture target roots
 now use no-follow root/parent descriptors, journaled parent identity, exact
-descriptor hashing, and exclusive sibling staging/original/rollback moves.
-`doctor` reports that transaction boundary as passing after the sealed plan
-resolves. The coordinator quiesces owned runtime state and rejects open targets
-before mutation; descriptor hardening fails closed on observable drift but is
-not an authentication boundary against an intentionally hostile same-UID owner
-rewriting the journal or racing the final POSIX unlink. Physical qualification
-remains explicit: do not use the installed
-layout for game launch until three real install/uninstall cycles restore exact
-CrossOver, game, runtime, lock, service, and journal state.
+descriptor hashing, exclusive sibling staging/original/rollback moves, and
+Darwin/Linux atomic exchange for an existing stable bridge. `doctor` reports
+that transaction boundary as passing after the sealed plan resolves. The
+coordinator quiesces owned runtime state and rejects open targets before
+mutation; descriptor hardening and before/after identity sampling fail closed on
+ordinary drift but are not an authentication boundary against an intentionally
+hostile same-UID owner rewriting the journal or orchestrating path swaps during
+external `codesign` inspection. Physical qualification remains explicit: do not
+use the installed layout for game launch until three real install/uninstall
+cycles retain the exact signed bridge and restore CrossOver, game, runtime,
+lock, service, and journal state.
 
 ### Verify And Compare
 
