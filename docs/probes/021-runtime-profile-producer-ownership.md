@@ -55,10 +55,11 @@ without adopting or signaling cached PIDs?
 3. Publish synchronized schema-v3 `idle` state with profile evidence and
    `producer.status=starting` after the exact bridge checks in. This exposes the
    identity-bound stop channel during producer startup.
-4. Build the proven CrossOver command directly as an argument vector using the
-   exact resolved launcher, bottle, target executable, working directory,
-   profile arguments, generation nonce, bridge service, runtime bridge root,
-   geometry, and profile environment.
+4. Admit CrossOver 26.2's exact in-bundle relative `cxstart -> wine` link only
+   when its sibling target is a real executable, then build the proven command
+   directly as an argument vector using that launcher, the exact bottle, target
+   executable, working directory, profile arguments, generation nonce, bridge
+   service, runtime bridge root, geometry, and profile environment.
 5. Launch `cxstart --wait-children` in a new POSIX session with stdout/stderr
    below the generation directory. Retain the live process handle as the only
    signal authority.

@@ -344,13 +344,15 @@ substitutions and removals before launch. The current transaction plan is
 Freedom-specific, so `freedom-locomotion` is admitted and The Lab fails closed
 until its three targets receive separately reviewed lifecycle operations.
 
-The detached supervisor launches the exact CrossOver `cxstart` command in one
-new process group and retains the live process handle as signal authority. It
-publishes schema-v3 `waiting` only after an exact in-group game executable, the
-generation-owned bridge producer handshake, and all startup self-tests are
-present. Stop quiesces that live group before exact launchd bootout; serialized
-PIDs remain evidence only. Vision Pro connection, streaming, and recovery state
-remain outside this host-only producer slice.
+The detached supervisor admits CrossOver 26.2's exact in-bundle relative
+`cxstart -> wine` link only when its sibling target is a real executable. It
+launches that exact command in one new process group and retains the live
+process handle as signal authority. It publishes schema-v3 `waiting` only after
+an exact in-group game executable, the generation-owned bridge producer
+handshake, and all startup self-tests are present. Stop quiesces that live group
+before exact launchd bootout; serialized PIDs remain evidence only. Vision Pro
+connection, streaming, and recovery state remain outside this host-only
+producer slice.
 
 ### Verify And Compare
 

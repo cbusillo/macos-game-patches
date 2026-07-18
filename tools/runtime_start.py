@@ -570,6 +570,38 @@ def _relative_profile_path(root: pathlib.Path, target: pathlib.Path) -> str:
         ) from error
 
 
+def _resolve_crossover_launcher(crossover_root: pathlib.Path) -> pathlib.Path:
+    launcher = crossover_root / (
+        "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+    )
+    target = launcher.parent / "wine"
+    try:
+        artifact_contract.reject_symlink_components(launcher.parent)
+        launcher_metadata = launcher.lstat()
+        launcher_target = os.readlink(launcher) if stat.S_ISLNK(launcher_metadata.st_mode) else None
+        artifact_contract.reject_symlink_components(target)
+        target_metadata = target.lstat()
+    except (artifact_contract.ArtifactError, OSError) as error:
+        raise ControlError(
+            "producer.launch_invalid",
+            "Exact CrossOver launcher could not be inspected",
+            path=str(launcher),
+            detail=str(error),
+        ) from error
+    if (
+        launcher_target != "wine"
+        or not stat.S_ISREG(target_metadata.st_mode)
+        or not os.access(target, os.X_OK)
+    ):
+        raise ControlError(
+            "producer.launch_invalid",
+            "Exact CrossOver cxstart link does not select its executable sibling",
+            path=str(launcher),
+            target=launcher_target,
+        )
+    return launcher
+
+
 def _inspect_profile_admission(
     manifest: dict[str, Any],
     bindings: dict[str, str],
@@ -676,29 +708,7 @@ def _inspect_profile_admission(
         )
 
     crossover_root = _absolute(pathlib.Path(bindings["CROSSOVER_APP"]))
-    crossover_launcher = crossover_root / (
-        "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
-    )
-    try:
-        artifact_contract.reject_symlink_components(crossover_launcher)
-        launcher_metadata = crossover_launcher.lstat()
-    except (artifact_contract.ArtifactError, OSError) as error:
-        raise ControlError(
-            "producer.launch_invalid",
-            "Exact CrossOver launcher could not be inspected",
-            path=str(crossover_launcher),
-            detail=str(error),
-        ) from error
-    if (
-        crossover_launcher.is_symlink()
-        or not stat.S_ISREG(launcher_metadata.st_mode)
-        or not os.access(crossover_launcher, os.X_OK)
-    ):
-        raise ControlError(
-            "producer.launch_invalid",
-            "Exact CrossOver launcher is not a real executable file",
-            path=str(crossover_launcher),
-        )
+    crossover_launcher = _resolve_crossover_launcher(crossover_root)
 
     steam_bottle = _absolute(pathlib.Path(bindings["STEAM_BOTTLE"]))
     expected_bottle_root = _absolute(

@@ -43,6 +43,7 @@ from runtime_start import (
     _require_committed_install_journal,
     _require_installed_plan,
     _require_launch_template_state,
+    _resolve_crossover_launcher,
     start_runtime,
     supervise_runtime,
 )
@@ -533,8 +534,10 @@ class RuntimeStartTests(unittest.TestCase):
             "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
         )
         crossover_launcher.parent.mkdir(parents=True)
-        crossover_launcher.write_text("#!/bin/sh\n")
-        crossover_launcher.chmod(0o755)
+        crossover_target = crossover_launcher.parent / "wine"
+        crossover_target.write_text("#!/bin/sh\n")
+        crossover_target.chmod(0o755)
+        crossover_launcher.symlink_to("wine")
         bindings = {
             "CROSSOVER_APP": str(crossover_app),
             "HOME": str(self.fixture.root),
@@ -561,6 +564,20 @@ class RuntimeStartTests(unittest.TestCase):
             )
         self.assertEqual(admission.installed.loaded.data["id"], "freedom-locomotion")
         self.assertEqual(admission.crossover_launcher, crossover_launcher)
+
+    def test_crossover_launcher_rejects_foreign_symlink_target(self) -> None:
+        crossover_app = self.fixture.root / "CrossOver.app"
+        launcher = crossover_app / (
+            "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+        )
+        launcher.parent.mkdir(parents=True)
+        foreign = launcher.parent / "foreign"
+        foreign.write_text("#!/bin/sh\n")
+        foreign.chmod(0o755)
+        launcher.symlink_to("foreign")
+        with self.assertRaises(ControlError) as raised:
+            _resolve_crossover_launcher(crossover_app)
+        self.assertEqual(raised.exception.code, "producer.launch_invalid")
 
     def test_profile_admission_rejects_partial_game_overlay(self) -> None:
         plan = self.exact_profile_plan()

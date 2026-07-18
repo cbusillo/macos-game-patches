@@ -847,7 +847,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "509d7996a56a0bb23e575b4c28f48add19bd7959daeb524280a8a3d1ad5e7e7b",
+      "sha256": "a50bbaa8a599093499f40a1f8816ab8f46a59420da877bb4733a12d867e0069e",
       "supplyClass": "repo-source"
     },
     {
@@ -883,7 +883,7 @@
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "9c9861380e8b77f4eccecb4d7ed50ddc85141424190049a327c7be414666e3c0",
+      "sha256": "2ed80f3af067b278bfd6026b9bea14b5a59f79edbef823a9f0e09a11900ca89f",
       "supplyClass": "repo-source"
     },
     {
