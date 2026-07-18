@@ -331,6 +331,28 @@ class LifecycleTests(unittest.TestCase):
             "runtime_control.doctor_runtime",
             return_value=DoctorReport(
                 (
+                    *core_passes,
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "fail",
+                        "fail",
+                        "repair",
+                    ),
+                ),
+                artifact_summary,
+            ),
+        ):
+            hardening_blocked = status_runtime(self.context, artifact)
+        self.assertEqual(hardening_blocked.state, "failed")
+        self.assertEqual(
+            hardening_blocked.reason_code,
+            "transaction.live_path_hardening_required",
+        )
+
+        with mock.patch(
+            "runtime_control.doctor_runtime",
+            return_value=DoctorReport(
+                (
                     CheckResult("repository.contract", "pass", "pass", "repair"),
                     CheckResult("artifact.verify", "fail", "fail", "repair"),
                     CheckResult("artifact.stage", "unknown", "unknown", "repair"),

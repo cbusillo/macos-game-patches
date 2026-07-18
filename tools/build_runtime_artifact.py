@@ -3052,6 +3052,26 @@ def resolve_mutable_state(
     return resolved
 
 
+def plan_is_fixture_only(plan: dict[str, Any]) -> bool:
+    fixture_root_value = plan.get("fixtureRoot")
+    allowed_root_values = plan.get("allowedTargetRoots")
+    if not isinstance(fixture_root_value, str) or not isinstance(allowed_root_values, list):
+        return False
+    fixture_root = pathlib.Path(fixture_root_value)
+    if not fixture_root.is_absolute():
+        return False
+    fixture_text = str(fixture_root)
+    for raw_root in allowed_root_values:
+        if not isinstance(raw_root, str) or not pathlib.Path(raw_root).is_absolute():
+            return False
+        try:
+            if os.path.commonpath([raw_root, fixture_text]) != fixture_text:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def build_plan(
     manifest: dict[str, Any],
     artifact_root: pathlib.Path,

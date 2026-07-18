@@ -300,7 +300,8 @@ exact post-sign bundle tree into the transaction plan. Non-fixture target roots
 still return `transaction.live_path_hardening_required` before lifecycle lock
 creation, service stop, journal write, or target mutation. Descriptor-anchored
 mutation and physical qualification remain explicit gates before user-path
-enablement.
+enablement. `doctor` and stopped `status` surface the same blocker rather than
+reporting the sealed artifact as ready.
 
 ### Verify And Compare
 

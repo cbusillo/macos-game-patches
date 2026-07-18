@@ -762,6 +762,65 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             )
         )
 
+    if metadata is None or bindings is None or metadata["stage"] != "sealed":
+        checks.append(
+            CheckResult(
+                "transaction.path_hardening",
+                "unknown",
+                "Live target-path hardening cannot be evaluated yet",
+                "Verify a final-stage artifact and valid plan bindings first.",
+            )
+        )
+    elif metadata["manifestSha256"] != manifest_hash or metadata["lockSha256"] != lock_hash:
+        checks.append(
+            CheckResult(
+                "transaction.path_hardening",
+                "unknown",
+                "Live target-path hardening cannot be evaluated for another contract",
+                "Use an artifact built from the checked-in manifest and lockfile.",
+            )
+        )
+    else:
+        try:
+            plan = artifact_contract.build_plan(
+                manifest,
+                artifact_path,
+                context.bindings_path,
+                expected_manifest_hash=manifest_hash,
+                expected_lock_hash=lock_hash,
+            )
+        except artifact_contract.ArtifactError as error:
+            checks.append(
+                CheckResult(
+                    "transaction.path_hardening",
+                    "fail",
+                    "Runtime ownership plan could not be resolved safely",
+                    "Fix the artifact or plan bindings before lifecycle use.",
+                    artifact_failure_details(error),
+                )
+            )
+        else:
+            if artifact_contract.plan_is_fixture_only(plan):
+                checks.append(
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "pass",
+                        "Resolved mutation authority is confined to the fixture root",
+                        "Keep fixture validation below the repository .code root.",
+                        {"fixtureRoot": plan["fixtureRoot"]},
+                    )
+                )
+            else:
+                checks.append(
+                    CheckResult(
+                        "transaction.path_hardening",
+                        "fail",
+                        "Live target roots require descriptor-anchored mutation",
+                        "Complete issue #61 path hardening before mutating CrossOver, game, or user runtime paths.",
+                        {"allowedTargetRoots": plan["allowedTargetRoots"]},
+                    )
+                )
+
     for item in manifest["prerequisites"]:
         if item["kind"] == "command":
             checks.append(evaluate_command_prerequisite(item, context.runner))
@@ -1525,6 +1584,20 @@ def status_runtime(context: RuntimeContext, artifact: pathlib.Path | None = None
         return failed_status(
             "artifact.sealing_required",
             "Requested runtime artifact requires Developer ID final sealing",
+            service,
+            lock,
+            control_state,
+            doctor.checks,
+            doctor.artifact,
+        )
+    path_hardening = next(
+        (check for check in doctor.checks if check.id == "transaction.path_hardening"),
+        None,
+    )
+    if path_hardening is not None and path_hardening.status == "fail":
+        return failed_status(
+            "transaction.live_path_hardening_required",
+            "Requested runtime artifact is sealed but live target paths are not hardened",
             service,
             lock,
             control_state,
