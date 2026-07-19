@@ -56,12 +56,14 @@ CRITICAL_FILE_KEYS = {"path", "sha256"}
 LAUNCH_KEYS = {
     "installRoot",
     "entrypointTarget",
+    "ownedProcess",
     "arguments",
     "environment",
     "processPattern",
     "startupTimeoutSeconds",
     "transitionTimeoutSeconds",
 }
+OWNED_PROCESS_KEYS = {"executable", "processPattern"}
 RUNTIME_KEYS = {"openvrRuntime", "graphicsApi", "targets"}
 TARGET_KEYS = {
     "id",
@@ -151,12 +153,19 @@ class ResolvedProfileTarget:
 
 
 @dataclass(frozen=True)
+class ResolvedOwnedProcess:
+    executable: pathlib.Path
+    process_pattern: str
+
+
+@dataclass(frozen=True)
 class InstalledProfile:
     loaded: LoadedProfile
     install_root: pathlib.Path
     steam_manifest: pathlib.Path
     steam_manifest_sha256: str
     targets: tuple[ResolvedProfileTarget, ...]
+    owned_process: ResolvedOwnedProcess | None
 
     @property
     def entrypoint(self) -> ResolvedProfileTarget:
@@ -380,6 +389,43 @@ def validate_launch(profile: dict[str, Any]) -> None:
             templates=unknown_templates,
         )
     require_identifier(launch["entrypointTarget"], "launch.entrypointTarget")
+    owned_process = launch["ownedProcess"]
+    if owned_process is not None:
+        owned = require_object(owned_process, "launch.ownedProcess")
+        require_exact_keys(owned, OWNED_PROCESS_KEYS, "launch.ownedProcess")
+        executable = require_relative_path(
+            owned["executable"],
+            "launch.ownedProcess.executable",
+        )
+        if pathlib.PurePosixPath(executable).suffix.casefold() != ".exe":
+            raise ProfileError(
+                "profile.invalid",
+                "Owned process executable must be a PE executable",
+                location="launch.ownedProcess.executable",
+            )
+        critical_paths = {
+            item["path"]
+            for item in profile["source"]["payload"]["criticalFiles"]
+        }
+        if executable not in critical_paths:
+            raise ProfileError(
+                "profile.invalid",
+                "Owned process executable must be a sealed critical file",
+                location="launch.ownedProcess.executable",
+            )
+        owned_pattern = require_string(
+            owned["processPattern"],
+            "launch.ownedProcess.processPattern",
+        )
+        try:
+            re.compile(owned_pattern)
+        except re.error as error:
+            raise ProfileError(
+                "profile.invalid",
+                "Invalid owned-process regular expression",
+                location="launch.ownedProcess.processPattern",
+                detail=str(error),
+            ) from error
     arguments = require_list(launch["arguments"], "launch.arguments")
     for index, argument in enumerate(arguments):
         require_string(argument, f"launch.arguments[{index}]", nonempty=False)
@@ -1048,6 +1094,26 @@ def resolve_profile_targets(
     return tuple(resolved)
 
 
+def resolve_owned_process(
+    profile: dict[str, Any],
+    install_root: pathlib.Path,
+) -> ResolvedOwnedProcess | None:
+    owned = profile["launch"]["ownedProcess"]
+    if owned is None:
+        return None
+    executable = resolve_under(
+        install_root,
+        owned["executable"],
+        "launch.ownedProcess.executable",
+    )
+    require_regular_file(executable, "launch.ownedProcess.executable")
+    inspect_pe_x86_64(executable, "launch.ownedProcess.executable")
+    return ResolvedOwnedProcess(
+        executable=executable,
+        process_pattern=owned["processPattern"],
+    )
+
+
 def resolve_installed_profile(
     loaded: LoadedProfile,
     bindings: Mapping[str, str],
@@ -1061,12 +1127,14 @@ def resolve_installed_profile(
         install_root,
         require_stock_openvr=False,
     )
+    owned_process = resolve_owned_process(loaded.data, install_root)
     return InstalledProfile(
         loaded=loaded,
         install_root=install_root,
         steam_manifest=steam_manifest,
         steam_manifest_sha256=steam_manifest_sha256,
         targets=targets,
+        owned_process=owned_process,
     )
 
 

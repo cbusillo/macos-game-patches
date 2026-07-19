@@ -172,6 +172,9 @@ class RuntimeProfileTests(unittest.TestCase):
         )
         target = self.profile["runtime"]["targets"][0]
         write_pe_x86_64(install_root / target["executable"])
+        owned_process = self.profile["launch"]["ownedProcess"]
+        assert owned_process is not None
+        write_pe_x86_64(install_root / owned_process["executable"])
         write_pe_x86_64(install_root / target["openvrDirectory"] / "openvr_api.dll")
         (install_root / target["workingDirectory"]).mkdir(parents=True, exist_ok=True)
         (install_root / target["graphicsDirectory"]).mkdir(parents=True, exist_ok=True)
@@ -208,7 +211,21 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(installed.install_root, install_root)
         self.assertEqual(installed.entrypoint.id, "game")
         self.assertEqual(installed.entrypoint.executable, install_root / "FreedomLocomotion.exe")
+        self.assertIsNotNone(installed.owned_process)
+        assert installed.owned_process is not None
+        self.assertEqual(
+            installed.owned_process.executable,
+            install_root
+            / "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe",
+        )
         self.assertEqual(installed.steam_manifest_sha256, runtime_profile.sha256_file(app_manifest))
+
+    def test_owned_process_must_be_a_critical_file(self) -> None:
+        profile = copy.deepcopy(self.profile)
+        profile["launch"]["ownedProcess"]["executable"] = "unsealed.exe"
+        with self.assertRaises(ProfileError) as raised:
+            runtime_profile.validate_profile(profile)
+        self.assertEqual(raised.exception.code, "profile.invalid")
 
 
 if __name__ == "__main__":

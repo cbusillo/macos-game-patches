@@ -324,7 +324,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "f59bfca6350f3bff27551f072cd403d2ee72ef42"
+      "revision": "c02bca35616ac4e3b95deae41fbbe70e2602e906"
     },
     {
       "cleanPolicy": "all",
@@ -847,7 +847,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "a50bbaa8a599093499f40a1f8816ab8f46a59420da877bb4733a12d867e0069e",
+      "sha256": "c5febad1d6cdd50ccaa27e53ed597c5e78b9113109e64872d64ed34863652cd0",
       "supplyClass": "repo-source"
     },
     {
@@ -871,43 +871,43 @@
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "e3fed5b6b946fbc5177e7eeee10eb935674618125349edfbbddd1bb09163c315",
+      "sha256": "e28bac1ca4e7ddb3bc06ca7dae42a7aa1c1080526b4a47ab4f284737d76cb3e9",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "7e84ce33005c54233ff939654c68e5753ab9fc0d1a168905a7de2b30a90893fd",
+      "sha256": "ac166a66a94a5e6c52bfc1464f133c04ce496af9941b756ae0085b8d7c3de525",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "2ed80f3af067b278bfd6026b9bea14b5a59f79edbef823a9f0e09a11900ca89f",
+      "sha256": "87247d6dbbccf4524dc179b708dc5adce1a1916713ffdf5e1dad030aed4725ef",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_profile",
       "path": "${REPO_ROOT}/tools/runtime_profile.py",
-      "sha256": "db3d1cd7912a14bb1a7a559eb2b66892db11362bdc10f226d2f4d6c89dd89f8e",
+      "sha256": "f381cd18dd8ba1179f8ee00a0e0e534aa0da2ae109fe7699bafce063a6335d75",
       "supplyClass": "repo-source"
     },
     {
       "id": "game_profile_schema",
       "path": "${REPO_ROOT}/runtime/game-profile.schema.json",
-      "sha256": "59460975b3d2f14e5e2f8e1ed409bff82c9aae66b42171952b4332bedd02de0d",
+      "sha256": "faaac1f2ce042727ddc6a0f6d7aad31b55672f037410069daee193d0a012694d",
       "supplyClass": "repo-source"
     },
     {
       "id": "game_profile_freedom_locomotion",
       "path": "${REPO_ROOT}/runtime/profiles/freedom-locomotion.json",
-      "sha256": "7d4887265fede7f3ff045d8863487fd4d9f5110aadfff8c4e0a0da007bcd375f",
+      "sha256": "29cb1738706338344a2c1a44781ab121bb7e45a75df75808a23cc1164faa712e",
       "supplyClass": "repo-source"
     },
     {
       "id": "game_profile_the_lab",
       "path": "${REPO_ROOT}/runtime/profiles/the-lab.json",
-      "sha256": "e819154cc9a4b1bea393761aac9e4eaa429144750e28e00c0ddc20c3edce115e",
+      "sha256": "16e62dcc88ae46488fe064e6bb2069741d39a6dca36c9714190cdbfee92586af",
       "supplyClass": "repo-source"
     },
     {

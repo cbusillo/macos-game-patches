@@ -42,6 +42,8 @@ from runtime_control import (
     load_control_state,
     load_runtime_contract,
     paths_match,
+    process_command,
+    process_group_id,
     process_start_time,
     read_launchd_snapshot,
     receive_json_frame,
@@ -71,6 +73,8 @@ SERVICE_STATUS_INTERVAL_SECONDS = 1.0
 SERVICE_IDENTITY_INTERVAL_SECONDS = 30.0
 PRODUCER_STOP_GRACE_SECONDS = 5.0
 PRODUCER_KILL_WAIT_SECONDS = 1.0
+PRODUCER_QUIESCE_TIMEOUT_SECONDS = 40.0
+PRODUCER_QUIESCE_MARGIN_SECONDS = 10.0
 MAX_RUNTIME_FRAMES = (1 << 64) - 1
 INSTALLED_FALSE_ACTIONS = frozenset({"assert_sha256", "backup", "assert_absent"})
 
@@ -201,6 +205,8 @@ class ProfileStartAdmission:
 @dataclass(frozen=True)
 class ProducerIdentity:
     pid: int
+    birth_token: int
+    pid_version: int
     started_at: str
     process_group_id: int
     command: str
@@ -209,11 +215,20 @@ class ProducerIdentity:
     def to_dict(self) -> dict[str, Any]:
         return {
             "pid": self.pid,
+            "birthToken": self.birth_token,
+            "pidVersion": self.pid_version,
             "startedAt": self.started_at,
             "processGroupId": self.process_group_id,
             "command": self.command,
             "executable": str(self.executable),
         }
+
+
+def _process_start_datetime(value: str) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.strptime(value, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -614,6 +629,12 @@ def _inspect_profile_admission(
         installed = runtime_profile.resolve_installed_profile(loaded, bindings)
     except runtime_profile.ProfileError as error:
         raise ControlError(error.code, error.message, **error.context) from error
+    if installed.owned_process is None:
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Curated runtime profile does not declare one owned producer process",
+            profile=loaded.data["id"],
+        )
 
     expected_install_targets: set[pathlib.Path] = set()
     expected_uninstall_targets: set[pathlib.Path] = set()
@@ -973,21 +994,53 @@ def _producer_record(
     profile: ProfileStartAdmission,
     status: str,
     launcher_pid: int,
+    launcher_birth_token: int,
+    launcher_pid_version: int,
     launcher_started_at: str,
     process_group_id: int,
     producer_log: pathlib.Path,
     target: ProducerIdentity | None,
 ) -> dict[str, Any]:
-    entrypoint = profile.installed.entrypoint
+    owned_process = profile.installed.owned_process
     return {
         "status": status,
-        "launcherPid": launcher_pid,
-        "launcherStartedAt": launcher_started_at,
-        "processGroupId": process_group_id,
-        "targetId": entrypoint.id,
-        "targetPid": target.pid if target is not None else None,
-        "targetStartedAt": target.started_at if target is not None else None,
-        "targetExecutable": str(target.executable if target is not None else entrypoint.executable),
+        "launcher": {
+            "pid": launcher_pid,
+            "birthToken": launcher_birth_token,
+            "pidVersion": launcher_pid_version,
+            "startedAt": launcher_started_at,
+            "processGroupId": process_group_id,
+        },
+        "expectedOwnedProcess": (
+            {
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            if owned_process is not None
+            else None
+        ),
+        "ownedProcess": target.to_dict() if target is not None else None,
+        "log": str(producer_log),
+    }
+
+
+def _launching_producer_record(
+    profile: ProfileStartAdmission,
+    producer_log: pathlib.Path,
+) -> dict[str, Any]:
+    owned_process = profile.installed.owned_process
+    return {
+        "status": "launching",
+        "launcher": None,
+        "expectedOwnedProcess": (
+            {
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            if owned_process is not None
+            else None
+        ),
+        "ownedProcess": None,
         "log": str(producer_log),
     }
 
@@ -1007,7 +1060,7 @@ def _state_payload(
     if service.snapshot.pid is None or service.file_identity is None or admission.profile is None:
         raise ControlError("runtime.start_failed", "Live service identity is incomplete")
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "state": state,
         "generation": generation,
         "ownerPid": os.getpid(),
@@ -1114,38 +1167,43 @@ def _process_profile_executable(
     pid: int,
     profile: ProfileStartAdmission,
     runner: CommandRunner,
-) -> pathlib.Path | None:
-    result = runner.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-Fn"], timeout=5.0)
+) -> tuple[pathlib.Path | None, str | None]:
+    owned_process = profile.installed.owned_process
+    if owned_process is None:
+        return None, None
+    result = runner.run(
+        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"],
+        timeout=5.0,
+    )
     if result.error is not None or result.returncode != 0:
-        return None
-    allowed = {profile.installed.entrypoint.executable}
-    payload = profile.installed.loaded.data["source"].get("payload")
-    critical_files = payload.get("criticalFiles") if isinstance(payload, dict) else None
-    if isinstance(critical_files, list):
-        for item in critical_files:
-            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-                continue
-            candidate = profile.installed.install_root / pathlib.PurePosixPath(item["path"])
-            if candidate.suffix.casefold() == ".exe":
-                allowed.add(candidate)
-    matches: list[pathlib.Path] = []
+        return None, "Owned process executable mapping could not be inspected"
     for line in result.stdout.splitlines():
         if not line.startswith("n") or len(line) == 1:
             continue
         candidate = _absolute(pathlib.Path(line[1:]))
-        if any(paths_match(candidate, expected) for expected in allowed):
-            matches.append(candidate)
-    unique = sorted(set(matches), key=str)
-    return unique[0] if len(unique) == 1 else None
+        if paths_match(candidate, owned_process.executable):
+            return owned_process.executable, None
+    return None, None
 
 
-def _inspect_producer_identity(
+def _owned_process_candidates(
     profile: ProfileStartAdmission,
-    process_group_id: int,
     runner: CommandRunner,
-) -> ProducerIdentity | None:
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> list[ProducerIdentity]:
+    owned_process = profile.installed.owned_process
+    if owned_process is None:
+        return []
     result = runner.run(
-        ["/usr/bin/env", "LC_ALL=C", "/bin/ps", "-axo", "pid=,pgid=,command="],
+        [
+            "/usr/bin/env",
+            "LC_ALL=C",
+            "/bin/ps",
+            "-ww",
+            "-axo",
+            "pid=,pgid=,command=",
+        ],
         timeout=5.0,
     )
     if result.error is not None or result.returncode != 0:
@@ -1153,7 +1211,7 @@ def _inspect_producer_identity(
             "producer.identity_unavailable",
             "Producer process table could not be inspected",
         )
-    pattern = re.compile(profile.installed.entrypoint.process_pattern)
+    pattern = re.compile(owned_process.process_pattern)
     candidates: list[ProducerIdentity] = []
     for line in result.stdout.splitlines():
         fields = line.strip().split(maxsplit=2)
@@ -1165,13 +1223,19 @@ def _inspect_producer_identity(
         except ValueError:
             continue
         command = fields[2]
-        if group_id != process_group_id or not pattern.search(command):
-            continue
-        executable = _process_profile_executable(pid, profile, runner)
         if (
-            executable is None
-            or executable.name.casefold() not in command.casefold()
+            not pattern.search(command)
+            or owned_process.executable.name.casefold() not in command.casefold()
         ):
+            continue
+        executable, executable_error = _process_profile_executable(pid, profile, runner)
+        if executable_error is not None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                executable_error,
+                pid=pid,
+            )
+        if executable is None:
             continue
         started_at, start_error = process_start_time(pid, runner)
         if started_at is None:
@@ -1180,24 +1244,221 @@ def _inspect_producer_identity(
                 start_error or "Producer process start time is unavailable",
                 pid=pid,
             )
-        candidates.append(ProducerIdentity(pid, started_at, group_id, command, executable))
+        birth_token, birth_error = birth_token_reader(pid)
+        if birth_token is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                birth_error or "Producer process birth token is unavailable",
+                pid=pid,
+            )
+        pid_version, pid_version_error = pid_version_reader(pid)
+        if pid_version is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                pid_version_error or "Producer process PID version is unavailable",
+                pid=pid,
+            )
+        candidates.append(
+            ProducerIdentity(
+                pid,
+                birth_token,
+                pid_version,
+                started_at,
+                group_id,
+                command,
+                executable,
+            )
+        )
+    return candidates
+
+
+def _inspect_producer_identity(
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> ProducerIdentity | None:
+    launcher_started = _process_start_datetime(launcher_started_at)
+    if launcher_started is None:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer launcher start time could not be parsed",
+        )
+    candidates = _owned_process_candidates(
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    )
     if len(candidates) > 1:
         raise ControlError(
             "producer.identity_changed",
-            "Multiple exact producer candidates occupy the owned process group",
+            "Multiple exact owned-process candidates were discovered",
             pids=sorted(candidate.pid for candidate in candidates),
         )
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    candidate_started = _process_start_datetime(candidate.started_at)
+    if candidate_started is None:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer process start time could not be parsed",
+            pid=candidate.pid,
+        )
+    if candidate_started < launcher_started:
+        raise ControlError(
+            "producer.identity_changed",
+            "Exact owned process predates the active launcher",
+            pid=candidate.pid,
+        )
+    if candidate.process_group_id not in {candidate.pid, launcher_process_group_id}:
+        raise ControlError(
+            "producer.identity_changed",
+            "Exact owned process is not in an admitted process group",
+            pid=candidate.pid,
+            processGroupId=candidate.process_group_id,
+        )
+    return candidate
 
 
-def _producer_markers_ready(bridge_log: pathlib.Path, service_label: str) -> bool:
+def _revalidate_producer_identity(
+    expected: ProducerIdentity,
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+    *,
+    error_code: str = "producer.quiesce_failed",
+) -> ProducerIdentity:
+    birth_token, birth_error = birth_token_reader(expected.pid)
+    pid_version, pid_version_error = pid_version_reader(expected.pid)
+    started_at, start_error = process_start_time(expected.pid, runner)
+    current_group, group_error = process_group_id(expected.pid, runner)
+    command, command_error = process_command(expected.pid, runner)
+    executable, executable_error = _process_profile_executable(
+        expected.pid,
+        profile,
+        runner,
+    )
+    confirmed_started_at, confirmed_start_error = process_start_time(expected.pid, runner)
+    confirmed_birth_token, confirmed_birth_error = birth_token_reader(expected.pid)
+    confirmed_pid_version, confirmed_pid_version_error = pid_version_reader(expected.pid)
+    if birth_token != expected.birth_token:
+        detail = birth_error or "Owned process birth token changed before stop"
+    elif pid_version != expected.pid_version:
+        detail = pid_version_error or "Owned process PID version changed before stop"
+    elif started_at != expected.started_at:
+        detail = start_error or "Owned process start time changed before stop"
+    elif current_group != expected.process_group_id:
+        detail = group_error or "Owned process group changed before stop"
+    elif command != expected.command:
+        detail = command_error or "Owned process command changed before stop"
+    elif executable_error is not None:
+        detail = executable_error
+    elif executable is None or not paths_match(executable, expected.executable):
+        detail = "Owned process executable mapping changed before stop"
+    elif confirmed_started_at != expected.started_at:
+        detail = confirmed_start_error or "Owned process lifetime changed during validation"
+    elif confirmed_birth_token != expected.birth_token:
+        detail = confirmed_birth_error or "Owned process birth token changed during validation"
+    elif confirmed_pid_version != expected.pid_version:
+        detail = (
+            confirmed_pid_version_error
+            or "Owned process PID version changed during validation"
+        )
+    else:
+        detail = None
+    if detail is not None:
+        raise ControlError(
+            error_code,
+            detail,
+            pid=expected.pid,
+        )
+    assert confirmed_started_at is not None
+    assert confirmed_birth_token is not None
+    assert confirmed_pid_version is not None
+    assert current_group is not None
+    assert command is not None
+    assert executable is not None
+    return ProducerIdentity(
+        expected.pid,
+        confirmed_birth_token,
+        confirmed_pid_version,
+        confirmed_started_at,
+        current_group,
+        command,
+        executable,
+    )
+
+
+def _confirm_producer_identity(
+    expected: ProducerIdentity,
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> ProducerIdentity:
+    current = _revalidate_producer_identity(
+        expected,
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+        error_code="producer.identity_changed",
+    )
+    rediscovered = _inspect_producer_identity(
+        profile,
+        launcher_started_at,
+        launcher_process_group_id,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    )
+    if rediscovered is None or rediscovered != current:
+        raise ControlError(
+            "producer.identity_changed",
+            "Owned process identity changed during admission",
+            expectedPid=current.pid,
+            observedPid=rediscovered.pid if rediscovered is not None else None,
+        )
+    return _revalidate_producer_identity(
+        rediscovered,
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+        error_code="producer.identity_changed",
+    )
+
+
+def _producer_markers_ready(
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    producer_pid: int,
+    producer_pid_version: int,
+    producer_birth_token: int,
+) -> bool:
     try:
         payload = bridge_log.read_text(errors="replace")
     except OSError:
         return False
-    handshake = f"native_source producer handshake accepted service={service_label} "
+    handshake = re.compile(
+        "^native_source producer handshake accepted "
+        f"service={re.escape(service_label)} nonce={generation} "
+        f"bridge_pid={bridge_pid} producer_pid={producer_pid} "
+        f"producer_pidversion={producer_pid_version} "
+        f"producer_start_token={producer_birth_token} source=[1-9][0-9]*x[1-9][0-9]*$",
+        re.MULTILINE,
+    )
     self_tests = "native_source startup self-tests passed slots=3"
-    return payload.count(handshake) == 1 and payload.count(self_tests) == 1
+    return len(handshake.findall(payload)) == 1 and payload.count(self_tests) == 1
 
 
 def _group_is_live(process_group_id: int) -> bool:
@@ -1240,17 +1501,92 @@ def _group_is_live(process_group_id: int) -> bool:
 
 def _quiesce_producer(
     process: ProducerProcess,
+    launcher_birth_token: int,
+    launcher_pid_version: int,
     launcher_started_at: str,
-    process_group_id: int,
+    launcher_process_group_id: int,
+    target: ProducerIdentity | None,
     profile: ProfileStartAdmission,
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
     context: RuntimeContext,
     monotonic: Callable[[], float],
     group_id: Callable[[int], int],
     group_signaler: Callable[[int, int], None],
     group_live: Callable[[int], bool],
-) -> None:
+) -> ProducerIdentity | None:
+    transition_timeout = float(
+        profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"]
+    )
+    quiesce_deadline = monotonic() + max(
+        PRODUCER_QUIESCE_TIMEOUT_SECONDS,
+        transition_timeout + PRODUCER_QUIESCE_MARGIN_SECONDS,
+    )
+    quiesce_runner = DeadlineRunner(context.runner, quiesce_deadline, monotonic)
+
+    def stop_owned_process(identity: ProducerIdentity) -> None:
+        if not group_live(identity.process_group_id):
+            return
+        try:
+            current = _revalidate_producer_identity(
+                identity,
+                profile,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+        except ControlError:
+            if not group_live(identity.process_group_id):
+                return
+            raise
+        try:
+            group_signaler(current.process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        target_deadline = min(
+            monotonic() + PRODUCER_STOP_GRACE_SECONDS,
+            quiesce_deadline,
+        )
+        while monotonic() < target_deadline and group_live(current.process_group_id):
+            context.sleeper(MONITOR_INTERVAL_SECONDS)
+        if group_live(current.process_group_id):
+            try:
+                current = _revalidate_producer_identity(
+                    identity,
+                    profile,
+                    quiesce_runner,
+                    context.birth_token_reader,
+                    context.pid_version_reader,
+                )
+            except ControlError:
+                if not group_live(identity.process_group_id):
+                    return
+                raise
+            try:
+                group_signaler(current.process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            target_deadline = min(
+                monotonic() + PRODUCER_KILL_WAIT_SECONDS,
+                quiesce_deadline,
+            )
+            while monotonic() < target_deadline and group_live(current.process_group_id):
+                context.sleeper(MONITOR_INTERVAL_SECONDS)
+        if group_live(current.process_group_id):
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Owned detached process group remained live after bounded stop",
+                processGroupId=current.process_group_id,
+            )
+
+    if target is not None and target.process_group_id != launcher_process_group_id:
+        stop_owned_process(target)
     if process.poll() is None:
-        current_started_at, start_error = process_start_time(process.pid, context.runner)
+        current_birth_token, birth_error = context.birth_token_reader(process.pid)
+        current_pid_version, pid_version_error = context.pid_version_reader(process.pid)
+        current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
         try:
             current_group_id = group_id(process.pid)
         except OSError as error:
@@ -1259,38 +1595,164 @@ def _quiesce_producer(
                 "Producer launcher process group could not be revalidated",
                 detail=str(error),
             ) from error
-        if current_started_at != launcher_started_at or current_group_id != process_group_id:
+        if (
+            current_birth_token != launcher_birth_token
+            or current_pid_version != launcher_pid_version
+            or current_started_at != launcher_started_at
+            or current_group_id != launcher_process_group_id
+        ):
             raise ControlError(
                 "producer.quiesce_failed",
-                start_error or "Producer launcher identity changed before stop",
+                birth_error
+                or pid_version_error
+                or start_error
+                or "Producer launcher identity changed before stop",
             )
         try:
-            group_signaler(process_group_id, signal.SIGTERM)
+            group_signaler(launcher_process_group_id, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        deadline = monotonic() + PRODUCER_STOP_GRACE_SECONDS
-        while monotonic() < deadline and (process.poll() is None or group_live(process_group_id)):
+        deadline = min(
+            monotonic() + PRODUCER_STOP_GRACE_SECONDS,
+            quiesce_deadline,
+        )
+        while monotonic() < deadline and (
+            process.poll() is None or group_live(launcher_process_group_id)
+        ):
             context.sleeper(MONITOR_INTERVAL_SECONDS)
-        if process.poll() is None or group_live(process_group_id):
-            try:
-                group_signaler(process_group_id, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            deadline = monotonic() + PRODUCER_KILL_WAIT_SECONDS
-            while monotonic() < deadline and (process.poll() is None or group_live(process_group_id)):
+        if process.poll() is None or group_live(launcher_process_group_id):
+            if process.poll() is not None:
+                if target is not None and target.process_group_id == launcher_process_group_id:
+                    stop_owned_process(target)
+                else:
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        "Producer launcher exited while its process group remained live",
+                        processGroupId=launcher_process_group_id,
+                    )
+                current_group_id = launcher_process_group_id
+            else:
+                current_birth_token, birth_error = context.birth_token_reader(process.pid)
+                current_pid_version, pid_version_error = context.pid_version_reader(process.pid)
+                current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
+                try:
+                    current_group_id = group_id(process.pid)
+                except OSError as error:
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        "Producer launcher process group could not be revalidated",
+                        detail=str(error),
+                    ) from error
+                if (
+                    current_birth_token != launcher_birth_token
+                    or current_pid_version != launcher_pid_version
+                    or current_started_at != launcher_started_at
+                    or current_group_id != launcher_process_group_id
+                ):
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        birth_error
+                        or pid_version_error
+                        or start_error
+                        or "Producer launcher identity changed before forced stop",
+                    )
+                try:
+                    group_signaler(launcher_process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                deadline = min(
+                    monotonic() + PRODUCER_KILL_WAIT_SECONDS,
+                    quiesce_deadline,
+                )
+                while monotonic() < deadline and (
+                    process.poll() is None or group_live(launcher_process_group_id)
+                ):
+                    context.sleeper(MONITOR_INTERVAL_SECONDS)
+    if (
+        process.poll() is not None
+        and group_live(launcher_process_group_id)
+        and target is not None
+        and target.process_group_id == launcher_process_group_id
+    ):
+        stop_owned_process(target)
+    if process.poll() is None or group_live(launcher_process_group_id):
+        raise ControlError(
+            "producer.quiesce_failed",
+            "Owned launcher process group remained live after bounded stop",
+            processGroupId=launcher_process_group_id,
+        )
+
+    if target is None and profile.installed.owned_process is not None:
+        reconciliation_deadline = min(
+            monotonic() + transition_timeout,
+            quiesce_deadline,
+        )
+        while monotonic() < reconciliation_deadline:
+            observed = _inspect_producer_identity(
+                profile,
+                launcher_started_at,
+                launcher_process_group_id,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if observed is None:
                 context.sleeper(MONITOR_INTERVAL_SECONDS)
-    if process.poll() is None or group_live(process_group_id):
+                continue
+            target = observed
+            target = _confirm_producer_identity(
+                target,
+                profile,
+                launcher_started_at,
+                launcher_process_group_id,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if not _producer_markers_ready(
+                bridge_log,
+                service_label,
+                generation,
+                bridge_pid,
+                target.pid,
+                target.pid_version,
+                target.birth_token,
+            ):
+                context.sleeper(MONITOR_INTERVAL_SECONDS)
+                continue
+            if target.process_group_id != launcher_process_group_id:
+                stop_owned_process(target)
+            break
+
+    launcher_started = _process_start_datetime(launcher_started_at)
+    if launcher_started is None:
         raise ControlError(
             "producer.quiesce_failed",
-            "Owned producer process group remained live after bounded stop",
-            processGroupId=process_group_id,
+            "Producer launcher start time could not be parsed after stop",
         )
-    if _inspect_producer_identity(profile, process_group_id, context.runner) is not None:
+    remaining: list[ProducerIdentity] = []
+    for candidate in _owned_process_candidates(
+        profile,
+        quiesce_runner,
+        context.birth_token_reader,
+        context.pid_version_reader,
+    ):
+        candidate_started = _process_start_datetime(candidate.started_at)
+        if candidate_started is None:
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Owned process start time could not be parsed after stop",
+                pid=candidate.pid,
+            )
+        if candidate_started >= launcher_started:
+            remaining.append(candidate)
+    if remaining:
         raise ControlError(
             "producer.quiesce_failed",
-            "Exact producer process remained after bounded stop",
-            processGroupId=process_group_id,
+            "Exact owned process remained after bounded stop",
+            pids=sorted(candidate.pid for candidate in remaining),
         )
+    return target
 
 
 def _service_ready(
@@ -1335,6 +1797,43 @@ def _service_ready(
         "Exact launchd service and bridge check-in were not ready before the deadline",
         target=admission.paths.service_target,
     )
+
+
+def _revalidate_waiting_service(
+    admission: StartAdmission,
+    expected_pid: int,
+    expected_runs: int,
+    plist_sha256: str,
+    bridge_sha256: str,
+    runner: CommandRunner,
+) -> Any:
+    current = inspect_service(admission.paths, runner)
+    try:
+        current_plist_sha256 = artifact_contract.sha256_file(
+            admission.paths.launch_agent_plist
+        )
+        current_bridge_sha256 = artifact_contract.sha256_file(admission.paths.bridge_program)
+    except OSError as error:
+        raise ControlError(
+            "service.identity_changed",
+            f"Ready service content could not be revalidated: {error}",
+        ) from error
+    if (
+        current.error_code is not None
+        or not current.snapshot.present
+        or current.snapshot.pid != expected_pid
+        or current.snapshot.runs != expected_runs
+        or current.snapshot.state != "running"
+        or not current.owned
+        or not current.identity_valid
+        or current_plist_sha256 != plist_sha256
+        or current_bridge_sha256 != bridge_sha256
+    ):
+        raise ControlError(
+            "service.identity_changed",
+            current.message or "Launchd service identity changed before waiting publication",
+        )
+    return current
 
 
 def _write_startup_result(run_dir: pathlib.Path, report: StartReport) -> None:
@@ -1888,6 +2387,9 @@ def supervise_runtime(
     deadline = startup_deadline or (monotonic() + STARTUP_TIMEOUT_SECONDS)
     producer_process: ProducerProcess | None = None
     producer_log: pathlib.Path | None = None
+    bridge_pid: int | None = None
+    launcher_birth_token: int | None = None
+    launcher_pid_version: int | None = None
     launcher_started_at: str | None = None
     process_group_id: int | None = None
     producer_identity: ProducerIdentity | None = None
@@ -1957,6 +2459,18 @@ def supervise_runtime(
                     "Runtime control state already exists; run stop before starting",
                     path=str(active_admission.paths.state_path),
                 )
+            existing_owned_processes = _owned_process_candidates(
+                profile_admission,
+                startup_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if existing_owned_processes:
+                raise ControlError(
+                    "producer.already_running",
+                    "An exact owned-process candidate was already live before launch",
+                    pids=sorted(candidate.pid for candidate in existing_owned_processes),
+                )
             _remaining_timeout(host_deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
             _create_owner_lock(active_admission.paths, run_dir)
             owner_started_at, owner_error = process_start_time(os.getpid(), startup_runner)
@@ -2017,6 +2531,34 @@ def supervise_runtime(
                     monotonic,
                     context.sleeper,
                 )
+                bridge_pid = service.snapshot.pid
+                if bridge_pid is None:
+                    raise ControlError(
+                        "service.identity_unknown",
+                        "Ready launchd service has no live PID",
+                    )
+                producer_log = run_dir / PRODUCER_LOG_NAME
+                producer_state = _launching_producer_record(
+                    profile_admission,
+                    producer_log,
+                )
+                launching_payload = _state_payload(
+                    active_admission,
+                    run_dir,
+                    generation,
+                    service,
+                    owner_started_at,
+                    control_socket,
+                    plist_sha256,
+                    "idle",
+                    "launching-producer",
+                    producer_state,
+                )
+                _write_json_atomic(
+                    active_admission.paths.state_root,
+                    active_admission.paths.state_path,
+                    launching_payload,
+                )
                 effective_producer_launcher = producer_launcher or SubprocessProducerLauncher()
                 producer_process, producer_log = _producer_launch(
                     active_admission,
@@ -2032,6 +2574,24 @@ def supervise_runtime(
                     raise ControlError(
                         "producer.identity_unavailable",
                         launcher_error or "Producer launcher process start time is unavailable",
+                    )
+                launcher_birth_token, launcher_birth_error = context.birth_token_reader(
+                    producer_process.pid
+                )
+                if launcher_birth_token is None:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        launcher_birth_error
+                        or "Producer launcher process birth token is unavailable",
+                    )
+                launcher_pid_version, launcher_pid_version_error = context.pid_version_reader(
+                    producer_process.pid
+                )
+                if launcher_pid_version is None:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        launcher_pid_version_error
+                        or "Producer launcher process PID version is unavailable",
                     )
                 try:
                     process_group_id = group_id(producer_process.pid)
@@ -2052,6 +2612,8 @@ def supervise_runtime(
                     profile_admission,
                     "starting",
                     producer_process.pid,
+                    launcher_birth_token,
+                    launcher_pid_version,
                     launcher_started_at,
                     process_group_id,
                     producer_log,
@@ -2077,13 +2639,20 @@ def supervise_runtime(
                 producer_quiesced = False
 
                 def quiesce_and_publish() -> None:
-                    nonlocal producer_quiesced, producer_state
+                    nonlocal producer_identity, producer_quiesced, producer_state
                     if not producer_quiesced:
-                        _quiesce_producer(
+                        producer_identity = _quiesce_producer(
                             producer_process,
+                            launcher_birth_token,
+                            launcher_pid_version,
                             launcher_started_at,
                             process_group_id,
+                            producer_identity,
                             profile_admission,
+                            bridge_log,
+                            active_admission.paths.service_label,
+                            generation,
+                            bridge_pid,
                             context,
                             monotonic,
                             group_id,
@@ -2095,6 +2664,8 @@ def supervise_runtime(
                         profile_admission,
                         "quiesced",
                         producer_process.pid,
+                        launcher_birth_token,
+                        launcher_pid_version,
                         launcher_started_at,
                         process_group_id,
                         producer_log,
@@ -2119,6 +2690,7 @@ def supervise_runtime(
                     )
 
                 stop_requested = False
+                provisional_identity: ProducerIdentity | None = None
                 producer_deadline = min(
                     deadline,
                     monotonic()
@@ -2127,6 +2699,11 @@ def supervise_runtime(
                             "startupTimeoutSeconds"
                         ]
                     ),
+                )
+                producer_runner = DeadlineRunner(
+                    context.runner,
+                    producer_deadline,
+                    monotonic,
                 )
                 while monotonic() < producer_deadline:
                     if (
@@ -2144,16 +2721,66 @@ def supervise_runtime(
                             "producer.exited",
                             "CrossOver producer exited before authenticated readiness",
                         )
-                    observed = _inspect_producer_identity(
-                        profile_admission,
-                        process_group_id,
-                        context.runner,
-                    )
-                    if observed is not None and _producer_markers_ready(
+                    try:
+                        observed = _inspect_producer_identity(
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        if observed is None:
+                            if provisional_identity is not None:
+                                raise ControlError(
+                                    "producer.identity_changed",
+                                    "Provisional owned process disappeared before authenticated readiness",
+                                    pid=provisional_identity.pid,
+                                )
+                            continue
+                        observed = _confirm_producer_identity(
+                            observed,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                    except ControlError as error:
+                        if (
+                            error.code == "producer.identity_unavailable"
+                            and monotonic() >= producer_deadline
+                        ):
+                            break
+                        raise
+                    if provisional_identity is None:
+                        provisional_identity = observed
+                    elif observed != provisional_identity:
+                        raise ControlError(
+                            "producer.identity_changed",
+                            "Owned process changed before authenticated readiness",
+                            expectedPid=provisional_identity.pid,
+                            observedPid=observed.pid,
+                        )
+                    if _producer_markers_ready(
                         bridge_log,
                         active_admission.paths.service_label,
+                        generation,
+                        bridge_pid,
+                        provisional_identity.pid,
+                        provisional_identity.pid_version,
+                        provisional_identity.birth_token,
                     ):
-                        producer_identity = observed
+                        producer_identity = _confirm_producer_identity(
+                            provisional_identity,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
                         break
                 if not stop_requested:
                     if producer_identity is None:
@@ -2161,10 +2788,35 @@ def supervise_runtime(
                             "producer.start_timeout",
                             "Exact producer and authenticated bridge readiness did not complete before the profile deadline",
                         )
+                    service_runs = service.snapshot.runs
+                    if service_runs is None:
+                        raise ControlError(
+                            "service.identity_unknown",
+                            "Ready launchd service has no run count",
+                        )
+                    service = _revalidate_waiting_service(
+                        active_admission,
+                        bridge_pid,
+                        service_runs,
+                        plist_sha256,
+                        starting_payload["bridgeExecutableSha256"],
+                        producer_runner,
+                    )
+                    producer_identity = _confirm_producer_identity(
+                        producer_identity,
+                        profile_admission,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
                     producer_state = _producer_record(
                         profile_admission,
                         "ready",
                         producer_process.pid,
+                        launcher_birth_token,
+                        launcher_pid_version,
                         launcher_started_at,
                         process_group_id,
                         producer_log,
@@ -2187,6 +2839,23 @@ def supervise_runtime(
                         active_admission.paths.state_path,
                         waiting_payload,
                     )
+                    service = _revalidate_waiting_service(
+                        active_admission,
+                        bridge_pid,
+                        service_runs,
+                        plist_sha256,
+                        starting_payload["bridgeExecutableSha256"],
+                        producer_runner,
+                    )
+                    producer_identity = _confirm_producer_identity(
+                        producer_identity,
+                        profile_admission,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
                     report = StartReport(
                         True,
                         "waiting",
@@ -2202,7 +2871,7 @@ def supervise_runtime(
                         producer_state,
                     )
                     _write_startup_result(run_dir, report)
-                live_pid = service.snapshot.pid
+                live_pid = bridge_pid
                 next_status_check = monotonic()
                 next_identity_check = monotonic() + SERVICE_IDENTITY_INTERVAL_SECONDS
                 while True:
@@ -2235,11 +2904,32 @@ def supervise_runtime(
                             )
                             _write_supervisor_exit(run_dir, failure)
                             return failure
-                        current_producer = _inspect_producer_identity(
-                            profile_admission,
-                            process_group_id,
-                            context.runner,
-                        )
+                        try:
+                            assert producer_identity is not None
+                            current_producer = _confirm_producer_identity(
+                                producer_identity,
+                                profile_admission,
+                                launcher_started_at,
+                                process_group_id,
+                                context.runner,
+                                context.birth_token_reader,
+                                context.pid_version_reader,
+                            )
+                        except ControlError as error:
+                            failure = start_failure(
+                                error.code,
+                                error.message,
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
                         if current_producer != producer_identity:
                             failure = start_failure(
                                 "producer.identity_changed",
@@ -2310,6 +3000,47 @@ def supervise_runtime(
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
+                    if stop_requested:
+                        transitioning_service = inspect_service(
+                            active_admission.paths,
+                            context.runner,
+                        )
+                        if not transitioning_service.snapshot.present:
+                            continue
+                        try:
+                            transition_plist_sha256 = artifact_contract.sha256_file(
+                                active_admission.paths.launch_agent_plist
+                            )
+                            transition_bridge_sha256 = artifact_contract.sha256_file(
+                                active_admission.paths.bridge_program
+                            )
+                        except OSError:
+                            transition_plist_sha256 = None
+                            transition_bridge_sha256 = None
+                        if (
+                            transitioning_service.error_code is not None
+                            or not transitioning_service.owned
+                            or not transitioning_service.identity_valid
+                            or transition_plist_sha256 != plist_sha256
+                            or transition_bridge_sha256
+                            != starting_payload["bridgeExecutableSha256"]
+                        ):
+                            failure = start_failure(
+                                "service.identity_changed",
+                                transitioning_service.message
+                                or "Owned launchd service identity changed during cooperative stop",
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                        continue
                     if (
                         snapshot.pid != live_pid
                         or snapshot.runs != 1
@@ -2387,17 +3118,27 @@ def supervise_runtime(
         producer_clean = producer_process is None
         if (
             producer_process is not None
+            and launcher_birth_token is not None
+            and launcher_pid_version is not None
             and launcher_started_at is not None
             and process_group_id is not None
+            and bridge_pid is not None
             and admission is not None
             and admission.profile is not None
         ):
             try:
                 _quiesce_producer(
                     producer_process,
+                    launcher_birth_token,
+                    launcher_pid_version,
                     launcher_started_at,
                     process_group_id,
+                    producer_identity,
                     admission.profile,
+                    run_dir / BRIDGE_LOG_NAME,
+                    admission.paths.service_label,
+                    generation,
+                    bridge_pid,
                     context,
                     monotonic,
                     group_id,

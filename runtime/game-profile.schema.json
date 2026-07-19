@@ -162,6 +162,30 @@
           "minLength": 1,
           "type": "string"
         },
+        "ownedProcess": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "executable": {
+                  "$ref": "#/$defs/relativePath"
+                },
+                "processPattern": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "executable",
+                "processPattern"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "processPattern": {
           "minLength": 1,
           "type": "string"
@@ -180,6 +204,7 @@
       "required": [
         "installRoot",
         "entrypointTarget",
+        "ownedProcess",
         "arguments",
         "environment",
         "processPattern",

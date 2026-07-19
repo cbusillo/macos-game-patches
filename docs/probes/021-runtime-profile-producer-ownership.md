@@ -4,8 +4,8 @@
 
 Can the qualified runtime resolve one sealed curated game profile, launch one
 exact CrossOver producer under the detached supervisor, report `waiting` only
-after authenticated producer readiness, and stop the owned process session
-without adopting or signaling cached PIDs?
+after authenticated producer readiness, and stop every exact owned process
+group without adopting or signaling cached PIDs?
 
 ## Boundary
 
@@ -16,6 +16,10 @@ without adopting or signaling cached PIDs?
   start shape rather than retaining a compatibility flag.
 - Bind the profile validator, schema, and explicit curated profile files into
   the sealed artifact source contract.
+- Pin the macOS host bridge to ALVR commit
+  `c02bca35616ac4e3b95deae41fbbe70e2602e906` from `cbusillo/ALVR#6`, which
+  exports the authenticated producer PID, PID version, and start token and uses
+  one shared three-slot handshake deadline.
 - Reuse the existing exact installed-artifact, committed-journal, global-lock,
   launchd/Mach bridge, socket, signature, and cooperative-stop contracts.
 - Advance from host `idle` through `starting-producer` to `waiting` only. Keep
@@ -52,63 +56,101 @@ without adopting or signaling cached PIDs?
    pass the profile ID and digest to the detached child.
 2. Re-resolve the same profile and digest under the supervisor-held lifecycle
    lock before launching any producer process.
-3. Publish synchronized schema-v3 `idle` state with profile evidence and
-   `producer.status=starting` after the exact bridge checks in. This exposes the
-   identity-bound stop channel during producer startup.
+3. Publish synchronized schema-v4 `idle` state with profile evidence and
+   `producer.status=launching` before CrossOver spawn, then replace it with
+   `producer.status=starting` after exact launcher identity is available. This
+   preserves ownership evidence for every post-spawn identity-read failure and
+   exposes the identity-bound stop channel during producer startup.
 4. Admit CrossOver 26.2's exact in-bundle relative `cxstart -> wine` link only
    when its sibling target is a real executable, then build the proven command
    directly as an argument vector using that launcher, the exact bottle, target
    executable, working directory, profile arguments, generation nonce, bridge
    service, runtime bridge root, geometry, and profile environment.
 5. Launch `cxstart --wait-children` in a new POSIX session with stdout/stderr
-   below the generation directory. Retain the live process handle as the only
-   signal authority.
-6. Discover the game process only as evidence. A candidate must match the
-   profile pattern, belong to the owned session/process group, have an exact
-   start time, use the configured bottle, and expose the expected executable.
-   Zero or multiple exact candidates fail closed.
-7. Require both existing authenticated bridge markers before publishing
+   below the generation directory. Retain the live process handle and its exact
+   launcher identity in supervisor memory.
+6. Resolve an optional singleton `launch.ownedProcess` from the sealed profile.
+   Freedom names only
+   `FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe` and
+   its Shipping-only pattern; the executable must also be a sealed critical
+   file. Do not infer signal authority from every critical `.exe`.
+7. Discover that steady-state process globally because CrossOver Wine may call
+   `setsid()` and detach it from the launcher group. Accept exactly one live
+   candidate only when its pattern, executable mapping, command basename,
+   high-resolution birth token, macOS PID version, start time, process-group
+   leadership, and authenticated bridge readiness all agree with the active
+   generation. Count global exact candidates before filtering their group shape,
+   retain the first exact candidate provisionally, and revalidate it around a
+   second global scan before readiness can inherit the generation-local bridge
+   markers. Zero, changed, re-executed, multiple, or unreadable candidates fail
+   closed.
+8. Require both existing authenticated bridge markers before publishing
    `waiting`:
-   - one producer handshake for the exact service and generation; and
+   - one producer handshake naming the exact service, active generation nonce,
+     bridge PID, Mach-audit-authenticated producer PID and PID version, and
+     matching high-resolution process start token in the private bridge log; and
    - all three startup self-tests.
-8. Bound producer startup by the curated profile timeout. The total public
+9. Bound producer startup by the curated profile timeout. The total public
    start deadline is the fixed host-start budget plus that sealed profile
    timeout; callers receive no timeout flag.
-9. Monitor the direct launcher handle, exact producer identity, owned session,
-   launchd service, and periodic bridge signature identity. Unexpected producer
-   or service loss becomes a truthful failure, never a false live state.
+10. Monitor both live process identities, both owned groups, the launchd
+    service, and periodic bridge signature identity. Unexpected producer or
+    service loss becomes a truthful failure, never a false live state.
 
 ## Stop Contract
 
-1. An authenticated schema-v3 `stop` request asks the supervisor to quiesce the
+1. An authenticated schema-v4 `stop` request asks the supervisor to quiesce the
    producer before acknowledging the request.
-2. Revalidate the live direct child and owned session identity from the retained
-   process handle. Serialized producer PIDs remain evidence only.
-3. Send `SIGTERM` only to the still-exact owned process group, wait a fixed
-   grace period, then send `SIGKILL` only to that same exact group if needed.
-4. Require the launcher, exact producer candidate, and owned session to be gone
+2. Revalidate the retained launcher and in-memory steady-state process by PID,
+   birth token, PID version, start time, PGID, command, and exact executable
+   mapping immediately before every signal. Serialized producer PIDs and PGIDs
+   remain evidence only.
+3. Stop the independently grouped steady-state process first, then the launcher
+   group. Send `SIGTERM`, wait a fixed grace period, and send `SIGKILL` only
+   after another exact live revalidation.
+4. During startup cancellation, stop the exact launcher group and perform a
+   bounded reconciliation scan. An unauthenticated, ambiguous, or late detached
+   candidate blocks cleanup and preserves diagnostics instead of being guessed
+   or signaled.
+5. Require the launcher, exact producer candidate, and every owned group to be gone
    before publishing `producer.status=quiesced` and acknowledging stop.
-5. If identity is ambiguous or the producer remains live, return
+6. If identity is ambiguous or the producer remains live, return
    `producer.quiesce_failed`, preserve the bridge and all ownership evidence,
    and do not boot out launchd.
-6. After acknowledgment, the existing caller performs exact registered-plist
-   bootout. The supervisor observes service absence and removes its state,
-   socket, plist, owner lock, and generation directory.
-7. Preserve schema-v2 stop behavior so the new checkout can still stop a live
-   dev9 host-only supervisor during update.
-8. Install and uninstall continue to stop synchronized live state before the
+7. After acknowledgment, the caller re-inspects launchd ownership and signature
+   identity and re-hashes the synchronized plist and bridge immediately before
+   exact registered-plist bootout. The supervisor observes service absence and
+   removes its state, socket, plist, owner lock, and generation directory. The
+   supervisor applies the larger of 40 seconds or the sealed transition timeout
+   plus ten seconds. The stop RPC allows 1,230 seconds, covering both the
+   profile schema's 600-second maximum startup window and 600-second maximum
+   transition window plus quiescence margin, while ping remains independently
+   bounded at five seconds.
+8. Preserve schema-v2 stop behavior during update. Treat every schema-v3
+   Freedom state as ownership-incomplete and require it to be stopped with its
+   originating runtime before update; the old supervisor cannot prove that no
+   detached Shipping group exists.
+9. A dead schema-v4 owner triggers identity-anchored recorded-group checks and a
+   non-signaling global exact executable/pattern scan. Reused PGIDs whose leader
+   no longer matches the recorded birth token and PID version are ignored; an
+   original leaderless group, exact candidate, unreadable scan, incomplete
+   discovery, malformed state, or unsupported state preserves all ownership
+   evidence instead of permitting stale cleanup.
+10. Install and uninstall continue to stop synchronized live state before the
    global lock and recheck stopped state under the lock. Failed producer
    quiescence leaves transaction targets and journals untouched.
 
 ## State Contract
 
-Schema v3 adds exact `profile` and `producer` objects while preserving every
-schema-v2 host field.
+Schema v4 preserves every host field and separates launcher identity from the
+optional independently grouped owned process.
 
 - `profile`: ID, SHA-256, app ID, build ID, and entrypoint target.
-- `producer`: `starting`, `ready`, or `quiesced`; launcher PID/start time;
-  session and process-group identity; active target PID/start time/executable;
-  and the generation-local producer log.
+- `producer`: `launching`, `starting`, `ready`, or `quiesced`; optional launcher
+  identity while launch is still incomplete; expected profile-owned
+  executable/pattern evidence; optional live owned-process PID, birth token,
+  PID version, start time, PGID, command, and executable evidence; and the
+  generation-local producer log.
 - `idle`: bridge is synchronized and producer launch is in progress or has been
   quiesced during stop.
 - `waiting`: the exact producer is live, the bridge handshake and startup
@@ -132,6 +174,16 @@ second bridge or game launch.
 - exact producer session cannot be stopped: `producer.quiesce_failed`;
 - dead owner with a still-observed producer: `producer.orphaned`.
 
+## Known Failure Signature
+
+On July 19, 2026, two physical qualification starts reached `waiting` and their
+tracked `cxstart` groups stopped successfully, but Wine had moved each
+`FreedomLocomotion-Win64-Shipping.exe` into a new session and PGID. The two
+Shipping processes remained alive with PPID 1 after state cleanup. Both were
+stopped manually only after command, start-time, PGID-leader, and exact `lsof`
+executable checks. No further physical start is allowed until schema-v4
+dual-group ownership passes the full cleanup gate.
+
 ## Fixture Matrix
 
 - curated Freedom profile resolves with exact manifest source hashes;
@@ -142,17 +194,30 @@ second bridge or game launch.
 - The Lab is rejected rather than partially admitted;
 - exact producer argv, working directory, environment, session, and log path are
   deterministic;
-- bridge and producer readiness publish schema-v3 `waiting`;
+- pre-launch state preserves ownership evidence when any immediate launcher
+  identity read fails;
+- bridge and producer readiness publish schema-v4 `waiting`;
 - duplicate same-profile start is idempotent and different-profile start is a
   conflict;
-- producer timeout, early exit, identity drift, multiple candidates, and PID
-  reuse never publish a false live state;
-- a pure-Python parent/child process-session fixture proves exact group cleanup
-  on macOS and Linux;
+- producer timeout, early exit, identity drift, re-exec, multiple candidates,
+  and PID reuse never publish a false live state;
+- malformed ownership state and unrecorded exact dead-owner candidates preserve
+  state without launchd bootout or cached-PID signaling;
+- an acknowledged stop revalidates exact launchd/content identity before
+  bootout, and ping/stop retain separate bounded RPC deadlines;
+- a pure-Python parent/child fixture whose producer calls `setsid()` proves
+  exact cleanup of launcher and detached process groups on macOS and Linux;
 - stop before producer spawn, during startup, and after readiness is bounded and
   race-safe;
+- target exit during stop revalidation is accepted only after its group is
+  freshly confirmed absent;
+- a same-PGID target becomes the exact signal anchor if its launcher exits, and
+  the stop RPC remains live across the maximum queued startup plus transition
+  windows;
 - quiescence failure preserves bridge, state, socket, and ownership evidence;
-- schema-v2 host-only stop remains compatible;
+- schema-v2 stop remains compatible and schema-v3 Freedom fails closed;
+- dead schema-v4 state preserves evidence when either recorded group is live and
+  ignores a recorded PGID only after its reused leader identity is proven;
 - install and uninstall pre-stop `waiting` before acquiring the lifecycle lock;
 - journal, profile, producer, artifact, and plist drift remain fail-closed;
 - final cleanup leaves no producer, service, socket, plist, owner lock,
@@ -194,7 +259,7 @@ transactionally update the current install, and retain the exact sealed output.
 
 - Start the exact installed dev10 artifact with
   `--profile freedom-locomotion` and no Vision Pro client.
-- Require schema-v3 `waiting`, exact profile and producer identity, one bridge
+- Require schema-v4 `waiting`, exact profile and dual producer identity, one bridge
   producer handshake, three startup self-tests, and stable launchd/signature
   identity through the periodic refresh.
 - Repeat start and require idempotence with no second producer or service.

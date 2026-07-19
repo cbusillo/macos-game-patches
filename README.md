@@ -120,13 +120,20 @@ All commands support `--json`. `doctor` performs no mutation, `status` refuses
 to infer live health from stale logs or cached PIDs, and `stop` boots out only an
 exact owned launchd job. `start` accepts a sealed curated profile identifier,
 projects the transactionally installed game tree back to its stock profile
-identity, launches CrossOver in one owned process group, and reports `waiting`
-only after the exact game process plus the authenticated bridge producer
-handshake and startup self-tests are live. Schema-v3 stop quiesces that retained
-process handle before launchd bootout and never signals serialized PIDs. The
-first production-admitted profile is `freedom-locomotion`; The Lab remains a
-separate multi-target lifecycle slice. Vision Pro `connected`, `streaming`, and
-`recovering` transitions are still the next issue #60 slice.
+identity, launches CrossOver with separate exact launcher and steady-state
+process ownership, and reports `waiting` only after the profile-declared
+Shipping executable remains globally unique and stable across repeated exact
+PID, birth-token, PID-version, start-time, process-group, command, and executable
+checks around a bridge handshake bound to the generation nonce, bridge PID, and
+Mach-audit-authenticated producer identity, plus startup self-tests. Schema-v4
+records ownership before spawning CrossOver, then stop freshly revalidates and
+quiesces each live owned process group, refuses ambiguous dead-owner cleanup,
+revalidates service and producer identity before publication or launchd bootout,
+and never signals serialized PIDs. The first
+production-admitted profile is
+`freedom-locomotion`; The Lab remains a separate multi-target lifecycle slice.
+Vision Pro `connected`, `streaming`, and `recovering` transitions are still the
+next issue #60 slice.
 
 ## Starting New Work
 

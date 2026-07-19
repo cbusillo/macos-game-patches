@@ -60,6 +60,7 @@
       "ALVR_FAKE_RENDER_TARGET_WIDTH": "1152"
     },
     "installRoot": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/The Lab",
+    "ownedProcess": null,
     "processPattern": "([T]heLab\\.exe|[S]ecretShop\\.exe|RobotRepair.*[v]r\\.exe)",
     "startupTimeoutSeconds": 180,
     "transitionTimeoutSeconds": 600
