@@ -2327,6 +2327,42 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             reused_owner_pid = lock.pid
             lock = replace(lock, alive=False)
 
+    if (
+        not lock.alive
+        and initial_record is not None
+        and initial_record.get("schemaVersion") == 3
+        and isinstance(initial_record.get("producer"), dict)
+    ):
+        producer_present, producer_error = recorded_producer_group_present(
+            initial_record,
+            context.runner,
+        )
+        if producer_present is None:
+            return stop_failure(
+                "producer.identity_unavailable",
+                producer_error or "Stale producer process group could not be inspected",
+                actions,
+                service,
+                lock,
+            )
+        if producer_present:
+            producer_status = initial_record["producer"].get("status")
+            return stop_failure(
+                (
+                    "producer.quiesce_failed"
+                    if producer_status == "quiesced"
+                    else "producer.orphaned"
+                ),
+                (
+                    "Quiesced producer process group became live again; preserving state"
+                    if producer_status == "quiesced"
+                    else "Dead runtime owner left a producer process group; refusing cached-state signaling"
+                ),
+                actions,
+                service,
+                lock,
+            )
+
     service_was_owned = service.snapshot.present and service.owned and service.identity_valid
     if service.snapshot.present:
         registered_path = service.snapshot.path
@@ -2383,40 +2419,6 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
             supervisor_stop_requested = True
             supervisor_run_dir = pathlib.Path(record["runDir"])
             actions.append(f"request supervisor stop generation={record['generation']}")
-        elif (
-            initial_record is not None
-            and initial_record.get("schemaVersion") == 3
-            and isinstance(initial_record.get("producer"), dict)
-        ):
-            producer_present, producer_error = recorded_producer_group_present(
-                initial_record,
-                context.runner,
-            )
-            if producer_present is None:
-                return stop_failure(
-                    "producer.identity_unavailable",
-                    producer_error or "Stale producer process group could not be inspected",
-                    actions,
-                    service,
-                    lock,
-                )
-            if producer_present:
-                producer_status = initial_record["producer"].get("status")
-                return stop_failure(
-                    (
-                        "producer.quiesce_failed"
-                        if producer_status == "quiesced"
-                        else "producer.orphaned"
-                    ),
-                    (
-                        "Quiesced producer process group became live again; preserving state"
-                        if producer_status == "quiesced"
-                        else "Dead runtime owner left a producer process group; refusing cached-state signaling"
-                    ),
-                    actions,
-                    service,
-                    lock,
-                )
         result = context.runner.run(
             ["/bin/launchctl", "bootout", paths.service_domain, registered_path],
             timeout=10.0,

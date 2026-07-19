@@ -875,6 +875,26 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(self.runner.service_output)
         self.assertTrue(self.paths.state_path.exists())
 
+    def test_dead_schema_three_owner_preserves_orphaned_group_without_service(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=3,
+            run_dir=run_dir,
+        )
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertIsNone(self.runner.service_output)
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+
     def test_dead_schema_three_owner_cleans_when_producer_group_is_absent(self) -> None:
         self.create_bridge()
         self.create_plist()
