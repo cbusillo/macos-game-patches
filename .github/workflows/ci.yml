@@ -115,6 +115,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Compile lifecycle tools
         run: |
           python3 -m py_compile \
@@ -132,6 +137,9 @@ jobs:
             tools/runtime_descriptor_test.py \
             tools/runtime_transaction_test.py \
             tools/runtime_install_test.py
+
+      - name: Prepare fixture root
+        run: mkdir -p "$RUNTIME_FIXTURE_ROOT"
 
       - name: Validate lifecycle fixtures
         run: |
