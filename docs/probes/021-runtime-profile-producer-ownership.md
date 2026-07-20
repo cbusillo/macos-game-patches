@@ -188,6 +188,16 @@ stopped manually only after command, start-time, PGID-leader, and exact `lsof`
 executable checks. No further physical start is allowed until schema-v4
 dual-group ownership passes the full cleanup gate.
 
+A later July 19 candidate from commit `2c5f6b9fa042` correctly owned the
+detached Shipping process but rejected its retained launcher after readiness.
+PID `57668` kept birth token `1784504754854850`, start time, and PGID while
+CrossOver execed `cxstart` into `winewrapper`; macOS PID version legitimately
+changed from `20178920` to `20178934`. Exact target and launcher-group cleanup
+left no orphan, and uninstall transaction
+`fddcfa33849549b89bd84c955dddc34d` restored the stock baseline. The corrected
+contract therefore excludes PID version from launcher authority while retaining
+it for the Mach-audit-authenticated Shipping process.
+
 ## Fixture Matrix
 
 - curated Freedom profile resolves with exact manifest source hashes;
@@ -261,17 +271,50 @@ transactionally update the current install, and retain the exact sealed output.
 
 ## Physical Qualification
 
-- Start the exact installed dev10 artifact with
-  `--profile freedom-locomotion` and no Vision Pro client.
-- Require schema-v4 `waiting`, exact profile and dual producer identity, one bridge
-  producer handshake, three startup self-tests, and stable launchd/signature
-  identity through the periodic refresh.
-- Repeat start and require idempotence with no second producer or service.
-- Cooperatively stop and prove exact producer-session, service, socket, plist,
-  lock, and generation cleanup without broad process kills.
-- Start again, then run install and uninstall pre-stop from live `waiting` and
-  require zero cleanup or rollback failures plus exact stock restoration.
-- End `runtime.ready` with no owned process or transaction residue.
+The corrected candidate was qualified on July 20, 2026.
+
+- Source commit `730023481e9d03b1da5dc09ffbde0e4713fbcbbe` and ALVR
+  commit `c02bca35616ac4e3b95deae41fbbe70e2602e906` passed 12 profile,
+  12 descriptor, 29 transaction, 20 install, 52 control, and 44 start tests,
+  artifact/profile checks and self-tests, Python compile, JSON, Markdown,
+  formatting, tracked-file gitleaks, and two focused ownership reviews.
+- Independent builds produced identical unsealed seal
+  `ebae09b0ff8c2dd01ab971f4aa01bc09fd684904920ad47bb2072bcbb7bedea4`.
+  Developer ID sealing produced exact final seal
+  `3141421da6ebf9bf710ffb1c6e8b3197e695c12d4ea0a6972b2878154a6075fb`,
+  which verified and passed all 18 doctor checks.
+- Install transaction `2054d4cb7e8f4052918c31c221050303` committed with no
+  cleanup or rollback failures. Generation `8540206269282519901` reached
+  schema-v4 `waiting` with owner PID `35213`, bridge PID `35365`, retained
+  launcher PID/PGID `35394`, and independently grouped Shipping PID/PGID
+  `35528`.
+- The retained launcher was live as `winewrapper.exe` with birth token
+  `1784506586112772` and observed PID version `20395416`; its serialized state
+  intentionally contained no PID version. The Shipping process retained birth
+  token `1784506589196501` and PID version `20395629`, matching the bridge
+  handshake exactly together with service, generation nonce, bridge PID, and
+  start token. All three startup self-tests passed.
+- Immediate status and status after a 31-second periodic refresh both remained
+  synchronized `waiting`. Repeating start returned the same generation, owner,
+  launcher, target, and service with an empty action list.
+- Cooperative stop requested that exact generation, booted out the exact
+  registered service, and left no matching process, service, state, socket,
+  plist, owner lock, or generation directory.
+- Generation `8793672019013576824` then reached `waiting`; invoking install on
+  the already-committed artifact cooperatively stopped it before returning
+  `transaction.already_committed`, and subsequent status was `runtime.ready`.
+- Generation `8091351530987245357` then reached `waiting`; live uninstall
+  explicitly stopped that generation and committed transaction
+  `366af23f4ade4dd0a23375b6f3deb618` with zero cleanup or rollback failures.
+- Final status was `runtime.ready`. All 27 install preconditions were ready,
+  including stock MoltenVK SHA-256
+  `5c370edf330a126e4605aaf5cd156521197b0fdbd208b3e0a7931f3b8e6c5056`
+  and stock OpenVR SHA-256
+  `d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c`.
+  Every runtime-created game/bridge/template file was absent, the retained
+  native bridge remained admitted, and no process, service, transient state,
+  generation directory, quarantine, undo entry, or transaction failure
+  remained.
 
 This host-only disconnected gate does not qualify Vision Pro discovery,
 streaming, controls, or headset-visible quality. Those remain the next #60
