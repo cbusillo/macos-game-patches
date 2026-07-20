@@ -438,9 +438,9 @@ def patched_lifecycle(
 
 class RuntimeInstallTests(unittest.TestCase):
     def test_live_supervisor_stops_before_both_lifecycle_directions(self) -> None:
-        for schema_version in (2, 3):
+        states = {2: "idle", 3: "waiting", 4: "waiting", 5: "streaming"}
+        for schema_version, state in states.items():
             with self.subTest(schema_version=schema_version), lifecycle_fixture() as fixture:
-                state = "idle" if schema_version == 2 else "waiting"
                 live = StatusReport(
                     state,
                     f"runtime.{state}",
@@ -456,11 +456,18 @@ class RuntimeInstallTests(unittest.TestCase):
                     return_value=live,
                 ):
                     install = runtime_install.install_runtime(context, fixture.artifact_root)
+                    install_replay = runtime_install.install_runtime(
+                        context, fixture.artifact_root
+                    )
                     uninstall = runtime_install.uninstall_runtime(context, fixture.artifact_root)
                 self.assertTrue(install.ok)
+                self.assertTrue(install_replay.ok)
                 self.assertTrue(uninstall.ok)
-                self.assertGreaterEqual(stop_mock.call_count, 4)
+                self.assertGreaterEqual(stop_mock.call_count, 5)
                 self.assertEqual(install.stop_actions.count("already-stopped"), 2)
+                self.assertEqual(
+                    install_replay.stop_actions.count("already-stopped"), 1
+                )
                 self.assertEqual(uninstall.stop_actions.count("already-stopped"), 2)
 
     def test_sealing_gate_has_zero_lifecycle_mutation(self) -> None:

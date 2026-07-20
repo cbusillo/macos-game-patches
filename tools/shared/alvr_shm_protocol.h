@@ -5,7 +5,7 @@
 
 #define ALVR_SHM_PATH "/tmp/alvr_frame_buffer.shm"
 #define ALVR_SHM_MAGIC 0x414C5652
-#define ALVR_SHM_VERSION 6
+#define ALVR_SHM_VERSION 7
 
 #define ALVR_MAX_WIDTH 4096
 #define ALVR_MAX_HEIGHT 2048
@@ -13,6 +13,10 @@
 #define ALVR_MAX_FRAME_SIZE (ALVR_MAX_WIDTH * ALVR_MAX_HEIGHT * ALVR_BYTES_PER_PIXEL)
 #define ALVR_NUM_BUFFERS 3
 #define ALVR_NUM_CONTROLLERS 2
+
+#define ALVR_CLIENT_STATE_WAITING 0
+#define ALVR_CLIENT_STATE_CONNECTED 1
+#define ALVR_CLIENT_STATE_STREAMING 2
 
 typedef enum {
     ALVR_FRAME_EMPTY = 0,
@@ -87,6 +91,17 @@ typedef struct {
     float hmd_pose[3][4];
     AlvrFrameHeader frame_headers[ALVR_NUM_BUFFERS];
     AlvrControllerState controllers[ALVR_NUM_CONTROLLERS];
+    volatile uint32_t telemetry_sequence;
+    volatile uint32_t client_state;
+    volatile uint32_t stream_contract_valid;
+    uint32_t telemetry_reserved;
+    volatile uint64_t runtime_generation;
+    volatile uint64_t bridge_pid;
+    volatile uint64_t stream_epoch;
+    volatile uint64_t frames_transported;
+    volatile uint64_t connect_events;
+    volatile uint64_t disconnect_events;
+    volatile uint64_t contract_failure_events;
 } AlvrSharedMemory;
 
 #ifdef __cplusplus
@@ -95,11 +110,13 @@ static_assert(offsetof(AlvrSharedMemory, hmd_pose_set) == 132, "hmd pose flag AB
 static_assert(offsetof(AlvrSharedMemory, hmd_pose_timestamp_ns) == 144, "hmd pose timestamp ABI offset");
 static_assert(offsetof(AlvrSharedMemory, frame_headers) == 256, "frame_headers ABI offset");
 static_assert(offsetof(AlvrSharedMemory, controllers) == 640, "controller state ABI offset");
+static_assert(offsetof(AlvrSharedMemory, telemetry_sequence) == 992, "client telemetry ABI offset");
+static_assert(offsetof(AlvrSharedMemory, connect_events) == 1040, "client event ABI offset");
 static_assert(offsetof(AlvrSharedMemory, view_config_set) == 88, "view config ABI offset");
 static_assert(offsetof(AlvrFrameHeader, producer_publish_wall_ns) == 88, "frame timing ABI offset");
 static_assert(sizeof(AlvrFrameHeader) == 128, "frame header ABI size");
 static_assert(sizeof(AlvrControllerState) == 176, "controller state ABI size");
-static_assert(sizeof(AlvrSharedMemory) == 992, "shared memory ABI size");
+static_assert(sizeof(AlvrSharedMemory) == 1064, "shared memory ABI size");
 #endif
 
 static inline size_t alvr_shm_frame_offset(int buffer_index) {

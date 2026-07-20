@@ -717,6 +717,7 @@ def _settle_active_journal(
                     reason_code="transaction.already_committed",
                     message="The requested lifecycle transaction is already committed",
                     ok=True,
+                    stop_actions=stop_actions,
                 ),
                 None,
             )
@@ -1314,7 +1315,7 @@ def _mutate_runtime(
             live_status.ok
             and live_status.state in LIVE_STATES
             and isinstance(live_record, dict)
-            and live_record.get("schemaVersion") in {2, 3, 4}
+            and live_record.get("schemaVersion") in {2, 3, 4, 5}
         ):
             pre_lock_stop = stop_runtime(context)
             stop_actions = pre_lock_stop.actions
