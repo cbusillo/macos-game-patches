@@ -155,6 +155,68 @@ Physical gate:
 - fixture and physical transition timelines;
 - exact install/uninstall transactions and final stock-baseline audit.
 
+## Actual Evidence
+
+Final source and artifact identity:
+
+- macos-game-patches source: `b2c83cb139ed2e875db3ff2b8c43a2d0d6082d9f`;
+- ALVR host source: `fae5a673792f7b8b3e6de24adc8c0b1be7181f4d`;
+- two independent unsealed builds shared seal
+  `2da77cd8cbcde9ea52b0d7c512263935f3f9cb41b57e12eab35963e387c42b12`;
+- Developer ID sealing produced
+  `1c5e8f81ee7923d4f50bcfb218f2fa06175331a97dc5526af6b226f865def5a7`;
+- all 18 doctor checks passed on Mac16,9, macOS 27.0, Xcode 27.0, and
+  CrossOver 26.2.
+
+The physical state-machine gate used the same version-7 bridge payload and
+`runtime_start.py` source present in the final artifact:
+
+- generation `166138400612866940` seeded two retained trusted clients before
+  launchd and reached `waiting` with exact generation, bridge PID, and session
+  identity;
+- the trusted physical Vision Pro reached `streaming` at epoch 1 with one
+  connect event and advancing transported frames;
+- terminating the client produced `recovering` at epoch 2 with one disconnect
+  event;
+- relaunching inside the recovery window reached `streaming` at epoch 3 with
+  two connect events and one disconnect event;
+- a second disconnect produced epoch 4 and remained `recovering` from
+  `2026-07-20T05:15:34.713777+00:00` through the fixed monotonic window before
+  reaching `waiting` at `2026-07-20T05:16:05.579404+00:00`;
+- generation `133480913144122461` reached `connected` when the exact Shipping
+  process group was temporarily suspended and returned to `streaming` after it
+  resumed, proving the two-second transported-frame activity boundary.
+
+The lifecycle stress pass rejected two intermediate candidates rather than
+recording false success:
+
+- sealed candidate `8e82702e12762bea930a3edb105921dba64273978b258967ef76acff1a267864`
+  returned `transaction.busy` for a live schema-v5 install because the
+  pre-lock stop path admitted only schemas 2 through 4;
+- sealed candidate `8a12f593a300b662cd6c3430880c8ac2b949fc159319a1af9b1504df53718de1`
+  stopped the live stream correctly but omitted the synchronized stop actions
+  from its already-committed JSON response.
+
+The final sealed artifact corrected both paths. A live install stopped
+generation `2438741942815234293` before returning
+`transaction.already_committed` with the exact supervisor-stop and launchd
+bootout actions. A live uninstall stopped generation `7091424066452419428`,
+restored the stock files, and committed transaction
+`d4cc0c0bcf3f4b209470b3de5a3c09f0` with no cleanup or rollback failures.
+Final status is `runtime.ready` with no control state, owner, service, socket,
+plist, lock, or generation directory, and the physical client was terminated.
+
+Local evidence is retained under
+`.code/probes/022-runtime-client-state-recovery/20260720T051430Z/`.
+
+## Verdict
+
+Pass. Schema-v5 status distinguishes waiting, connected, streaming,
+recovering, and stopped/ready states while preserving exact schema-v4 service
+and producer ownership. Recovery is monotonic and bounded, late client state
+cannot survive synchronized stop, and both lifecycle mutation directions stop
+an active schema-v5 stream before acquiring the transaction lock.
+
 ## Cleanup
 
 - Cooperative `stop` must quiesce both producer groups before booting out the
