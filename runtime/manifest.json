@@ -16,7 +16,7 @@
     "description": "Deterministic payload with a separate Developer ID final-sealing phase for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev9"
+    "version": "1.0.0-dev10"
   },
   "artifacts": [
     {
@@ -324,7 +324,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "f59bfca6350f3bff27551f072cd403d2ee72ef42"
+      "revision": "c02bca35616ac4e3b95deae41fbbe70e2602e906"
     },
     {
       "cleanPolicy": "all",
@@ -847,7 +847,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "db4ea259256ecf4f143cb595889be8a12d1ebc1d22bac6d1311a7df7cf1f1e3e",
+      "sha256": "04aad1bd10605ee7ba1efe5c7c6a11515bb39630e3d4413e0ea650164810b964",
       "supplyClass": "repo-source"
     },
     {
@@ -871,25 +871,49 @@
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "ef38d3e740c66ea1f60b348e16e4f2953f16381e05066012dc63ba45f920120e",
+      "sha256": "e28bac1ca4e7ddb3bc06ca7dae42a7aa1c1080526b4a47ab4f284737d76cb3e9",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "42e7cc267480173e345c07b4ce9b2cac6e96e4ce3b41c3410b6517f622fe4e0e",
+      "sha256": "330a95156548e8a59b0359ab9d49839f0c9e8d465cbbdd0298d26c05da5150c6",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "fa320f48466e55c902c56bb4c4c5fe621770583014309cd86837b6303367be58",
+      "sha256": "4b35c0eb72ae86a2d465a85c4420967ebaf41f0be686a8c88c0cdd4a20c08a4b",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "runtime_profile",
+      "path": "${REPO_ROOT}/tools/runtime_profile.py",
+      "sha256": "f381cd18dd8ba1179f8ee00a0e0e534aa0da2ae109fe7699bafce063a6335d75",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "game_profile_schema",
+      "path": "${REPO_ROOT}/runtime/game-profile.schema.json",
+      "sha256": "faaac1f2ce042727ddc6a0f6d7aad31b55672f037410069daee193d0a012694d",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "game_profile_freedom_locomotion",
+      "path": "${REPO_ROOT}/runtime/profiles/freedom-locomotion.json",
+      "sha256": "29cb1738706338344a2c1a44781ab121bb7e45a75df75808a23cc1164faa712e",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "game_profile_the_lab",
+      "path": "${REPO_ROOT}/runtime/profiles/the-lab.json",
+      "sha256": "16e62dcc88ae46488fe064e6bb2069741d39a6dca36c9714190cdbfee92586af",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_cli",
       "path": "${REPO_ROOT}/tools/runtime_cli.py",
-      "sha256": "49282f977277b1d5fca0482f9cc6f385f70beba3196cc834b6220e109e900628",
+      "sha256": "2a149433050e85225ad3686f89a89c11e1dc1b8609b6ec1d0afb92221895ae2f",
       "supplyClass": "repo-source"
     },
     {

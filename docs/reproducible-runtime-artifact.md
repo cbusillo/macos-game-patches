@@ -318,10 +318,55 @@ coordinator quiesces owned runtime state and rejects open targets before
 mutation; descriptor hardening and before/after identity sampling fail closed on
 ordinary drift but are not an authentication boundary against an intentionally
 hostile same-UID owner rewriting the journal or orchestrating path swaps during
-external `codesign` inspection. Physical qualification remains explicit: do not
-use the installed layout for game launch until three real install/uninstall
-cycles retain the exact signed bridge and restore CrossOver, game, runtime,
-lock, service, and journal state.
+external `codesign` inspection.
+
+### Curated Runtime Start
+
+```bash
+python3 tools/runtime_cli.py start \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --profile freedom-locomotion \
+  --bindings .code/runtime-bindings.json
+
+python3 tools/runtime_cli.py status \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --bindings .code/runtime-bindings.json
+
+python3 tools/runtime_cli.py stop \
+  --bindings .code/runtime-bindings.json
+```
+
+The dev10 source contract pins the profile validator, JSON Schema, and explicit
+curated profiles. Public start accepts an identifier rather than an arbitrary
+path, requires the exact sealed profile hash, verifies Steam app/build/depot
+identity, and projects the installed game tree through the exact uninstall
+substitutions and removals before launch. The current transaction plan is
+Freedom-specific, so `freedom-locomotion` is admitted and The Lab fails closed
+until its three targets receive separately reviewed lifecycle operations.
+
+The detached supervisor admits CrossOver 26.2's exact in-bundle relative
+`cxstart -> wine` link only when its sibling target is a real executable. It
+launches that exact command in one new process group and retains the live
+process handle plus PID, birth token, start time, and PGID as launcher authority.
+Launcher PID version is intentionally excluded because CrossOver legitimately
+increments it when `cxstart` execs `winewrapper`. The sealed profile separately
+identifies Freedom's Shipping executable because Wine may move it into a new
+session and PGID. Schema v4 records a `launching` ownership boundary before
+spawning CrossOver, then publishes `waiting` only after globally discovering one
+exact profile-declared process that remains stable across repeated PID,
+birth-token, PID-version, command, start-time, PGID, and `lsof` text-mapping
+checks. The bridge handshake must bind the generation nonce, bridge PID,
+Mach-audit sender PID and PID version, and matching high-resolution start token
+before all startup self-tests pass. Stop freshly revalidates and quiesces the
+detached process group and launcher group, uses a 1,230-second RPC bound for the
+schema's maximum queued startup and transition windows, promotes an exact
+same-PGID target to signal anchor if its launcher exits, distinguishes reused
+PGIDs from original leaderless groups, preserves malformed or incomplete
+dead-owner evidence, scans for unrecorded exact Shipping processes, and
+revalidates service content plus producer identity immediately before
+publication and exact launchd bootout; serialized PIDs remain evidence only.
+Vision Pro connection, streaming, and recovery state remain outside this
+host-only producer slice.
 
 ### Verify And Compare
 

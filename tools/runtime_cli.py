@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(start_parser)
     start_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="sealed runtime artifact")
+    start_parser.add_argument(
+        "--profile",
+        required=True,
+        help="curated game profile identifier",
+    )
 
     install_parser = subparsers.add_parser(
         "install",
@@ -130,6 +135,14 @@ def render_status(report: StatusReport) -> str:
             f"owner_alive={str(bool(report.owner.get('alive'))).lower()}",
         ]
     )
+    record = report.control_state.get("record")
+    if isinstance(record, dict):
+        profile = record.get("profile")
+        producer = record.get("producer")
+        if isinstance(profile, dict) and profile.get("id"):
+            lines.append(f"profile={profile['id']}")
+        if isinstance(producer, dict) and producer.get("status"):
+            lines.append(f"producer_status={producer['status']}")
     for check in report.diagnostics:
         if check.status != "pass":
             lines.append(f"[{check.status.upper()}] {check.id}: {check.message}")
@@ -166,6 +179,10 @@ def render_start(report: StartReport) -> str:
         lines.append(f"run_dir={report.run_dir}")
     if report.supervisor_log is not None:
         lines.append(f"supervisor_log={report.supervisor_log}")
+    if report.profile is not None and report.profile.get("id"):
+        lines.append(f"profile={report.profile['id']}")
+    if report.producer is not None and report.producer.get("status"):
+        lines.append(f"producer_status={report.producer['status']}")
     for action in report.actions:
         lines.append(f"action={action}")
     return "\n".join(lines)
@@ -267,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0 if uninstall_report.ok else 1
         if arguments.command == "start":
-            start_report = start_runtime(context, arguments.artifact)
+            start_report = start_runtime(context, arguments.artifact, arguments.profile)
             emit(
                 start_report.to_dict(),
                 as_json=arguments.json,

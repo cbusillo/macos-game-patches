@@ -107,19 +107,33 @@ teardown without changing the launchd/Mach data plane:
 
 ```bash
 python3 tools/runtime_cli.py doctor --artifact <artifact>
-python3 tools/runtime_cli.py start --artifact <artifact>
+python3 tools/runtime_cli.py start \
+  --artifact <artifact> \
+  --profile freedom-locomotion
 python3 tools/runtime_cli.py status --artifact <artifact>
 python3 tools/runtime_cli.py stop
+python3 tools/runtime_profile_test.py
 python3 tools/runtime_start_test.py
 ```
 
 All commands support `--json`. `doctor` performs no mutation, `status` refuses
 to infer live health from stale logs or cached PIDs, and `stop` boots out only an
-exact owned launchd job. `start` reports `idle` only after the exact signed
-bridge checks in under one synchronized supervisor; it does not yet launch a
-game or Vision Pro client. Profile/game ownership and the `waiting`,
-`connected`, `streaming`, and `recovering` transitions are the next issue #60
-slice.
+exact owned launchd job. `start` accepts a sealed curated profile identifier,
+projects the transactionally installed game tree back to its stock profile
+identity, launches CrossOver with separate exact launcher and steady-state
+process ownership, and reports `waiting` only after the profile-declared
+Shipping executable remains globally unique and stable across repeated exact
+PID, birth-token, PID-version, start-time, process-group, command, and executable
+checks around a bridge handshake bound to the generation nonce, bridge PID, and
+Mach-audit-authenticated producer identity, plus startup self-tests. Schema-v4
+records ownership before spawning CrossOver, then stop freshly revalidates and
+quiesces each live owned process group, refuses ambiguous dead-owner cleanup,
+revalidates service and producer identity before publication or launchd bootout,
+and never signals serialized PIDs. The first
+production-admitted profile is
+`freedom-locomotion`; The Lab remains a separate multi-target lifecycle slice.
+Vision Pro `connected`, `streaming`, and `recovering` transitions are still the
+next issue #60 slice.
 
 ## Starting New Work
 

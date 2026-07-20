@@ -107,3 +107,4 @@ Use this shape:
 - [018 - Runtime descriptor path hardening](018-runtime-descriptor-path-hardening.md)
 - [019 - Runtime stable bundle lifecycle](019-runtime-stable-bundle-lifecycle.md)
 - [020 - Runtime start supervisor](020-runtime-start-supervisor.md)
+- [021 - Runtime profile producer ownership](021-runtime-profile-producer-ownership.md)

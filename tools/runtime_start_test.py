@@ -7,32 +7,49 @@ import json
 import os
 import pathlib
 import plistlib
+import shlex
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from unittest import mock
 
+import runtime_profile
 from runtime_control import (
     CommandResult,
     ControlError,
     RuntimeContext,
     RuntimePaths,
     load_control_state,
+    process_start_time,
     request_supervisor_ping,
     request_supervisor_stop,
+    stop_runtime,
 )
 from runtime_start import (
     BRIDGE_LOG_NAME,
     DeadlineRunner,
+    ProducerIdentity,
     STARTUP_RESULT_NAME,
+    ProfileStartAdmission,
     StartAdmission,
     StartReport,
+    SubprocessProducerLauncher,
+    _confirm_producer_identity,
+    _group_is_live,
     _install_plan_digest,
+    _inspect_profile_admission,
+    _inspect_producer_identity,
+    _profile_record,
+    _producer_markers_ready,
+    _quiesce_producer,
     _require_committed_install_journal,
     _require_installed_plan,
     _require_launch_template_state,
+    _resolve_crossover_launcher,
     start_runtime,
     supervise_runtime,
 )
@@ -50,7 +67,45 @@ class SupervisorRunner:
         self.bootstrap_returncode = 0
         self.kickstart_returncode = 0
         self.owner_started_at = "Sat Jul 18 04:00:00 2026"
+        self.launcher_started_at = "Sat Jul 18 04:00:01 2026"
+        self.target_started_at = "Sat Jul 18 04:00:02 2026"
+        self.producer_pid = 9001
+        self.target_pid = 9002
+        self.producer_birth_token = 9_001_001
+        self.target_birth_token = 9_002_002
+        self.producer_pid_version = 101
+        self.target_pid_version = 202
+        self.producer_group = 9001
+        self.target_group = 9002
+        self.producer_live = False
+        self.target_live = False
+        self.target_lsof_error = False
+        self.producer_command = ""
+        self.producer_root: pathlib.Path | None = None
+        self.service_state = "running"
+        self.service_pid: int | None = 4321
+        self.transition_on_quiesce = False
+        self.foreign_on_quiesce = False
+        self.mutate_bridge_on_quiesce = False
+        self.transition_observed = threading.Event()
+        self.service_path = self.paths.launch_agent_plist
+        self.service_program = self.paths.bridge_program
+        self.signals: list[tuple[int, int]] = []
         self.commands: list[tuple[str, ...]] = []
+
+    def birth_token(self, pid: int) -> tuple[int | None, str | None]:
+        token = {
+            self.producer_pid: self.producer_birth_token,
+            self.target_pid: self.target_birth_token,
+        }.get(pid)
+        return (token, None) if token is not None else (None, "fixture process missing")
+
+    def pid_version(self, pid: int) -> tuple[int | None, str | None]:
+        version = {
+            self.producer_pid: self.producer_pid_version,
+            self.target_pid: self.target_pid_version,
+        }.get(pid)
+        return (version, None) if version is not None else (None, "fixture process missing")
 
     def run(self, argv: Sequence[str], *, timeout: float = 10.0) -> CommandResult:
         command = tuple(str(item) for item in argv)
@@ -58,14 +113,17 @@ class SupervisorRunner:
         if command[:2] == ("/bin/launchctl", "print"):
             if not self.loaded:
                 return CommandResult(command, 113, stderr="Could not find service")
+            if self.service_state != "running":
+                self.transition_observed.set()
+            pid_line = f"pid = {self.service_pid}\n" if self.service_pid is not None else ""
             return CommandResult(
                 command,
                 0,
                 stdout=(
-                    f"path = {self.paths.launch_agent_plist}\n"
-                    "state = running\n"
-                    f"program = {self.paths.bridge_program}\n"
-                    "pid = 4321\n"
+                    f"path = {self.service_path}\n"
+                    f"state = {self.service_state}\n"
+                    f"program = {self.service_program}\n"
+                    f"{pid_line}"
                     "runs = 1\n"
                 ),
             )
@@ -87,6 +145,19 @@ class SupervisorRunner:
             self.loaded = False
             return CommandResult(command, 0)
         if command and command[0] == "/usr/sbin/lsof":
+            if str(self.target_pid) in command and self.producer_root is not None:
+                if self.target_lsof_error:
+                    return CommandResult(command, None, error="timeout")
+                return CommandResult(
+                    command,
+                    0 if self.target_live else 1,
+                    stdout=(
+                        f"p{self.target_pid}\n"
+                        f"n{self.producer_root / 'FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe'}\n"
+                    )
+                    if self.target_live
+                    else "",
+                )
             return CommandResult(command, 0, stdout=f"p4321\nn{self.paths.bridge_program}\n")
         if command and command[0] == "/usr/bin/codesign":
             return CommandResult(
@@ -99,7 +170,41 @@ class SupervisorRunner:
                 ),
             )
         if command[:3] == ("/usr/bin/env", "LC_ALL=C", "/bin/ps"):
-            return CommandResult(command, 0, stdout=f"{self.owner_started_at}\n")
+            if "-axo" in command and "pid=,pgid=,command=" in command:
+                output = (
+                    f"{self.target_pid} {self.target_group} {self.producer_command}\n"
+                    if self.target_live
+                    else ""
+                )
+                return CommandResult(command, 0, stdout=output)
+            if "-axo" in command and "pid=,pgid=,stat=" in command:
+                members: list[str] = []
+                if self.producer_live:
+                    members.append(f"{self.producer_pid} {self.producer_group} S")
+                if self.target_live:
+                    members.append(f"{self.target_pid} {self.target_group} S")
+                return CommandResult(command, 0, stdout="\n".join(members) + ("\n" if members else ""))
+            pid = int(command[command.index("-p") + 1])
+            if "lstart=" in command:
+                started_at = {
+                    os.getpid(): self.owner_started_at,
+                    self.producer_pid: self.launcher_started_at,
+                    self.target_pid: self.target_started_at,
+                }.get(pid)
+                return CommandResult(command, 0 if started_at else 1, stdout=f"{started_at}\n" if started_at else "")
+            if "pgid=" in command:
+                live = self.producer_live if pid == self.producer_pid else self.target_live
+                process_group = (
+                    self.producer_group if pid == self.producer_pid else self.target_group
+                )
+                return CommandResult(
+                    command,
+                    0 if live else 1,
+                    stdout=f"{process_group}\n" if live else "",
+                )
+            if "command=" in command and pid == self.target_pid and self.target_live:
+                return CommandResult(command, 0, stdout=f"{self.producer_command}\n")
+            return CommandResult(command, 1)
         return CommandResult(command, 0)
 
 
@@ -164,11 +269,79 @@ class StartFixture:
             lifecycle_lock_path=lifecycle_root / "runtime.lock",
             runner=self.runner,
             pid_alive=lambda pid: pid == os.getpid(),
+            birth_token_reader=self.runner.birth_token,
+            pid_version_reader=self.runner.pid_version,
             sleeper=time.sleep,
         )
+        install_root = self.root / "game"
+        executable = install_root / "FreedomLocomotion.exe"
+        owned_executable = (
+            install_root
+            / "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe"
+        )
+        graphics_directory = install_root / "FreedomLocomotion/Binaries/Win64"
+        openvr_directory = install_root / "Engine/OpenVR"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"fixture game")
+        graphics_directory.mkdir(parents=True)
+        owned_executable.write_bytes(b"fixture shipping game")
+        openvr_directory.mkdir(parents=True)
+        loaded_profile = runtime_profile.LoadedProfile(
+            path=REPO_ROOT / "runtime/profiles/freedom-locomotion.json",
+            data={
+                "id": "freedom-locomotion",
+                "source": {
+                    "appId": "584170",
+                    "buildId": "1797135",
+                    "payload": {"fileCount": 1, "treeSha256": "e" * 64},
+                },
+                "launch": {
+                    "entrypointTarget": "game",
+                    "ownedProcess": {
+                        "executable": "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe",
+                        "processPattern": "[F]reedomLocomotion-Win64-Shipping\\.exe",
+                    },
+                    "arguments": [],
+                    "environment": {},
+                    "startupTimeoutSeconds": 5,
+                    "transitionTimeoutSeconds": 1,
+                },
+                "geometry": {"maximumStereo": {"width": 3240, "height": 1800}},
+            },
+            sha256="b" * 64,
+        )
+        installed_profile = runtime_profile.InstalledProfile(
+            loaded=loaded_profile,
+            install_root=install_root,
+            steam_manifest=self.root / "appmanifest.acf",
+            steam_manifest_sha256="c" * 64,
+            targets=(
+                runtime_profile.ResolvedProfileTarget(
+                    id="game",
+                    role="game",
+                    executable=executable,
+                    working_directory=install_root,
+                    openvr_directory=openvr_directory,
+                    graphics_directory=graphics_directory,
+                    stock_openvr_sha256="d" * 64,
+                    process_pattern="[F]reedomLocomotion",
+                ),
+            ),
+            owned_process=runtime_profile.ResolvedOwnedProcess(
+                executable=owned_executable,
+                process_pattern="[F]reedomLocomotion-Win64-Shipping\\.exe",
+            ),
+        )
+        self.profile = ProfileStartAdmission(
+            installed=installed_profile,
+            crossover_launcher=self.root / "cxstart",
+            bottle_name="Steam",
+            bridge_root=self.root / "bridge",
+        )
+        self.runner.producer_root = install_root
         self.admission = StartAdmission(
             manifest={},
-            bindings={},
+            bindings={"CROSSOVER_APP": str(self.root / "CrossOver.app")},
             paths=self.paths,
             allowed_roots=(self.root,),
             plan={},
@@ -180,6 +353,7 @@ class StartFixture:
                 "version": "1.0.0-test",
             },
             artifact_path=self.artifact,
+            profile=self.profile,
         )
 
     def cleanup(self) -> None:
@@ -192,6 +366,111 @@ class ImmediateProcess:
 
     def poll(self) -> int | None:
         return None
+
+
+class FixtureProducerProcess(ImmediateProcess):
+    def __init__(self, runner: SupervisorRunner) -> None:
+        super().__init__(runner.producer_pid)
+        self.runner = runner
+
+    def poll(self) -> int | None:
+        return None if self.runner.producer_live else 0
+
+
+class FixtureProducerLauncher:
+    def __init__(
+        self,
+        fixture: StartFixture,
+        *,
+        publish_markers: bool = True,
+        launch_target: bool | None = None,
+        replace_service_after_markers: bool = False,
+    ) -> None:
+        self.fixture = fixture
+        self.publish_markers = publish_markers
+        self.launch_target = publish_markers if launch_target is None else launch_target
+        self.replace_service_after_markers = replace_service_after_markers
+        self.process = FixtureProducerProcess(fixture.runner)
+        self.command: tuple[str, ...] | None = None
+
+    def launch(
+        self,
+        argv: Sequence[str],
+        working_directory: pathlib.Path,
+        environment: dict[str, str],
+        log_path: pathlib.Path,
+    ) -> FixtureProducerProcess:
+        del working_directory
+        self.command = tuple(str(item) for item in argv)
+        log_path.write_text("fixture producer\n")
+        self.fixture.runner.producer_live = True
+        self.fixture.runner.target_live = self.launch_target
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        if self.publish_markers:
+            generation = "1"
+            if "--env" in self.command:
+                environment_values = dict(
+                    item.split("=", 1)
+                    for item in shlex.split(self.command[self.command.index("--env") + 1])
+                )
+                generation = environment_values["ALVR_IOSURFACE_POOL_NONCE"]
+            bridge_log = log_path.parent / BRIDGE_LOG_NAME
+            with bridge_log.open("a") as stream:
+                stream.write(
+                    "native_source producer handshake accepted "
+                    f"service={self.fixture.paths.service_label} "
+                    f"nonce={generation} bridge_pid=4321 "
+                    f"producer_pid={self.fixture.runner.target_pid} "
+                    f"producer_pidversion={self.fixture.runner.target_pid_version} "
+                    f"producer_start_token={self.fixture.runner.target_birth_token} "
+                    "source=3240x1800\n"
+                )
+                stream.write("native_source startup self-tests passed slots=3\n")
+        if self.replace_service_after_markers:
+            self.fixture.runner.service_pid = 4322
+        return self.process
+
+    def group_id(self, pid: int) -> int:
+        if pid != self.process.pid or not self.fixture.runner.producer_live:
+            raise ProcessLookupError(pid)
+        return self.fixture.runner.producer_group
+
+    def group_signaler(self, process_group: int, signal_number: int) -> None:
+        self.fixture.runner.signals.append((process_group, signal_number))
+        if (
+            process_group == self.fixture.runner.producer_group
+            and process_group == self.fixture.runner.target_group
+        ):
+            self.fixture.runner.producer_live = False
+            self.fixture.runner.target_live = False
+            return
+        if process_group == self.fixture.runner.target_group:
+            self.fixture.runner.target_live = False
+            return
+        if process_group != self.fixture.runner.producer_group:
+            raise ProcessLookupError(process_group)
+        self.fixture.runner.producer_live = False
+        if self.fixture.runner.transition_on_quiesce:
+            self.fixture.runner.service_state = "exited"
+            self.fixture.runner.service_pid = None
+        if self.fixture.runner.foreign_on_quiesce:
+            self.fixture.runner.service_path = self.fixture.root / "foreign.plist"
+            self.fixture.runner.service_program = self.fixture.root / "foreign-bridge"
+        if self.fixture.runner.mutate_bridge_on_quiesce:
+            self.fixture.paths.bridge_program.write_bytes(b"foreign replacement")
+
+    def group_live(self, process_group: int) -> bool:
+        if process_group == self.fixture.runner.producer_group:
+            return self.fixture.runner.producer_live or (
+                self.fixture.runner.target_group == process_group
+                and self.fixture.runner.target_live
+            )
+        if process_group == self.fixture.runner.target_group:
+            return self.fixture.runner.target_live
+        return False
 
 
 class ExitedProcess(ImmediateProcess):
@@ -211,8 +490,15 @@ class RefusingLauncher:
 
 
 class ImmediateLauncher:
-    def __init__(self, artifact: dict[str, object], *, generation_offset: int = 0) -> None:
+    def __init__(
+        self,
+        artifact: dict[str, object],
+        profile: ProfileStartAdmission,
+        *,
+        generation_offset: int = 0,
+    ) -> None:
         self.artifact = artifact
+        self.profile = profile
         self.generation_offset = generation_offset
         self.command: tuple[str, ...] | None = None
 
@@ -223,11 +509,38 @@ class ImmediateLauncher:
         generation = int(self.command[self.command.index("--generation") + 1])
         report = StartReport(
             True,
-            "idle",
-            "runtime.idle",
+            "waiting",
+            "runtime.waiting",
             "fixture supervisor ready",
             self.artifact,
             generation + self.generation_offset,
+            9000,
+            run_dir,
+            log_path,
+            (),
+            _profile_record(self.profile),
+            {"status": "ready"},
+        )
+        (run_dir / STARTUP_RESULT_NAME).write_text(json.dumps(report.to_dict()))
+        return ImmediateProcess()
+
+
+class ImmediateFailureLauncher:
+    def __init__(self, artifact: dict[str, object]) -> None:
+        self.artifact = artifact
+
+    def launch(self, argv: Sequence[str], log_path: pathlib.Path) -> ImmediateProcess:
+        command = tuple(str(item) for item in argv)
+        log_path.write_text("fixture supervisor failure\n")
+        run_dir = pathlib.Path(command[command.index("--run-dir") + 1])
+        generation = int(command[command.index("--generation") + 1])
+        report = StartReport(
+            False,
+            "failed",
+            "producer.start_timeout",
+            "fixture producer did not become ready",
+            self.artifact,
+            generation,
             9000,
             run_dir,
             log_path,
@@ -243,6 +556,76 @@ class RuntimeStartTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
+    def supervise_fixture(
+        self,
+        generation: int,
+        run_dir: pathlib.Path,
+        producer_launcher: FixtureProducerLauncher | None = None,
+    ) -> StartReport:
+        arguments = (
+            self.fixture.context,
+            self.fixture.artifact,
+            self.fixture.profile.installed.loaded.data["id"],
+            self.fixture.profile.installed.loaded.sha256,
+            generation,
+            run_dir,
+        )
+        if producer_launcher is None:
+            return supervise_runtime(*arguments)
+        return supervise_runtime(
+            *arguments,
+            producer_launcher=producer_launcher,
+            group_id=producer_launcher.group_id,
+            group_signaler=producer_launcher.group_signaler,
+            group_live=producer_launcher.group_live,
+        )
+
+    def exact_profile_plan(self) -> dict[str, object]:
+        target = self.fixture.profile.installed.entrypoint
+        stock_openvr = target.openvr_directory / "openvr_api.dll"
+        created = (
+            target.openvr_directory / "openvr_api.real.dll",
+            target.graphics_directory / "d3d11.dll",
+            target.graphics_directory / "dxgi.dll",
+            target.graphics_directory / "alvr_iosurface_bridge.dll",
+        )
+        install: list[dict[str, object]] = [
+            {
+                "action": "replace_file",
+                "target": str(stock_openvr),
+                "ready": True,
+            }
+        ]
+        uninstall: list[dict[str, object]] = [
+            {
+                "action": "restore",
+                "target": str(stock_openvr),
+                "expectedSha256": target.stock_openvr_sha256,
+                "ready": True,
+            }
+        ]
+        for path in created:
+            install.append({"action": "create_file", "target": str(path), "ready": True})
+            uninstall.append({"action": "remove", "target": str(path), "ready": True})
+        bridge_root = self.fixture.root / "runtime-bridge"
+        install.extend(
+            [
+                {
+                    "action": "create_file",
+                    "resource": "wine_bridge_windows",
+                    "target": str(bridge_root / "x86_64-windows/alvr_iosurface_bridge.dll"),
+                    "ready": True,
+                },
+                {
+                    "action": "create_file",
+                    "resource": "wine_bridge_unix",
+                    "target": str(bridge_root / "x86_64-unix/alvr_iosurface_bridge.so"),
+                    "ready": True,
+                },
+            ]
+        )
+        return {"install": install, "uninstall": uninstall}
+
     def test_deadline_runner_caps_and_refuses_commands(self) -> None:
         runner = mock.Mock()
         runner.run.return_value = CommandResult(("fixture",), 0)
@@ -256,20 +639,256 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertEqual(timed_out.error, "timeout")
         self.assertEqual(runner.run.call_count, 1)
 
+    def test_profile_admission_matches_every_exact_game_overlay_operation(self) -> None:
+        crossover_app = self.fixture.root / "CrossOver.app"
+        crossover_launcher = crossover_app / (
+            "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+        )
+        crossover_launcher.parent.mkdir(parents=True)
+        crossover_target = crossover_launcher.parent / "wine"
+        crossover_target.write_text("#!/bin/sh\n")
+        crossover_target.chmod(0o755)
+        crossover_launcher.symlink_to("wine")
+        bindings = {
+            "CROSSOVER_APP": str(crossover_app),
+            "HOME": str(self.fixture.root),
+            "STEAM_BOTTLE": str(
+                self.fixture.root / "Library/Application Support/CrossOver/Bottles/Steam"
+            ),
+        }
+        with mock.patch(
+            "runtime_start.runtime_profile.load_curated_profile",
+            return_value=self.fixture.profile.installed.loaded,
+        ), mock.patch(
+            "runtime_start.runtime_profile.resolve_installed_profile",
+            return_value=self.fixture.profile.installed,
+        ), mock.patch(
+            "runtime_start.runtime_profile.payload_tree_identity",
+            return_value=(1, "e" * 64),
+        ):
+            admission = _inspect_profile_admission(
+                {},
+                bindings,
+                self.exact_profile_plan(),
+                self.fixture.artifact,
+                "freedom-locomotion",
+            )
+        self.assertEqual(admission.installed.loaded.data["id"], "freedom-locomotion")
+        self.assertEqual(admission.crossover_launcher, crossover_launcher)
+
+    def test_crossover_launcher_rejects_foreign_symlink_target(self) -> None:
+        crossover_app = self.fixture.root / "CrossOver.app"
+        launcher = crossover_app / (
+            "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+        )
+        launcher.parent.mkdir(parents=True)
+        foreign = launcher.parent / "foreign"
+        foreign.write_text("#!/bin/sh\n")
+        foreign.chmod(0o755)
+        launcher.symlink_to("foreign")
+        with self.assertRaises(ControlError) as raised:
+            _resolve_crossover_launcher(crossover_app)
+        self.assertEqual(raised.exception.code, "producer.launch_invalid")
+
+    def test_profile_admission_rejects_partial_game_overlay(self) -> None:
+        plan = self.exact_profile_plan()
+        install = plan["install"]
+        assert isinstance(install, list)
+        install.pop()
+        with mock.patch(
+            "runtime_start.runtime_profile.load_curated_profile",
+            return_value=self.fixture.profile.installed.loaded,
+        ), mock.patch(
+            "runtime_start.runtime_profile.resolve_installed_profile",
+            return_value=self.fixture.profile.installed,
+        ):
+            with self.assertRaises(ControlError) as raised:
+                _inspect_profile_admission(
+                    {},
+                    {
+                        "CROSSOVER_APP": str(self.fixture.root / "CrossOver.app"),
+                        "HOME": str(self.fixture.root),
+                        "STEAM_BOTTLE": str(
+                            self.fixture.root
+                            / "Library/Application Support/CrossOver/Bottles/Steam"
+                        ),
+                    },
+                    plan,
+                    self.fixture.artifact,
+                    "freedom-locomotion",
+                )
+        self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
+
+    def test_profile_without_owned_process_fails_before_plan_inspection(self) -> None:
+        incomplete = replace(self.fixture.profile.installed, owned_process=None)
+        with mock.patch(
+            "runtime_start.runtime_profile.load_curated_profile",
+            return_value=self.fixture.profile.installed.loaded,
+        ), mock.patch(
+            "runtime_start.runtime_profile.resolve_installed_profile",
+            return_value=incomplete,
+        ), mock.patch(
+            "runtime_start._require_plan_operation",
+        ) as inspect_plan:
+            with self.assertRaises(ControlError) as raised:
+                _inspect_profile_admission(
+                    {},
+                    {},
+                    {},
+                    self.fixture.artifact,
+                    "freedom-locomotion",
+                )
+        self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
+        inspect_plan.assert_not_called()
+
+    def test_preexisting_owned_process_fails_before_service_or_launch(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000033"
+        run_dir.mkdir(mode=0o700)
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.target_live = True
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(51, run_dir, producer_launcher)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "producer.already_running")
+        self.assertIsNone(producer_launcher.command)
+        self.assertFalse(self.fixture.runner.loaded)
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+        self.fixture.runner.target_live = False
+
+    def test_unreadable_preexisting_owned_process_fails_before_launch(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000034"
+        run_dir.mkdir(mode=0o700)
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.target_live = True
+        self.fixture.runner.target_lsof_error = True
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(52, run_dir, producer_launcher)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "producer.identity_unavailable")
+        self.assertIsNone(producer_launcher.command)
+        self.assertFalse(self.fixture.runner.loaded)
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+        self.fixture.runner.target_lsof_error = False
+        self.fixture.runner.target_live = False
+
+    def test_service_replacement_after_markers_blocks_waiting_publication(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000035"
+        run_dir.mkdir(mode=0o700)
+        producer_launcher = FixtureProducerLauncher(
+            self.fixture,
+            replace_service_after_markers=True,
+        )
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(53, run_dir, producer_launcher)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "service.identity_changed")
+        state = load_control_state(self.fixture.paths.state_path)
+        self.assertTrue(state.record is None or state.record["state"] != "waiting")
+        self.fixture.runner.loaded = False
+        self.fixture.runner.producer_live = False
+        self.fixture.runner.target_live = False
+
+    def test_post_launch_identity_failure_preserves_ownership_evidence(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000036"
+        run_dir.mkdir(mode=0o700)
+        producer_launcher = FixtureProducerLauncher(
+            self.fixture,
+            publish_markers=False,
+            launch_target=False,
+        )
+
+        def unavailable_launcher_birth(pid: int) -> tuple[int | None, str | None]:
+            if pid == self.fixture.runner.producer_pid:
+                return None, "fixture launcher identity unavailable"
+            return self.fixture.runner.birth_token(pid)
+
+        self.fixture.context = replace(
+            self.fixture.context,
+            birth_token_reader=unavailable_launcher_birth,
+        )
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(54, run_dir, producer_launcher)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "producer.identity_unavailable")
+        state = load_control_state(self.fixture.paths.state_path)
+        self.assertTrue(state.valid)
+        assert state.record is not None
+        producer = state.record["producer"]
+        assert isinstance(producer, dict)
+        self.assertEqual(producer["status"], "launching")
+        self.assertIsNone(producer["launcher"])
+        with mock.patch(
+            "runtime_control.resolve_context_paths",
+            return_value=({}, {}, self.fixture.paths),
+        ):
+            stopped = stop_runtime(
+                replace(
+                    self.fixture.context,
+                    pid_alive=lambda _: False,
+                )
+            )
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.identity_unavailable")
+        self.assertTrue(self.fixture.paths.state_path.exists())
+        self.fixture.runner.loaded = False
+        self.fixture.runner.producer_live = False
+
     def test_supervisor_reaches_idle_and_cooperatively_cleans(self) -> None:
         run_dir = self.fixture.state_root / "r-000000000000002a"
         run_dir.mkdir(mode=0o700)
         result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
 
         def supervise() -> None:
-            result.append(
-                supervise_runtime(
-                    self.fixture.context,
-                    self.fixture.artifact,
-                    42,
-                    run_dir,
-                )
-            )
+            result.append(self.supervise_fixture(42, run_dir, producer_launcher))
 
         with mock.patch(
             "runtime_start.resolve_context_paths_for_start",
@@ -285,13 +904,29 @@ class RuntimeStartTests(unittest.TestCase):
             thread = threading.Thread(target=supervise)
             thread.start()
             deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and not self.fixture.paths.state_path.exists():
-                time.sleep(0.01)
-            self.assertTrue(self.fixture.paths.state_path.exists())
             state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
             self.assertTrue(state.valid)
             assert state.record is not None
-            self.assertEqual(state.record["state"], "idle")
+            self.assertEqual(state.record["state"], "waiting")
+            producer = state.record["producer"]
+            assert isinstance(producer, dict)
+            launcher_state = producer["launcher"]
+            owned_process = producer["ownedProcess"]
+            assert isinstance(launcher_state, dict)
+            assert isinstance(owned_process, dict)
+            self.assertNotIn("pidVersion", launcher_state)
+            self.assertEqual(
+                owned_process["pidVersion"],
+                self.fixture.runner.target_pid_version,
+            )
+            self.fixture.runner.producer_pid_version += 1
             responsive, ping_error = request_supervisor_ping(state.record)
             self.assertTrue(responsive, ping_error)
             accepted, error = request_supervisor_stop(state.record)
@@ -306,8 +941,944 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
         self.assertFalse(run_dir.exists())
 
+    def test_cooperative_stop_tolerates_launchd_transition(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000030"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        self.fixture.runner.transition_on_quiesce = True
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(48, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.assertTrue(state.valid)
+            assert state.record is not None
+            accepted, error = request_supervisor_stop(state.record)
+            self.assertTrue(accepted, error)
+            self.assertTrue(self.fixture.runner.transition_observed.wait(timeout=5))
+            self.assertTrue(thread.is_alive())
+            self.fixture.runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+        self.assertFalse(self.fixture.paths.state_path.exists())
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+        self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
+        self.assertFalse(run_dir.exists())
+
+    def test_cooperative_stop_rejects_foreign_launchd_replacement(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000031"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        self.fixture.runner.transition_on_quiesce = True
+        self.fixture.runner.foreign_on_quiesce = True
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(49, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.assertTrue(state.valid)
+            assert state.record is not None
+            accepted, error = request_supervisor_stop(state.record)
+            self.assertTrue(accepted, error)
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result[0].ok)
+        self.assertEqual(result[0].reason_code, "service.identity_changed")
+        self.assertTrue(self.fixture.paths.state_path.exists())
+        self.assertTrue(self.fixture.paths.lock_path.exists())
+        self.assertTrue(self.fixture.paths.launch_agent_plist.exists())
+        self.assertTrue(run_dir.exists())
+
+    def test_cooperative_stop_rejects_same_path_bridge_replacement(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000032"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        self.fixture.runner.transition_on_quiesce = True
+        self.fixture.runner.mutate_bridge_on_quiesce = True
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(50, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.assertTrue(state.valid)
+            assert state.record is not None
+            accepted, error = request_supervisor_stop(state.record)
+            self.assertTrue(accepted, error)
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result[0].ok)
+        self.assertEqual(result[0].reason_code, "service.identity_changed")
+        self.assertTrue(self.fixture.paths.state_path.exists())
+        self.assertTrue(self.fixture.paths.lock_path.exists())
+        self.assertTrue(self.fixture.paths.launch_agent_plist.exists())
+        self.assertTrue(run_dir.exists())
+
+    def test_stop_during_producer_startup_quiesces_before_bridge_cleanup(self) -> None:
+        run_dir = self.fixture.state_root / "r-000000000000002b"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture, publish_markers=False)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(43, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "idle"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.assertTrue(state.valid)
+            assert state.record is not None
+            self.assertEqual(state.record["producer"]["status"], "starting")
+            accepted, error = request_supervisor_stop(state.record)
+            self.assertTrue(accepted, error)
+            self.fixture.runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+        self.assertFalse(producer_launcher.group_live(self.fixture.runner.producer_group))
+        self.assertFalse(run_dir.exists())
+
+    def test_producer_start_timeout_quiesces_and_cleans_exact_generation(self) -> None:
+        run_dir = self.fixture.state_root / "r-000000000000002c"
+        run_dir.mkdir(mode=0o700)
+        producer_launcher = FixtureProducerLauncher(self.fixture, publish_markers=False)
+        self.fixture.profile.installed.loaded.data["launch"]["startupTimeoutSeconds"] = 1
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(44, run_dir, producer_launcher)
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "producer.start_timeout")
+        self.assertFalse(producer_launcher.group_live(self.fixture.runner.producer_group))
+        self.assertFalse(self.fixture.runner.loaded)
+        self.assertFalse(self.fixture.paths.state_path.exists())
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+
+    def test_unrequested_producer_exit_preserves_diagnostic_state(self) -> None:
+        run_dir = self.fixture.state_root / "r-000000000000002d"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(45, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.fixture.runner.producer_live = False
+            self.fixture.runner.target_live = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].reason_code, "producer.exited")
+        self.assertTrue(self.fixture.paths.state_path.exists())
+        self.assertTrue(self.fixture.paths.lock_path.exists())
+        self.assertTrue(self.fixture.runner.loaded)
+
+    def test_producer_identity_drift_preserves_diagnostic_state(self) -> None:
+        run_dir = self.fixture.state_root / "r-000000000000002e"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(46, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            deadline = time.monotonic() + 5
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
+                time.sleep(0.01)
+                state = load_control_state(self.fixture.paths.state_path)
+            self.fixture.runner.target_started_at = "Sat Jul 18 05:00:02 2026"
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].reason_code, "producer.identity_changed")
+        self.assertTrue(self.fixture.paths.state_path.exists())
+        self.assertTrue(self.fixture.runner.loaded)
+
+    def test_real_process_group_cleanup_reaps_parent_and_child(self) -> None:
+        run_dir = self.fixture.root / "process-group"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = SubprocessProducerLauncher()
+        process = launcher.launch(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess,sys,time; "
+                    "subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
+                    "time.sleep(60)"
+                ),
+            ],
+            run_dir,
+            os.environ.copy(),
+            producer_log,
+        )
+        context = RuntimeContext()
+        try:
+            started_at, error = process_start_time(process.pid, context.runner)
+            self.assertIsNotNone(started_at, error)
+            assert started_at is not None
+            launcher_birth_token, birth_error = context.birth_token_reader(process.pid)
+            self.assertIsNotNone(launcher_birth_token, birth_error)
+            assert launcher_birth_token is not None
+            process_group = os.getpgid(process.pid)
+            _quiesce_producer(
+                process,
+                launcher_birth_token,
+                started_at,
+                process_group,
+                None,
+                self.fixture.profile,
+                producer_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                context,
+                time.monotonic,
+                os.getpgid,
+                os.killpg,
+                _group_is_live,
+            )
+            self.assertIsNotNone(process.poll())
+            self.assertFalse(_group_is_live(process_group))
+        finally:
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, 9)
+
+    @unittest.skipUnless(
+        pathlib.Path("/usr/sbin/lsof").is_file(),
+        "requires macOS lsof process identity",
+    )
+    def test_real_setsid_target_cleanup_reaps_both_groups(self) -> None:
+        run_dir = self.fixture.root / "detached-process-groups"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        bridge_log = run_dir / BRIDGE_LOG_NAME
+        target_pid_path = run_dir / "target.pid"
+        assert self.fixture.profile.installed.owned_process is not None
+        owned_executable = self.fixture.profile.installed.owned_process.executable
+        child_script = (
+            "import mmap,os,pathlib,sys,time; "
+            "handle=open(sys.argv[1],'rb'); "
+            "mapping=mmap.mmap(handle.fileno(),0,access=mmap.ACCESS_READ); "
+            "pathlib.Path(sys.argv[2]).write_text(str(os.getpid())); "
+            "time.sleep(60)"
+        )
+        parent_script = (
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]], "
+            "start_new_session=True); time.sleep(60)"
+        )
+        launcher = SubprocessProducerLauncher()
+        process = launcher.launch(
+            [
+                sys.executable,
+                "-c",
+                parent_script,
+                child_script,
+                str(owned_executable),
+                str(target_pid_path),
+            ],
+            run_dir,
+            os.environ.copy(),
+            producer_log,
+        )
+        context = RuntimeContext()
+        target_pid: int | None = None
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not target_pid_path.exists():
+                time.sleep(0.01)
+            self.assertTrue(target_pid_path.exists())
+            target_pid = int(target_pid_path.read_text())
+            started_at, error = process_start_time(process.pid, context.runner)
+            self.assertIsNotNone(started_at, error)
+            assert started_at is not None
+            launcher_birth_token, birth_error = context.birth_token_reader(process.pid)
+            self.assertIsNotNone(launcher_birth_token, birth_error)
+            assert launcher_birth_token is not None
+            launcher_group = os.getpgid(process.pid)
+            target = _inspect_producer_identity(
+                self.fixture.profile,
+                started_at,
+                launcher_group,
+                context.runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            self.assertIsNotNone(target)
+            assert target is not None
+            self.assertEqual(target.pid, target_pid)
+            self.assertEqual(target.process_group_id, target_pid)
+            bridge_log.write_text(
+                "native_source producer handshake accepted "
+                f"service={self.fixture.paths.service_label} nonce=42 bridge_pid=4321 "
+                f"producer_pid={target_pid} producer_pidversion={target.pid_version} "
+                f"producer_start_token={target.birth_token} source=3240x1800\n"
+                "native_source startup self-tests passed slots=3\n"
+            )
+            _quiesce_producer(
+                process,
+                launcher_birth_token,
+                started_at,
+                launcher_group,
+                target,
+                self.fixture.profile,
+                bridge_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                context,
+                time.monotonic,
+                os.getpgid,
+                os.killpg,
+                _group_is_live,
+            )
+            self.assertIsNotNone(process.poll())
+            self.assertFalse(_group_is_live(launcher_group))
+            self.assertFalse(_group_is_live(target_pid))
+        finally:
+            for process_group in (target_pid, process.pid):
+                if process_group is not None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process_group, 9)
+
+    def test_startup_stop_preserves_unauthenticated_detached_target(self) -> None:
+        run_dir = self.fixture.root / "unauthenticated-target"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        bridge_log = run_dir / BRIDGE_LOG_NAME
+        bridge_log.write_text("")
+        launcher = FixtureProducerLauncher(
+            self.fixture,
+            publish_markers=False,
+            launch_target=True,
+        )
+        process = launcher.launch([], run_dir, {}, producer_log)
+        with self.assertRaises(ControlError) as raised:
+            _quiesce_producer(
+                process,
+                9_001_001,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                None,
+                self.fixture.profile,
+                bridge_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                self.fixture.context,
+                time.monotonic,
+                launcher.group_id,
+                launcher.group_signaler,
+                launcher.group_live,
+            )
+        self.assertEqual(raised.exception.code, "producer.quiesce_failed")
+        self.assertFalse(self.fixture.runner.producer_live)
+        self.assertTrue(self.fixture.runner.target_live)
+        self.assertNotIn(
+            self.fixture.runner.target_group,
+            [process_group for process_group, _ in self.fixture.runner.signals],
+        )
+        self.fixture.runner.target_live = False
+
+    def test_startup_stop_reconciles_authenticated_detached_target(self) -> None:
+        run_dir = self.fixture.root / "authenticated-reconciliation"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = FixtureProducerLauncher(self.fixture)
+        process = launcher.launch([], run_dir, {}, producer_log)
+        target = _quiesce_producer(
+            process,
+            9_001_001,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            None,
+            self.fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            self.fixture.paths.service_label,
+            1,
+            4321,
+            self.fixture.context,
+            time.monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertEqual(target.pid, self.fixture.runner.target_pid)
+        self.assertFalse(self.fixture.runner.producer_live)
+        self.assertFalse(self.fixture.runner.target_live)
+        self.assertEqual(
+            [process_group for process_group, _ in self.fixture.runner.signals],
+            [self.fixture.runner.producer_group, self.fixture.runner.target_group],
+        )
+
+    def test_startup_stop_reconciles_late_authenticated_detached_target(self) -> None:
+        run_dir = self.fixture.root / "late-authenticated-reconciliation"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = FixtureProducerLauncher(
+            self.fixture,
+            publish_markers=True,
+            launch_target=False,
+        )
+        process = launcher.launch([], run_dir, {}, producer_log)
+        sleep_calls = 0
+
+        def reveal_target(_: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            self.fixture.runner.target_live = True
+
+        context = replace(self.fixture.context, sleeper=reveal_target)
+        target = _quiesce_producer(
+            process,
+            self.fixture.runner.producer_birth_token,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            None,
+            self.fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            self.fixture.paths.service_label,
+            1,
+            4321,
+            context,
+            time.monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertGreater(sleep_calls, 0)
+        self.assertIsNotNone(target)
+        self.assertFalse(self.fixture.runner.producer_live)
+        self.assertFalse(self.fixture.runner.target_live)
+        self.assertEqual(
+            [process_group for process_group, _ in self.fixture.runner.signals],
+            [self.fixture.runner.producer_group, self.fixture.runner.target_group],
+        )
+
+    def test_quiesce_rejects_target_identity_drift_before_signal(self) -> None:
+        run_dir = self.fixture.root / "target-identity-drift"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = FixtureProducerLauncher(self.fixture)
+        process = launcher.launch([], run_dir, {}, producer_log)
+        target = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.fixture.runner.target_started_at = "Sat Jul 18 05:00:02 2026"
+        with self.assertRaises(ControlError) as raised:
+            _quiesce_producer(
+                process,
+                9_001_001,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                target,
+                self.fixture.profile,
+                run_dir / BRIDGE_LOG_NAME,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                self.fixture.context,
+                time.monotonic,
+                launcher.group_id,
+                launcher.group_signaler,
+                launcher.group_live,
+            )
+        self.assertEqual(raised.exception.code, "producer.quiesce_failed")
+        self.assertEqual(self.fixture.runner.signals, [])
+        self.fixture.runner.producer_live = False
+        self.fixture.runner.target_live = False
+
+    def test_quiesce_rejects_target_birth_token_drift_before_signal(self) -> None:
+        run_dir = self.fixture.root / "target-birth-token-drift"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = FixtureProducerLauncher(self.fixture)
+        process = launcher.launch([], run_dir, {}, producer_log)
+        target = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.fixture.runner.target_birth_token += 1
+        with self.assertRaises(ControlError) as raised:
+            _quiesce_producer(
+                process,
+                self.fixture.runner.producer_birth_token,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                target,
+                self.fixture.profile,
+                run_dir / BRIDGE_LOG_NAME,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                self.fixture.context,
+                time.monotonic,
+                launcher.group_id,
+                launcher.group_signaler,
+                launcher.group_live,
+            )
+        self.assertEqual(raised.exception.code, "producer.quiesce_failed")
+        self.assertEqual(self.fixture.runner.signals, [])
+        self.fixture.runner.producer_live = False
+        self.fixture.runner.target_live = False
+
+    def test_quiesce_accepts_target_exit_during_revalidation(self) -> None:
+        run_dir = self.fixture.root / "target-exits-during-revalidation"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        launcher = FixtureProducerLauncher(self.fixture)
+        process = launcher.launch([], run_dir, {}, producer_log)
+        target = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        self.assertIsNotNone(target)
+        assert target is not None
+
+        def process_exits(pid: int) -> tuple[int | None, str | None]:
+            if pid == self.fixture.runner.target_pid:
+                self.fixture.runner.target_live = False
+                return None, "fixture process exited"
+            return self.fixture.runner.birth_token(pid)
+
+        context = replace(self.fixture.context, birth_token_reader=process_exits)
+        stopped_target = _quiesce_producer(
+            process,
+            self.fixture.runner.producer_birth_token,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            target,
+            self.fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            self.fixture.paths.service_label,
+            42,
+            4321,
+            context,
+            time.monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertEqual(stopped_target, target)
+        self.assertEqual(
+            [process_group for process_group, _ in self.fixture.runner.signals],
+            [self.fixture.runner.producer_group],
+        )
+
+    def test_quiesce_uses_same_group_target_after_launcher_exit(self) -> None:
+        run_dir = self.fixture.root / "same-group-launcher-exit"
+        run_dir.mkdir()
+        producer_log = run_dir / "producer.log"
+        self.fixture.runner.target_group = self.fixture.runner.producer_group
+        launcher = FixtureProducerLauncher(self.fixture)
+        process = launcher.launch([], run_dir, {}, producer_log)
+        target = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.fixture.runner.producer_live = False
+        stopped_target = _quiesce_producer(
+            process,
+            self.fixture.runner.producer_birth_token,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            target,
+            self.fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            self.fixture.paths.service_label,
+            42,
+            4321,
+            self.fixture.context,
+            time.monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertEqual(stopped_target, target)
+        self.assertFalse(self.fixture.runner.target_live)
+        self.assertEqual(
+            [process_group for process_group, _ in self.fixture.runner.signals],
+            [self.fixture.runner.producer_group],
+        )
+
+    def test_producer_identity_filters_process_group_before_lsof(self) -> None:
+        self.fixture.runner.target_live = True
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        original_run = self.fixture.runner.run
+
+        def run(argv: Sequence[str], *, timeout: float = 10.0) -> CommandResult:
+            command = tuple(str(item) for item in argv)
+            if command[:3] == ("/usr/bin/env", "LC_ALL=C", "/bin/ps") and (
+                "pid=,pgid=,command=" in command
+            ):
+                self.fixture.runner.commands.append(command)
+                return CommandResult(
+                    command,
+                    0,
+                    stdout=(
+                        "7001 7001 unrelated-daemon\n"
+                        f"{self.fixture.runner.target_pid} "
+                        f"{self.fixture.runner.target_group} "
+                        f"{self.fixture.runner.producer_command}\n"
+                    ),
+                )
+            return original_run(command, timeout=timeout)
+
+        with mock.patch.object(self.fixture.runner, "run", side_effect=run):
+            identity = _inspect_producer_identity(
+                self.fixture.profile,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                self.fixture.runner,
+                self.fixture.context.birth_token_reader,
+                self.fixture.context.pid_version_reader,
+            )
+        self.assertIsNotNone(identity)
+        lsof_commands = [
+            command
+            for command in self.fixture.runner.commands
+            if command and command[0] == "/usr/sbin/lsof"
+        ]
+        self.assertEqual(
+            lsof_commands,
+            [
+                (
+                    "/usr/sbin/lsof",
+                    "-a",
+                    "-p",
+                    str(self.fixture.runner.target_pid),
+                    "-d",
+                    "txt",
+                    "-Fn",
+                )
+            ],
+        )
+
+    def test_producer_identity_rejects_multiple_exact_candidates_globally(self) -> None:
+        assert self.fixture.profile.installed.owned_process is not None
+        executable = self.fixture.profile.installed.owned_process.executable
+        candidates = [
+            ProducerIdentity(
+                9002,
+                9_002_002,
+                202,
+                "Sat Jul 18 04:00:02 2026",
+                9002,
+                str(executable),
+                executable,
+            ),
+            ProducerIdentity(
+                9003,
+                9_003_003,
+                203,
+                "Sat Jul 18 04:00:03 2026",
+                7000,
+                str(executable),
+                executable,
+            ),
+        ]
+        with (
+            mock.patch("runtime_start._owned_process_candidates", return_value=candidates),
+            self.assertRaises(ControlError) as raised,
+        ):
+            _inspect_producer_identity(
+                self.fixture.profile,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                self.fixture.runner,
+                self.fixture.context.birth_token_reader,
+                self.fixture.context.pid_version_reader,
+            )
+        self.assertEqual(raised.exception.code, "producer.identity_changed")
+
+    def test_producer_identity_confirmation_rejects_pid_reuse(self) -> None:
+        self.fixture.runner.target_live = True
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        observed = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        assert observed is not None
+        with (
+            mock.patch(
+                "runtime_start.process_start_time",
+                side_effect=[
+                    (observed.started_at, None),
+                    ("Sat Jul 18 05:00:02 2026", None),
+                ],
+            ),
+            self.assertRaises(ControlError) as raised,
+        ):
+            _confirm_producer_identity(
+                observed,
+                self.fixture.profile,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                self.fixture.runner,
+                self.fixture.context.birth_token_reader,
+                self.fixture.context.pid_version_reader,
+            )
+        self.assertEqual(raised.exception.code, "producer.identity_changed")
+
+    def test_producer_identity_confirmation_rejects_pid_version_change(self) -> None:
+        self.fixture.runner.target_live = True
+        assert self.fixture.profile.installed.owned_process is not None
+        self.fixture.runner.producer_command = str(
+            self.fixture.profile.installed.owned_process.executable
+        )
+        observed = _inspect_producer_identity(
+            self.fixture.profile,
+            self.fixture.runner.launcher_started_at,
+            self.fixture.runner.producer_group,
+            self.fixture.runner,
+            self.fixture.context.birth_token_reader,
+            self.fixture.context.pid_version_reader,
+        )
+        assert observed is not None
+        self.fixture.runner.target_pid_version += 1
+        with self.assertRaises(ControlError) as raised:
+            _confirm_producer_identity(
+                observed,
+                self.fixture.profile,
+                self.fixture.runner.launcher_started_at,
+                self.fixture.runner.producer_group,
+                self.fixture.runner,
+                self.fixture.context.birth_token_reader,
+                self.fixture.context.pid_version_reader,
+            )
+        self.assertEqual(raised.exception.code, "producer.identity_changed")
+
+    def test_bridge_markers_bind_generation_and_authenticated_pid(self) -> None:
+        bridge_log = self.fixture.root / "pid-bound-bridge.log"
+        bridge_log.write_text(
+            "native_source producer handshake accepted "
+            f"service={self.fixture.paths.service_label} nonce=42 bridge_pid=4321 "
+            "producer_pid=9002 producer_pidversion=77 "
+            "producer_start_token=9002002 source=3240x1800\n"
+            "native_source startup self-tests passed slots=3\n"
+        )
+        self.assertTrue(
+            _producer_markers_ready(
+                bridge_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                9002,
+                77,
+                9_002_002,
+            )
+        )
+        self.assertFalse(
+            _producer_markers_ready(
+                bridge_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                9003,
+                77,
+                9_003_003,
+            )
+        )
+        self.assertFalse(
+            _producer_markers_ready(
+                bridge_log,
+                self.fixture.paths.service_label,
+                43,
+                4321,
+                9002,
+                77,
+                9_002_002,
+            )
+        )
+        self.assertFalse(
+            _producer_markers_ready(
+                bridge_log,
+                self.fixture.paths.service_label,
+                42,
+                4321,
+                9002,
+                78,
+                9_002_002,
+            )
+        )
+
     def test_start_parent_returns_generation_bound_child_result(self) -> None:
-        launcher = ImmediateLauncher(self.fixture.admission.artifact)
+        launcher = ImmediateLauncher(self.fixture.admission.artifact, self.fixture.profile)
         with mock.patch(
             "runtime_start.doctor_runtime",
             return_value=mock.Mock(ok=True, artifact=self.fixture.admission.artifact),
@@ -318,17 +1889,18 @@ class RuntimeStartTests(unittest.TestCase):
             report = start_runtime(
                 self.fixture.context,
                 self.fixture.artifact,
+                "freedom-locomotion",
                 launcher=launcher,
                 generation_factory=lambda: 7,
             )
         self.assertTrue(report.ok)
-        self.assertEqual(report.state, "idle")
+        self.assertEqual(report.state, "waiting")
         self.assertEqual(report.generation, 7)
         assert launcher.command is not None
         self.assertTrue(launcher.command[1].endswith("tools/runtime_start.py"))
 
-    def test_start_parent_rejects_another_generation_result(self) -> None:
-        launcher = ImmediateLauncher(self.fixture.admission.artifact, generation_offset=1)
+    def test_start_parent_preserves_generation_bound_child_failure(self) -> None:
+        launcher = ImmediateFailureLauncher(self.fixture.admission.artifact)
         with mock.patch(
             "runtime_start.doctor_runtime",
             return_value=mock.Mock(ok=True, artifact=self.fixture.admission.artifact),
@@ -339,6 +1911,31 @@ class RuntimeStartTests(unittest.TestCase):
             report = start_runtime(
                 self.fixture.context,
                 self.fixture.artifact,
+                "freedom-locomotion",
+                launcher=launcher,
+                generation_factory=lambda: 7,
+            )
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "producer.start_timeout")
+        self.assertIn("did not become ready", report.message)
+
+    def test_start_parent_rejects_another_generation_result(self) -> None:
+        launcher = ImmediateLauncher(
+            self.fixture.admission.artifact,
+            self.fixture.profile,
+            generation_offset=1,
+        )
+        with mock.patch(
+            "runtime_start.doctor_runtime",
+            return_value=mock.Mock(ok=True, artifact=self.fixture.admission.artifact),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ), mock.patch("runtime_start._idempotent_live_start", return_value=None):
+            report = start_runtime(
+                self.fixture.context,
+                self.fixture.artifact,
+                "freedom-locomotion",
                 launcher=launcher,
                 generation_factory=lambda: 7,
             )
@@ -349,8 +1946,8 @@ class RuntimeStartTests(unittest.TestCase):
     def test_idempotent_live_start_does_not_spawn(self) -> None:
         live = StartReport(
             True,
-            "idle",
-            "runtime.idle",
+            "waiting",
+            "runtime.waiting",
             "already live",
             self.fixture.admission.artifact,
             4,
@@ -360,6 +1957,7 @@ class RuntimeStartTests(unittest.TestCase):
             report = start_runtime(
                 self.fixture.context,
                 self.fixture.artifact,
+                "freedom-locomotion",
                 launcher=RefusingLauncher(),
             )
         self.assertIs(report, live)
@@ -375,6 +1973,7 @@ class RuntimeStartTests(unittest.TestCase):
             report = start_runtime(
                 self.fixture.context,
                 self.fixture.artifact,
+                "freedom-locomotion",
                 launcher=ExitedLauncher(),
                 generation_factory=lambda: 8,
             )
@@ -397,12 +1996,7 @@ class RuntimeStartTests(unittest.TestCase):
             "runtime_start.inspect_start_admission",
             return_value=self.fixture.admission,
         ):
-            report = supervise_runtime(
-                self.fixture.context,
-                self.fixture.artifact,
-                9,
-                run_dir,
-            )
+            report = self.supervise_fixture(9, run_dir)
         self.assertFalse(report.ok)
         self.assertEqual(report.reason_code, "launchd.bootstrap_failed")
         self.assertFalse(self.fixture.paths.lock_path.exists())
@@ -427,12 +2021,7 @@ class RuntimeStartTests(unittest.TestCase):
                 self.fixture.paths,
             ),
         ), mock.patch("runtime_start.global_lifecycle_lock", busy_lock):
-            report = supervise_runtime(
-                self.fixture.context,
-                self.fixture.artifact,
-                11,
-                run_dir,
-            )
+            report = self.supervise_fixture(11, run_dir)
         self.assertFalse(report.ok)
         self.assertEqual(report.reason_code, "transaction.busy")
         self.assertFalse(self.fixture.paths.lock_path.exists())
@@ -455,12 +2044,7 @@ class RuntimeStartTests(unittest.TestCase):
             "runtime_start._service_ready",
             side_effect=ControlError("runtime.start_timeout", "fixture readiness timeout"),
         ):
-            report = supervise_runtime(
-                self.fixture.context,
-                self.fixture.artifact,
-                12,
-                run_dir,
-            )
+            report = self.supervise_fixture(12, run_dir)
         self.assertFalse(report.ok)
         self.assertEqual(report.reason_code, "runtime.start_timeout")
         self.assertFalse(self.fixture.runner.loaded)
@@ -496,12 +2080,7 @@ class RuntimeStartTests(unittest.TestCase):
             "runtime_start._service_ready",
             side_effect=tamper_then_fail,
         ):
-            report = supervise_runtime(
-                self.fixture.context,
-                self.fixture.artifact,
-                13,
-                run_dir,
-            )
+            report = self.supervise_fixture(13, run_dir)
         self.assertFalse(report.ok)
         self.assertEqual(report.reason_code, "runtime.cleanup_failed")
         self.assertIn("plist changed before cleanup", report.message)
@@ -513,16 +2092,10 @@ class RuntimeStartTests(unittest.TestCase):
         run_dir = self.fixture.state_root / "r-000000000000000a"
         run_dir.mkdir(mode=0o700)
         result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
 
         def supervise() -> None:
-            result.append(
-                supervise_runtime(
-                    self.fixture.context,
-                    self.fixture.artifact,
-                    10,
-                    run_dir,
-                )
-            )
+            result.append(self.supervise_fixture(10, run_dir, producer_launcher))
 
         with mock.patch(
             "runtime_start.resolve_context_paths_for_start",
@@ -538,9 +2111,15 @@ class RuntimeStartTests(unittest.TestCase):
             thread = threading.Thread(target=supervise)
             thread.start()
             deadline = time.monotonic() + 5
-            while time.monotonic() < deadline and not self.fixture.paths.state_path.exists():
+            state = load_control_state(self.fixture.paths.state_path)
+            while time.monotonic() < deadline and (
+                not state.valid
+                or state.record is None
+                or state.record.get("state") != "waiting"
+            ):
                 time.sleep(0.01)
-            self.assertTrue(self.fixture.paths.state_path.exists())
+                state = load_control_state(self.fixture.paths.state_path)
+            self.assertTrue(state.valid)
             self.fixture.runner.loaded = False
             thread.join(timeout=5)
 

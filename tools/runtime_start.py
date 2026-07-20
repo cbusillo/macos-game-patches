@@ -9,7 +9,10 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import secrets
+import shlex
+import signal
 import socket
 import stat
 import subprocess
@@ -20,6 +23,7 @@ from typing import Any, Callable, Protocol, Sequence
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
+import runtime_profile
 import runtime_transaction
 from runtime_control import (
     CONTROL_SOCKET_NAME,
@@ -38,6 +42,8 @@ from runtime_control import (
     load_control_state,
     load_runtime_contract,
     paths_match,
+    process_command,
+    process_group_id,
     process_start_time,
     read_launchd_snapshot,
     receive_json_frame,
@@ -55,13 +61,20 @@ STARTUP_RESULT_NAME = "startup-result.json"
 SUPERVISOR_EXIT_NAME = "supervisor-exit.json"
 SUPERVISOR_LOG_NAME = "supervisor.log"
 BRIDGE_LOG_NAME = "native-bridge.log"
+PRODUCER_LOG_NAME = "producer.log"
 ALVR_ROOT_NAME = "alvr-root"
+DXVK_LOG_ROOT_NAME = "dxvk-logs"
+MVK_SHADER_ROOT_NAME = "mvk-shaders"
 STARTUP_TIMEOUT_SECONDS = 30.0
 SERVICE_READY_TIMEOUT_SECONDS = 10.0
 READINESS_SAMPLE_INTERVAL_SECONDS = 0.1
 MONITOR_INTERVAL_SECONDS = 0.25
 SERVICE_STATUS_INTERVAL_SECONDS = 1.0
 SERVICE_IDENTITY_INTERVAL_SECONDS = 30.0
+PRODUCER_STOP_GRACE_SECONDS = 5.0
+PRODUCER_KILL_WAIT_SECONDS = 1.0
+PRODUCER_QUIESCE_TIMEOUT_SECONDS = 40.0
+PRODUCER_QUIESCE_MARGIN_SECONDS = 10.0
 MAX_RUNTIME_FRAMES = (1 << 64) - 1
 INSTALLED_FALSE_ACTIONS = frozenset({"assert_sha256", "backup", "assert_absent"})
 
@@ -80,6 +93,23 @@ class ProcessLauncher(Protocol):
         ...
 
 
+class ProducerProcess(SpawnedProcess, Protocol):
+    """Live direct CrossOver launcher retained by the supervisor."""
+
+
+class ProducerLauncher(Protocol):
+    def launch(
+        self,
+        argv: Sequence[str],
+        working_directory: pathlib.Path,
+        environment: dict[str, str],
+        log_path: pathlib.Path,
+    ) -> ProducerProcess:
+        """Launch one producer in a new process session."""
+
+        ...
+
+
 class SubprocessLauncher:
     def launch(self, argv: Sequence[str], log_path: pathlib.Path) -> subprocess.Popen[bytes]:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -90,6 +120,34 @@ class SubprocessLauncher:
             os.fchmod(descriptor, 0o600)
             return subprocess.Popen(
                 [str(item) for item in argv],
+                stdin=subprocess.DEVNULL,
+                stdout=descriptor,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+                start_new_session=True,
+            )
+        finally:
+            os.close(descriptor)
+
+
+class SubprocessProducerLauncher:
+    def launch(
+        self,
+        argv: Sequence[str],
+        working_directory: pathlib.Path,
+        environment: dict[str, str],
+        log_path: pathlib.Path,
+    ) -> subprocess.Popen[bytes]:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(log_path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            return subprocess.Popen(
+                [str(item) for item in argv],
+                cwd=working_directory,
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=descriptor,
                 stderr=subprocess.STDOUT,
@@ -133,6 +191,44 @@ class StartAdmission:
     plan: dict[str, Any]
     artifact: dict[str, Any]
     artifact_path: pathlib.Path
+    profile: ProfileStartAdmission | None = None
+
+
+@dataclass(frozen=True)
+class ProfileStartAdmission:
+    installed: runtime_profile.InstalledProfile
+    crossover_launcher: pathlib.Path
+    bottle_name: str
+    bridge_root: pathlib.Path
+
+
+@dataclass(frozen=True)
+class ProducerIdentity:
+    pid: int
+    birth_token: int
+    pid_version: int
+    started_at: str
+    process_group_id: int
+    command: str
+    executable: pathlib.Path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "birthToken": self.birth_token,
+            "pidVersion": self.pid_version,
+            "startedAt": self.started_at,
+            "processGroupId": self.process_group_id,
+            "command": self.command,
+            "executable": str(self.executable),
+        }
+
+
+def _process_start_datetime(value: str) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.strptime(value, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -147,6 +243,8 @@ class StartReport:
     run_dir: pathlib.Path | None = None
     supervisor_log: pathlib.Path | None = None
     actions: tuple[str, ...] = ()
+    profile: dict[str, Any] | None = None
+    producer: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,6 +262,8 @@ class StartReport:
                 str(self.supervisor_log) if self.supervisor_log is not None else None
             ),
             "actions": list(self.actions),
+            "profile": self.profile,
+            "producer": self.producer,
         }
 
 
@@ -177,6 +277,8 @@ def start_failure(
     run_dir: pathlib.Path | None = None,
     supervisor_log: pathlib.Path | None = None,
     actions: Sequence[str] = (),
+    profile: dict[str, Any] | None = None,
+    producer: dict[str, Any] | None = None,
 ) -> StartReport:
     return StartReport(
         False,
@@ -189,6 +291,8 @@ def start_failure(
         run_dir,
         supervisor_log,
         tuple(actions),
+        profile,
+        producer,
     )
 
 
@@ -409,7 +513,273 @@ def _require_launch_template_state(admission: StartAdmission) -> None:
         )
 
 
-def inspect_start_admission(context: RuntimeContext, artifact: pathlib.Path) -> StartAdmission:
+def _plan_operations(plan: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    raw_operations = plan.get(kind)
+    if not isinstance(raw_operations, list) or not all(
+        isinstance(operation, dict) for operation in raw_operations
+    ):
+        raise ControlError("plan.invalid", f"Resolved plan has no valid {kind} operations")
+    return raw_operations
+
+
+def _require_plan_operation(
+    plan: dict[str, Any],
+    kind: str,
+    action: str,
+    target: pathlib.Path,
+) -> dict[str, Any]:
+    matches = [
+        operation
+        for operation in _plan_operations(plan, kind)
+        if operation.get("action") == action
+        and isinstance(operation.get("target"), str)
+        and _absolute(pathlib.Path(operation["target"])) == target
+    ]
+    if len(matches) != 1 or matches[0].get("ready") is not True:
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Selected profile does not match one exact installed lifecycle operation",
+            kind=kind,
+            action=action,
+            target=str(target),
+            matches=len(matches),
+        )
+    return matches[0]
+
+
+def _require_resource_operation(
+    plan: dict[str, Any],
+    kind: str,
+    action: str,
+    resource: str,
+) -> dict[str, Any]:
+    matches = [
+        operation
+        for operation in _plan_operations(plan, kind)
+        if operation.get("action") == action
+        and operation.get("resource") == resource
+        and operation.get("ready") is True
+        and isinstance(operation.get("target"), str)
+    ]
+    if len(matches) != 1:
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Installed runtime bridge resources are incomplete or ambiguous",
+            kind=kind,
+            action=action,
+            resource=resource,
+            matches=len(matches),
+        )
+    return matches[0]
+
+
+def _relative_profile_path(root: pathlib.Path, target: pathlib.Path) -> str:
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError as error:
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Profile lifecycle target is outside the declared game install root",
+            root=str(root),
+            target=str(target),
+        ) from error
+
+
+def _resolve_crossover_launcher(crossover_root: pathlib.Path) -> pathlib.Path:
+    launcher = crossover_root / (
+        "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+    )
+    target = launcher.parent / "wine"
+    try:
+        artifact_contract.reject_symlink_components(launcher.parent)
+        launcher_metadata = launcher.lstat()
+        launcher_target = os.readlink(launcher) if stat.S_ISLNK(launcher_metadata.st_mode) else None
+        artifact_contract.reject_symlink_components(target)
+        target_metadata = target.lstat()
+    except (artifact_contract.ArtifactError, OSError) as error:
+        raise ControlError(
+            "producer.launch_invalid",
+            "Exact CrossOver launcher could not be inspected",
+            path=str(launcher),
+            detail=str(error),
+        ) from error
+    if (
+        launcher_target != "wine"
+        or not stat.S_ISREG(target_metadata.st_mode)
+        or not os.access(target, os.X_OK)
+    ):
+        raise ControlError(
+            "producer.launch_invalid",
+            "Exact CrossOver cxstart link does not select its executable sibling",
+            path=str(launcher),
+            target=launcher_target,
+        )
+    return launcher
+
+
+def _inspect_profile_admission(
+    manifest: dict[str, Any],
+    bindings: dict[str, str],
+    plan: dict[str, Any],
+    artifact_path: pathlib.Path,
+    profile_id: str,
+) -> ProfileStartAdmission:
+    try:
+        loaded = runtime_profile.load_curated_profile(profile_id, manifest, artifact_path)
+        installed = runtime_profile.resolve_installed_profile(loaded, bindings)
+    except runtime_profile.ProfileError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    if installed.owned_process is None:
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Curated runtime profile does not declare one owned producer process",
+            profile=loaded.data["id"],
+        )
+
+    expected_install_targets: set[pathlib.Path] = set()
+    expected_uninstall_targets: set[pathlib.Path] = set()
+    substitutions: dict[str, str] = {}
+    excluded: set[str] = set()
+    for target in installed.targets:
+        stock_openvr = target.openvr_directory / "openvr_api.dll"
+        created = (
+            target.openvr_directory / "openvr_api.real.dll",
+            target.graphics_directory / "d3d11.dll",
+            target.graphics_directory / "dxgi.dll",
+            target.graphics_directory / "alvr_iosurface_bridge.dll",
+        )
+        _require_plan_operation(plan, "install", "replace_file", stock_openvr)
+        restore = _require_plan_operation(plan, "uninstall", "restore", stock_openvr)
+        if restore.get("expectedSha256") != target.stock_openvr_sha256:
+            raise ControlError(
+                "profile.artifact_mismatch",
+                "Profile stock OpenVR identity differs from the uninstall contract",
+                target=target.id,
+                expected=target.stock_openvr_sha256,
+                actual=restore.get("expectedSha256"),
+            )
+        expected_install_targets.add(stock_openvr)
+        expected_uninstall_targets.add(stock_openvr)
+        substitutions[_relative_profile_path(installed.install_root, stock_openvr)] = (
+            target.stock_openvr_sha256
+        )
+        for path in created:
+            _require_plan_operation(plan, "install", "create_file", path)
+            _require_plan_operation(plan, "uninstall", "remove", path)
+            expected_install_targets.add(path)
+            expected_uninstall_targets.add(path)
+            excluded.add(_relative_profile_path(installed.install_root, path))
+
+    actual_install_targets = {
+        _absolute(pathlib.Path(operation["target"]))
+        for operation in _plan_operations(plan, "install")
+        if operation.get("action") in runtime_transaction.INSTALL_EFFECTS
+        and isinstance(operation.get("target"), str)
+        and (
+            _absolute(pathlib.Path(operation["target"])) == installed.install_root
+            or installed.install_root in _absolute(pathlib.Path(operation["target"])).parents
+        )
+    }
+    actual_uninstall_targets = {
+        _absolute(pathlib.Path(operation["target"]))
+        for operation in _plan_operations(plan, "uninstall")
+        if operation.get("action") in runtime_transaction.UNINSTALL_EFFECTS
+        and isinstance(operation.get("target"), str)
+        and (
+            _absolute(pathlib.Path(operation["target"])) == installed.install_root
+            or installed.install_root in _absolute(pathlib.Path(operation["target"])).parents
+        )
+    }
+    if (
+        actual_install_targets != expected_install_targets
+        or actual_uninstall_targets != expected_uninstall_targets
+    ):
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Selected profile does not own every installed game-root mutation",
+            profile=loaded.data["id"],
+            expectedInstall=sorted(str(path) for path in expected_install_targets),
+            actualInstall=sorted(str(path) for path in actual_install_targets),
+            expectedUninstall=sorted(str(path) for path in expected_uninstall_targets),
+            actualUninstall=sorted(str(path) for path in actual_uninstall_targets),
+        )
+
+    try:
+        file_count, tree_sha256 = runtime_profile.payload_tree_identity(
+            installed.install_root,
+            substitutions=substitutions,
+            excluded=excluded,
+        )
+    except runtime_profile.ProfileError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    expected_payload = loaded.data["source"]["payload"]
+    if (
+        file_count != expected_payload["fileCount"]
+        or tree_sha256 != expected_payload["treeSha256"]
+    ):
+        raise ControlError(
+            "profile.not_installed",
+            "Installed game payload does not match the curated profile beneath the runtime overlay",
+            profile=loaded.data["id"],
+            expected={
+                "fileCount": expected_payload["fileCount"],
+                "treeSha256": expected_payload["treeSha256"],
+            },
+            actual={"fileCount": file_count, "treeSha256": tree_sha256},
+        )
+
+    crossover_root = _absolute(pathlib.Path(bindings["CROSSOVER_APP"]))
+    crossover_launcher = _resolve_crossover_launcher(crossover_root)
+
+    steam_bottle = _absolute(pathlib.Path(bindings["STEAM_BOTTLE"]))
+    expected_bottle_root = _absolute(
+        pathlib.Path(bindings["HOME"])
+        / "Library/Application Support/CrossOver/Bottles"
+    )
+    if steam_bottle.parent != expected_bottle_root or not steam_bottle.name:
+        raise ControlError(
+            "producer.launch_invalid",
+            "Configured Steam bottle is not addressable by the exact CrossOver launcher",
+            path=str(steam_bottle),
+            expectedRoot=str(expected_bottle_root),
+        )
+
+    windows_bridge = _require_resource_operation(
+        plan,
+        "install",
+        "create_file",
+        "wine_bridge_windows",
+    )
+    unix_bridge = _require_resource_operation(
+        plan,
+        "install",
+        "create_file",
+        "wine_bridge_unix",
+    )
+    windows_bridge_path = _absolute(pathlib.Path(windows_bridge["target"]))
+    unix_bridge_path = _absolute(pathlib.Path(unix_bridge["target"]))
+    if (
+        windows_bridge_path.parent.name != "x86_64-windows"
+        or unix_bridge_path.parent.name != "x86_64-unix"
+        or windows_bridge_path.parents[1] != unix_bridge_path.parents[1]
+    ):
+        raise ControlError(
+            "profile.artifact_mismatch",
+            "Installed Wine bridge roots do not share one exact runtime directory",
+        )
+    return ProfileStartAdmission(
+        installed=installed,
+        crossover_launcher=crossover_launcher,
+        bottle_name=steam_bottle.name,
+        bridge_root=windows_bridge_path.parents[1],
+    )
+
+
+def inspect_start_admission(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    profile_id: str,
+) -> StartAdmission:
     manifest, _, manifest_hash, lock_hash = load_runtime_contract(context)
     try:
         bindings = artifact_contract.resolve_bindings(manifest, context.bindings_path, "plan")
@@ -437,6 +807,13 @@ def inspect_start_admission(context: RuntimeContext, artifact: pathlib.Path) -> 
         plan,
         artifact_summary,
         artifact_path,
+        _inspect_profile_admission(
+            manifest,
+            bindings,
+            plan,
+            artifact_path,
+            profile_id,
+        ),
     )
     _require_installed_plan(plan)
     _require_launch_template_state(admission)
@@ -601,6 +978,71 @@ def _remove_file_if_exact(path: pathlib.Path, expected_sha256: str) -> None:
     path.unlink()
 
 
+def _profile_record(profile: ProfileStartAdmission) -> dict[str, Any]:
+    source = profile.installed.loaded.data["source"]
+    launch = profile.installed.loaded.data["launch"]
+    return {
+        "id": profile.installed.loaded.data["id"],
+        "sha256": profile.installed.loaded.sha256,
+        "appId": source["appId"],
+        "buildId": source["buildId"],
+        "entrypointTarget": launch["entrypointTarget"],
+    }
+
+
+def _producer_record(
+    profile: ProfileStartAdmission,
+    status: str,
+    launcher_pid: int,
+    launcher_birth_token: int,
+    launcher_started_at: str,
+    process_group_id: int,
+    producer_log: pathlib.Path,
+    target: ProducerIdentity | None,
+) -> dict[str, Any]:
+    owned_process = profile.installed.owned_process
+    return {
+        "status": status,
+        "launcher": {
+            "pid": launcher_pid,
+            "birthToken": launcher_birth_token,
+            "startedAt": launcher_started_at,
+            "processGroupId": process_group_id,
+        },
+        "expectedOwnedProcess": (
+            {
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            if owned_process is not None
+            else None
+        ),
+        "ownedProcess": target.to_dict() if target is not None else None,
+        "log": str(producer_log),
+    }
+
+
+def _launching_producer_record(
+    profile: ProfileStartAdmission,
+    producer_log: pathlib.Path,
+) -> dict[str, Any]:
+    owned_process = profile.installed.owned_process
+    return {
+        "status": "launching",
+        "launcher": None,
+        "expectedOwnedProcess": (
+            {
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            if owned_process is not None
+            else None
+        ),
+        "ownedProcess": None,
+        "log": str(producer_log),
+    }
+
+
 def _state_payload(
     admission: StartAdmission,
     run_dir: pathlib.Path,
@@ -609,12 +1051,15 @@ def _state_payload(
     owner_started_at: str,
     control_socket: pathlib.Path,
     plist_sha256: str,
+    state: str,
+    phase: str,
+    producer: dict[str, Any],
 ) -> dict[str, Any]:
-    if service.snapshot.pid is None or service.file_identity is None:
+    if service.snapshot.pid is None or service.file_identity is None or admission.profile is None:
         raise ControlError("runtime.start_failed", "Live service identity is incomplete")
     return {
-        "schemaVersion": 2,
-        "state": "idle",
+        "schemaVersion": 4,
+        "state": state,
         "generation": generation,
         "ownerPid": os.getpid(),
         "ownerStartedAt": owner_started_at,
@@ -630,13 +1075,675 @@ def _state_payload(
         "bridgeExecutableSha256": artifact_contract.sha256_file(
             admission.paths.bridge_program
         ),
+        "profile": _profile_record(admission.profile),
+        "producer": producer,
         "updatedAt": datetime.datetime.now(datetime.UTC).isoformat(),
         "diagnostic": {
-            "phase": "awaiting-producer",
+            "phase": phase,
             "bridgeLog": str(run_dir / BRIDGE_LOG_NAME),
+            "producerLog": producer["log"],
             "supervisorLog": str(run_dir / SUPERVISOR_LOG_NAME),
         },
     }
+
+
+def _producer_launch(
+    admission: StartAdmission,
+    run_dir: pathlib.Path,
+    generation: int,
+    launcher: ProducerLauncher,
+) -> tuple[ProducerProcess, pathlib.Path]:
+    if admission.profile is None:
+        raise ControlError("profile.artifact_mismatch", "Start admission has no curated profile")
+    profile = admission.profile
+    entrypoint = profile.installed.entrypoint
+    dxvk_log_root = run_dir / DXVK_LOG_ROOT_NAME
+    mvk_shader_root = run_dir / MVK_SHADER_ROOT_NAME
+    _make_private_directory(run_dir, dxvk_log_root)
+    _make_private_directory(run_dir, mvk_shader_root)
+    runtime_environment = {
+        "ALVR_IOSURFACE_POOL_NONCE": str(generation),
+        "ALVR_IOSURFACE_POOL_SERVICE": admission.paths.service_label,
+        "ALVR_IOSURFACE_SOURCE_HEIGHT": str(
+            profile.installed.loaded.data["geometry"]["maximumStereo"]["height"]
+        ),
+        "ALVR_IOSURFACE_SOURCE_WIDTH": str(
+            profile.installed.loaded.data["geometry"]["maximumStereo"]["width"]
+        ),
+        "ALVR_MOLTENVK_PATH": str(
+            pathlib.Path(admission.bindings["CROSSOVER_APP"])
+            / "Contents/SharedSupport/CrossOver/lib64/libMoltenVK.dylib"
+        ),
+        "CX_GRAPHICS_BACKEND": "dxvk",
+        "DXVK_LOG_LEVEL": "debug",
+        "DXVK_LOG_PATH": str(dxvk_log_root),
+        "DXVK_STATE_CACHE": "0",
+        "MVK_CONFIG_LOG_LEVEL": "3",
+        "MVK_CONFIG_SHADER_DUMP_DIR": str(mvk_shader_root),
+        "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS": "0",
+        "WINEDLLPATH": str(profile.bridge_root),
+        "WINEDLLOVERRIDES": "d3d11,dxgi=n",
+        "WINEDEBUG": "-all,+loaddll",
+        **profile.installed.loaded.data["launch"]["environment"],
+    }
+    cx_environment = " ".join(
+        f"{name}={shlex.quote(value)}" for name, value in sorted(runtime_environment.items())
+    )
+    command = [
+        str(profile.crossover_launcher),
+        "--bottle",
+        profile.bottle_name,
+        "--no-update",
+        "--no-gui",
+        "--wait-children",
+        "--workdir",
+        str(entrypoint.working_directory),
+        "--env",
+        cx_environment,
+        str(entrypoint.executable),
+        *profile.installed.loaded.data["launch"]["arguments"],
+    ]
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
+    producer_log = run_dir / PRODUCER_LOG_NAME
+    try:
+        process = launcher.launch(
+            command,
+            entrypoint.working_directory,
+            environment,
+            producer_log,
+        )
+    except OSError as error:
+        raise ControlError(
+            "producer.launch_failed",
+            f"CrossOver producer could not be launched: {error}",
+        ) from error
+    return process, producer_log
+
+
+def _process_profile_executable(
+    pid: int,
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+) -> tuple[pathlib.Path | None, str | None]:
+    owned_process = profile.installed.owned_process
+    if owned_process is None:
+        return None, None
+    result = runner.run(
+        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        return None, "Owned process executable mapping could not be inspected"
+    for line in result.stdout.splitlines():
+        if not line.startswith("n") or len(line) == 1:
+            continue
+        candidate = _absolute(pathlib.Path(line[1:]))
+        if paths_match(candidate, owned_process.executable):
+            return owned_process.executable, None
+    return None, None
+
+
+def _owned_process_candidates(
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> list[ProducerIdentity]:
+    owned_process = profile.installed.owned_process
+    if owned_process is None:
+        return []
+    result = runner.run(
+        [
+            "/usr/bin/env",
+            "LC_ALL=C",
+            "/bin/ps",
+            "-ww",
+            "-axo",
+            "pid=,pgid=,command=",
+        ],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer process table could not be inspected",
+        )
+    pattern = re.compile(owned_process.process_pattern)
+    candidates: list[ProducerIdentity] = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(maxsplit=2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid = int(fields[0])
+            group_id = int(fields[1])
+        except ValueError:
+            continue
+        command = fields[2]
+        if (
+            not pattern.search(command)
+            or owned_process.executable.name.casefold() not in command.casefold()
+        ):
+            continue
+        executable, executable_error = _process_profile_executable(pid, profile, runner)
+        if executable_error is not None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                executable_error,
+                pid=pid,
+            )
+        if executable is None:
+            continue
+        started_at, start_error = process_start_time(pid, runner)
+        if started_at is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                start_error or "Producer process start time is unavailable",
+                pid=pid,
+            )
+        birth_token, birth_error = birth_token_reader(pid)
+        if birth_token is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                birth_error or "Producer process birth token is unavailable",
+                pid=pid,
+            )
+        pid_version, pid_version_error = pid_version_reader(pid)
+        if pid_version is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                pid_version_error or "Producer process PID version is unavailable",
+                pid=pid,
+            )
+        candidates.append(
+            ProducerIdentity(
+                pid,
+                birth_token,
+                pid_version,
+                started_at,
+                group_id,
+                command,
+                executable,
+            )
+        )
+    return candidates
+
+
+def _inspect_producer_identity(
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> ProducerIdentity | None:
+    launcher_started = _process_start_datetime(launcher_started_at)
+    if launcher_started is None:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer launcher start time could not be parsed",
+        )
+    candidates = _owned_process_candidates(
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    )
+    if len(candidates) > 1:
+        raise ControlError(
+            "producer.identity_changed",
+            "Multiple exact owned-process candidates were discovered",
+            pids=sorted(candidate.pid for candidate in candidates),
+        )
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    candidate_started = _process_start_datetime(candidate.started_at)
+    if candidate_started is None:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer process start time could not be parsed",
+            pid=candidate.pid,
+        )
+    if candidate_started < launcher_started:
+        raise ControlError(
+            "producer.identity_changed",
+            "Exact owned process predates the active launcher",
+            pid=candidate.pid,
+        )
+    if candidate.process_group_id not in {candidate.pid, launcher_process_group_id}:
+        raise ControlError(
+            "producer.identity_changed",
+            "Exact owned process is not in an admitted process group",
+            pid=candidate.pid,
+            processGroupId=candidate.process_group_id,
+        )
+    return candidate
+
+
+def _revalidate_producer_identity(
+    expected: ProducerIdentity,
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+    *,
+    error_code: str = "producer.quiesce_failed",
+) -> ProducerIdentity:
+    birth_token, birth_error = birth_token_reader(expected.pid)
+    pid_version, pid_version_error = pid_version_reader(expected.pid)
+    started_at, start_error = process_start_time(expected.pid, runner)
+    current_group, group_error = process_group_id(expected.pid, runner)
+    command, command_error = process_command(expected.pid, runner)
+    executable, executable_error = _process_profile_executable(
+        expected.pid,
+        profile,
+        runner,
+    )
+    confirmed_started_at, confirmed_start_error = process_start_time(expected.pid, runner)
+    confirmed_birth_token, confirmed_birth_error = birth_token_reader(expected.pid)
+    confirmed_pid_version, confirmed_pid_version_error = pid_version_reader(expected.pid)
+    if birth_token != expected.birth_token:
+        detail = birth_error or "Owned process birth token changed before stop"
+    elif pid_version != expected.pid_version:
+        detail = pid_version_error or "Owned process PID version changed before stop"
+    elif started_at != expected.started_at:
+        detail = start_error or "Owned process start time changed before stop"
+    elif current_group != expected.process_group_id:
+        detail = group_error or "Owned process group changed before stop"
+    elif command != expected.command:
+        detail = command_error or "Owned process command changed before stop"
+    elif executable_error is not None:
+        detail = executable_error
+    elif executable is None or not paths_match(executable, expected.executable):
+        detail = "Owned process executable mapping changed before stop"
+    elif confirmed_started_at != expected.started_at:
+        detail = confirmed_start_error or "Owned process lifetime changed during validation"
+    elif confirmed_birth_token != expected.birth_token:
+        detail = confirmed_birth_error or "Owned process birth token changed during validation"
+    elif confirmed_pid_version != expected.pid_version:
+        detail = (
+            confirmed_pid_version_error
+            or "Owned process PID version changed during validation"
+        )
+    else:
+        detail = None
+    if detail is not None:
+        raise ControlError(
+            error_code,
+            detail,
+            pid=expected.pid,
+        )
+    assert confirmed_started_at is not None
+    assert confirmed_birth_token is not None
+    assert confirmed_pid_version is not None
+    assert current_group is not None
+    assert command is not None
+    assert executable is not None
+    return ProducerIdentity(
+        expected.pid,
+        confirmed_birth_token,
+        confirmed_pid_version,
+        confirmed_started_at,
+        current_group,
+        command,
+        executable,
+    )
+
+
+def _confirm_producer_identity(
+    expected: ProducerIdentity,
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> ProducerIdentity:
+    current = _revalidate_producer_identity(
+        expected,
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+        error_code="producer.identity_changed",
+    )
+    rediscovered = _inspect_producer_identity(
+        profile,
+        launcher_started_at,
+        launcher_process_group_id,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    )
+    if rediscovered is None or rediscovered != current:
+        raise ControlError(
+            "producer.identity_changed",
+            "Owned process identity changed during admission",
+            expectedPid=current.pid,
+            observedPid=rediscovered.pid if rediscovered is not None else None,
+        )
+    return _revalidate_producer_identity(
+        rediscovered,
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+        error_code="producer.identity_changed",
+    )
+
+
+def _producer_markers_ready(
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    producer_pid: int,
+    producer_pid_version: int,
+    producer_birth_token: int,
+) -> bool:
+    try:
+        payload = bridge_log.read_text(errors="replace")
+    except OSError:
+        return False
+    handshake = re.compile(
+        "^native_source producer handshake accepted "
+        f"service={re.escape(service_label)} nonce={generation} "
+        f"bridge_pid={bridge_pid} producer_pid={producer_pid} "
+        f"producer_pidversion={producer_pid_version} "
+        f"producer_start_token={producer_birth_token} source=[1-9][0-9]*x[1-9][0-9]*$",
+        re.MULTILINE,
+    )
+    self_tests = "native_source startup self-tests passed slots=3"
+    return len(handshake.findall(payload)) == 1 and payload.count(self_tests) == 1
+
+
+def _group_is_live(process_group_id: int) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/env",
+                "LC_ALL=C",
+                "/bin/ps",
+                "-axo",
+                "pgid=,stat=",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=1)
+            if len(fields) != 2:
+                continue
+            try:
+                group_id = int(fields[0])
+            except ValueError:
+                continue
+            if group_id == process_group_id and not fields[1].startswith("Z"):
+                return True
+        return False
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _quiesce_producer(
+    process: ProducerProcess,
+    launcher_birth_token: int,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    target: ProducerIdentity | None,
+    profile: ProfileStartAdmission,
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    context: RuntimeContext,
+    monotonic: Callable[[], float],
+    group_id: Callable[[int], int],
+    group_signaler: Callable[[int, int], None],
+    group_live: Callable[[int], bool],
+) -> ProducerIdentity | None:
+    transition_timeout = float(
+        profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"]
+    )
+    quiesce_deadline = monotonic() + max(
+        PRODUCER_QUIESCE_TIMEOUT_SECONDS,
+        transition_timeout + PRODUCER_QUIESCE_MARGIN_SECONDS,
+    )
+    quiesce_runner = DeadlineRunner(context.runner, quiesce_deadline, monotonic)
+
+    def stop_owned_process(identity: ProducerIdentity) -> None:
+        if not group_live(identity.process_group_id):
+            return
+        try:
+            current = _revalidate_producer_identity(
+                identity,
+                profile,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+        except ControlError:
+            if not group_live(identity.process_group_id):
+                return
+            raise
+        try:
+            group_signaler(current.process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        target_deadline = min(
+            monotonic() + PRODUCER_STOP_GRACE_SECONDS,
+            quiesce_deadline,
+        )
+        while monotonic() < target_deadline and group_live(current.process_group_id):
+            context.sleeper(MONITOR_INTERVAL_SECONDS)
+        if group_live(current.process_group_id):
+            try:
+                current = _revalidate_producer_identity(
+                    identity,
+                    profile,
+                    quiesce_runner,
+                    context.birth_token_reader,
+                    context.pid_version_reader,
+                )
+            except ControlError:
+                if not group_live(identity.process_group_id):
+                    return
+                raise
+            try:
+                group_signaler(current.process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            target_deadline = min(
+                monotonic() + PRODUCER_KILL_WAIT_SECONDS,
+                quiesce_deadline,
+            )
+            while monotonic() < target_deadline and group_live(current.process_group_id):
+                context.sleeper(MONITOR_INTERVAL_SECONDS)
+        if group_live(current.process_group_id):
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Owned detached process group remained live after bounded stop",
+                processGroupId=current.process_group_id,
+            )
+
+    if target is not None and target.process_group_id != launcher_process_group_id:
+        stop_owned_process(target)
+    if process.poll() is None:
+        current_birth_token, birth_error = context.birth_token_reader(process.pid)
+        current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
+        try:
+            current_group_id = group_id(process.pid)
+        except OSError as error:
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Producer launcher process group could not be revalidated",
+                detail=str(error),
+            ) from error
+        if (
+            current_birth_token != launcher_birth_token
+            or current_started_at != launcher_started_at
+            or current_group_id != launcher_process_group_id
+        ):
+            raise ControlError(
+                "producer.quiesce_failed",
+                birth_error
+                or start_error
+                or "Producer launcher identity changed before stop",
+            )
+        try:
+            group_signaler(launcher_process_group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        deadline = min(
+            monotonic() + PRODUCER_STOP_GRACE_SECONDS,
+            quiesce_deadline,
+        )
+        while monotonic() < deadline and (
+            process.poll() is None or group_live(launcher_process_group_id)
+        ):
+            context.sleeper(MONITOR_INTERVAL_SECONDS)
+        if process.poll() is None or group_live(launcher_process_group_id):
+            if process.poll() is not None:
+                if target is not None and target.process_group_id == launcher_process_group_id:
+                    stop_owned_process(target)
+                else:
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        "Producer launcher exited while its process group remained live",
+                        processGroupId=launcher_process_group_id,
+                    )
+                current_group_id = launcher_process_group_id
+            else:
+                current_birth_token, birth_error = context.birth_token_reader(process.pid)
+                current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
+                try:
+                    current_group_id = group_id(process.pid)
+                except OSError as error:
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        "Producer launcher process group could not be revalidated",
+                        detail=str(error),
+                    ) from error
+                if (
+                    current_birth_token != launcher_birth_token
+                    or current_started_at != launcher_started_at
+                    or current_group_id != launcher_process_group_id
+                ):
+                    raise ControlError(
+                        "producer.quiesce_failed",
+                        birth_error
+                        or start_error
+                        or "Producer launcher identity changed before forced stop",
+                    )
+                try:
+                    group_signaler(launcher_process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                deadline = min(
+                    monotonic() + PRODUCER_KILL_WAIT_SECONDS,
+                    quiesce_deadline,
+                )
+                while monotonic() < deadline and (
+                    process.poll() is None or group_live(launcher_process_group_id)
+                ):
+                    context.sleeper(MONITOR_INTERVAL_SECONDS)
+    if (
+        process.poll() is not None
+        and group_live(launcher_process_group_id)
+        and target is not None
+        and target.process_group_id == launcher_process_group_id
+    ):
+        stop_owned_process(target)
+    if process.poll() is None or group_live(launcher_process_group_id):
+        raise ControlError(
+            "producer.quiesce_failed",
+            "Owned launcher process group remained live after bounded stop",
+            processGroupId=launcher_process_group_id,
+        )
+
+    if target is None and profile.installed.owned_process is not None:
+        reconciliation_deadline = min(
+            monotonic() + transition_timeout,
+            quiesce_deadline,
+        )
+        while monotonic() < reconciliation_deadline:
+            observed = _inspect_producer_identity(
+                profile,
+                launcher_started_at,
+                launcher_process_group_id,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if observed is None:
+                context.sleeper(MONITOR_INTERVAL_SECONDS)
+                continue
+            target = observed
+            target = _confirm_producer_identity(
+                target,
+                profile,
+                launcher_started_at,
+                launcher_process_group_id,
+                quiesce_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if not _producer_markers_ready(
+                bridge_log,
+                service_label,
+                generation,
+                bridge_pid,
+                target.pid,
+                target.pid_version,
+                target.birth_token,
+            ):
+                context.sleeper(MONITOR_INTERVAL_SECONDS)
+                continue
+            if target.process_group_id != launcher_process_group_id:
+                stop_owned_process(target)
+            break
+
+    launcher_started = _process_start_datetime(launcher_started_at)
+    if launcher_started is None:
+        raise ControlError(
+            "producer.quiesce_failed",
+            "Producer launcher start time could not be parsed after stop",
+        )
+    remaining: list[ProducerIdentity] = []
+    for candidate in _owned_process_candidates(
+        profile,
+        quiesce_runner,
+        context.birth_token_reader,
+        context.pid_version_reader,
+    ):
+        candidate_started = _process_start_datetime(candidate.started_at)
+        if candidate_started is None:
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Owned process start time could not be parsed after stop",
+                pid=candidate.pid,
+            )
+        if candidate_started >= launcher_started:
+            remaining.append(candidate)
+    if remaining:
+        raise ControlError(
+            "producer.quiesce_failed",
+            "Exact owned process remained after bounded stop",
+            pids=sorted(candidate.pid for candidate in remaining),
+        )
+    return target
 
 
 def _service_ready(
@@ -683,6 +1790,43 @@ def _service_ready(
     )
 
 
+def _revalidate_waiting_service(
+    admission: StartAdmission,
+    expected_pid: int,
+    expected_runs: int,
+    plist_sha256: str,
+    bridge_sha256: str,
+    runner: CommandRunner,
+) -> Any:
+    current = inspect_service(admission.paths, runner)
+    try:
+        current_plist_sha256 = artifact_contract.sha256_file(
+            admission.paths.launch_agent_plist
+        )
+        current_bridge_sha256 = artifact_contract.sha256_file(admission.paths.bridge_program)
+    except OSError as error:
+        raise ControlError(
+            "service.identity_changed",
+            f"Ready service content could not be revalidated: {error}",
+        ) from error
+    if (
+        current.error_code is not None
+        or not current.snapshot.present
+        or current.snapshot.pid != expected_pid
+        or current.snapshot.runs != expected_runs
+        or current.snapshot.state != "running"
+        or not current.owned
+        or not current.identity_valid
+        or current_plist_sha256 != plist_sha256
+        or current_bridge_sha256 != bridge_sha256
+    ):
+        raise ControlError(
+            "service.identity_changed",
+            current.message or "Launchd service identity changed before waiting publication",
+        )
+    return current
+
+
 def _write_startup_result(run_dir: pathlib.Path, report: StartReport) -> None:
     _write_json_atomic(run_dir, run_dir / STARTUP_RESULT_NAME, report.to_dict())
 
@@ -705,12 +1849,14 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         "runDir",
         "supervisorLog",
         "actions",
+        "profile",
+        "producer",
     }
     if set(value) != required or value.get("schemaVersion") != 1 or value.get("command") != "start":
         return None
     if (
         not isinstance(value.get("ok"), bool)
-        or value.get("state") not in {"idle", "failed"}
+        or value.get("state") not in {"waiting", "failed"}
         or not isinstance(value.get("reasonCode"), str)
         or not isinstance(value.get("message"), str)
         or (value.get("artifact") is not None and not isinstance(value.get("artifact"), dict))
@@ -724,7 +1870,11 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         or not pathlib.Path(value["runDir"]).is_absolute()
         or not isinstance(value.get("supervisorLog"), str)
         or not pathlib.Path(value["supervisorLog"]).is_absolute()
-        or (value["ok"] and value["state"] != "idle")
+        or (value.get("profile") is not None and not isinstance(value.get("profile"), dict))
+        or (value.get("producer") is not None and not isinstance(value.get("producer"), dict))
+        or (value["ok"] and value["state"] != "waiting")
+        or (value["ok"] and not isinstance(value.get("profile"), dict))
+        or (value["ok"] and not isinstance(value.get("producer"), dict))
         or (not value["ok"] and value["state"] != "failed")
     ):
         return None
@@ -742,16 +1892,77 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         pathlib.Path(value["runDir"]),
         pathlib.Path(value["supervisorLog"]),
         tuple(actions),
+        value["profile"],
+        value["producer"],
     )
 
 
-def _idempotent_live_start(context: RuntimeContext, artifact: pathlib.Path) -> StartReport | None:
+def _idempotent_live_start(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    profile_id: str,
+) -> StartReport | None:
     status = status_runtime(context, artifact)
     if not status.ok or status.state not in LIVE_STATES:
         return None
     record = status.control_state.get("record")
     if not isinstance(record, dict):
         return None
+    profile_record = record.get("profile")
+    if not isinstance(profile_record, dict) or profile_record.get("id") != profile_id:
+        return start_failure(
+            "profile.conflict",
+            "Another curated profile already owns the live runtime",
+            artifact=status.artifact,
+            generation=record.get("generation"),
+            owner_pid=record.get("ownerPid"),
+            run_dir=(
+                pathlib.Path(record["runDir"])
+                if isinstance(record.get("runDir"), str)
+                else None
+            ),
+            profile=profile_record if isinstance(profile_record, dict) else None,
+            producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+        )
+    try:
+        manifest, _, _, _ = load_runtime_contract(context)
+        current_profile = runtime_profile.load_curated_profile(
+            profile_id,
+            manifest,
+            pathlib.Path(record["artifactPath"]),
+        )
+    except (ControlError, runtime_profile.ProfileError) as error:
+        code = error.code
+        message = error.message
+        return start_failure(
+            code,
+            message,
+            artifact=status.artifact,
+            generation=record.get("generation"),
+            owner_pid=record.get("ownerPid"),
+            run_dir=(
+                pathlib.Path(record["runDir"])
+                if isinstance(record.get("runDir"), str)
+                else None
+            ),
+            profile=profile_record,
+            producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+        )
+    if current_profile.sha256 != profile_record.get("sha256"):
+        return start_failure(
+            "profile.conflict",
+            "Live runtime profile digest differs from the requested curated profile",
+            artifact=status.artifact,
+            generation=record.get("generation"),
+            owner_pid=record.get("ownerPid"),
+            run_dir=(
+                pathlib.Path(record["runDir"])
+                if isinstance(record.get("runDir"), str)
+                else None
+            ),
+            profile=profile_record,
+            producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+        )
     return StartReport(
         True,
         status.state,
@@ -767,18 +1978,22 @@ def _idempotent_live_start(context: RuntimeContext, artifact: pathlib.Path) -> S
             and isinstance(record["diagnostic"].get("supervisorLog"), str)
             else None
         ),
+        (),
+        profile_record,
+        record.get("producer") if isinstance(record.get("producer"), dict) else None,
     )
 
 
 def start_runtime(
     context: RuntimeContext,
     artifact: pathlib.Path,
+    profile_id: str,
     *,
     launcher: ProcessLauncher | None = None,
     generation_factory: Callable[[], int] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> StartReport:
-    live = _idempotent_live_start(context, artifact)
+    live = _idempotent_live_start(context, artifact, profile_id)
     if live is not None:
         return live
     doctor = doctor_runtime(context, artifact)
@@ -789,7 +2004,7 @@ def start_runtime(
             artifact=doctor.artifact,
         )
     try:
-        admission = inspect_start_admission(context, artifact)
+        admission = inspect_start_admission(context, artifact, profile_id)
     except ControlError as error:
         return start_failure(error.code, error.message, artifact=doctor.artifact)
     paths = admission.paths
@@ -827,12 +2042,20 @@ def start_runtime(
     except ControlError as error:
         return start_failure(error.code, error.message, generation=generation, run_dir=run_dir)
     effective_launcher = launcher or SubprocessLauncher()
-    deadline = monotonic() + STARTUP_TIMEOUT_SECONDS
+    if admission.profile is None:
+        return start_failure("profile.artifact_mismatch", "Start admission has no curated profile")
+    deadline = monotonic() + STARTUP_TIMEOUT_SECONDS + float(
+        admission.profile.installed.loaded.data["launch"]["startupTimeoutSeconds"]
+    )
     command = [
         sys.executable,
         str(RUNTIME_START),
         "--artifact",
         str(_absolute(artifact)),
+        "--profile",
+        admission.profile.installed.loaded.data["id"],
+        "--profile-sha256",
+        admission.profile.installed.loaded.sha256,
         "--bindings",
         str(_absolute(context.bindings_path)),
         "--generation",
@@ -867,12 +2090,23 @@ def start_runtime(
                 )
             report = _parse_start_report(payload)
             if report is not None:
-                if (
+                identity_mismatch = (
                     report.generation != generation
                     or report.owner_pid != child.pid
                     or report.run_dir != run_dir
                     or report.supervisor_log != supervisor_log
-                ):
+                )
+                if report.ok:
+                    identity_mismatch = identity_mismatch or (
+                        report.profile != _profile_record(admission.profile)
+                        or not isinstance(report.producer, dict)
+                        or report.producer.get("status") != "ready"
+                    )
+                elif report.profile is not None:
+                    identity_mismatch = identity_mismatch or (
+                        report.profile != _profile_record(admission.profile)
+                    )
+                if identity_mismatch:
                     return start_failure(
                         "runtime.start_failed",
                         "Runtime supervisor returned startup state for another generation",
@@ -1065,6 +2299,7 @@ def _cleanup_started_state(
 def _receive_control_request(
     listener: socket.socket,
     generation: int,
+    stop_handler: Callable[[], None] | None = None,
 ) -> str | None:
     try:
         connection, _ = listener.accept()
@@ -1098,9 +2333,23 @@ def _receive_control_request(
                 "ownerPid": os.getpid(),
             }
         )
-        response = artifact_contract.canonical_json_bytes(
-            {"schemaVersion": 1, "ok": accepted, "generation": generation}
-        )
+        response_value: dict[str, Any] = {
+            "schemaVersion": 1,
+            "ok": accepted,
+            "generation": generation,
+        }
+        if accepted and command == "stop" and stop_handler is not None:
+            try:
+                stop_handler()
+            except ControlError as error:
+                accepted = False
+                response_value = {
+                    "schemaVersion": 1,
+                    "ok": False,
+                    "generation": generation,
+                    "error": {"code": error.code, "message": error.message},
+                }
+        response = artifact_contract.canonical_json_bytes(response_value)
         with contextlib.suppress(OSError):
             connection.sendall(response)
         return command if accepted else None
@@ -1109,11 +2358,17 @@ def _receive_control_request(
 def supervise_runtime(
     context: RuntimeContext,
     artifact: pathlib.Path,
+    profile_id: str,
+    profile_sha256: str,
     generation: int,
     run_dir: pathlib.Path,
     *,
     monotonic: Callable[[], float] = time.monotonic,
     startup_deadline: float | None = None,
+    producer_launcher: ProducerLauncher | None = None,
+    group_id: Callable[[int], int] = os.getpgid,
+    group_signaler: Callable[[int, int], None] = os.killpg,
+    group_live: Callable[[int], bool] = _group_is_live,
 ) -> StartReport:
     actions: list[str] = []
     supervisor_log = run_dir / SUPERVISOR_LOG_NAME
@@ -1121,6 +2376,14 @@ def supervise_runtime(
     plist_sha256: str | None = None
     control_socket = run_dir / CONTROL_SOCKET_NAME
     deadline = startup_deadline or (monotonic() + STARTUP_TIMEOUT_SECONDS)
+    producer_process: ProducerProcess | None = None
+    producer_log: pathlib.Path | None = None
+    bridge_pid: int | None = None
+    launcher_birth_token: int | None = None
+    launcher_started_at: str | None = None
+    process_group_id: int | None = None
+    producer_identity: ProducerIdentity | None = None
+    producer_state: dict[str, Any] | None = None
     try:
         _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
         manifest, bindings, initial_paths = resolve_context_paths_for_start(context)
@@ -1150,52 +2413,82 @@ def supervise_runtime(
         _private_directory(run_dir)
         with global_lifecycle_lock(context.lifecycle_lock_path, initial_allowed_roots):
             _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
-            admission = inspect_start_admission(context, artifact)
+            active_admission = inspect_start_admission(context, artifact, profile_id)
+            admission = active_admission
+            profile_admission = active_admission.profile
+            if profile_admission is None or profile_admission.installed.loaded.sha256 != profile_sha256:
+                raise ControlError(
+                    "profile.artifact_mismatch",
+                    "Parent and supervisor profile identities do not match",
+                    profile=profile_id,
+                    expected=profile_sha256,
+                    actual=(
+                        profile_admission.installed.loaded.sha256
+                        if profile_admission is not None
+                        else None
+                    ),
+                )
             _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
-            startup_runner = DeadlineRunner(context.runner, deadline, monotonic)
-            existing_service = inspect_service(admission.paths, startup_runner)
+            host_deadline = min(deadline, monotonic() + STARTUP_TIMEOUT_SECONDS)
+            startup_runner = DeadlineRunner(context.runner, host_deadline, monotonic)
+            existing_service = inspect_service(active_admission.paths, startup_runner)
             if existing_service.error_code is not None or existing_service.snapshot.present:
                 raise ControlError(
                     existing_service.error_code or "service.foreign",
                     existing_service.message or "Launchd label is already occupied",
                 )
-            if inspect_lock(admission.paths.lock_path, context.pid_alive).exists:
+            if inspect_lock(active_admission.paths.lock_path, context.pid_alive).exists:
                 raise ControlError(
                     "runtime.stale_state",
                     "Runtime owner lock already exists; run stop before starting",
-                    path=str(admission.paths.lock_path),
+                    path=str(active_admission.paths.lock_path),
                 )
-            if load_control_state(admission.paths.state_path).exists:
+            if load_control_state(active_admission.paths.state_path).exists:
                 raise ControlError(
                     "runtime.stale_state",
                     "Runtime control state already exists; run stop before starting",
-                    path=str(admission.paths.state_path),
+                    path=str(active_admission.paths.state_path),
                 )
-            _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
-            _create_owner_lock(admission.paths, run_dir)
+            existing_owned_processes = _owned_process_candidates(
+                profile_admission,
+                startup_runner,
+                context.birth_token_reader,
+                context.pid_version_reader,
+            )
+            if existing_owned_processes:
+                raise ControlError(
+                    "producer.already_running",
+                    "An exact owned-process candidate was already live before launch",
+                    pids=sorted(candidate.pid for candidate in existing_owned_processes),
+                )
+            _remaining_timeout(host_deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
+            _create_owner_lock(active_admission.paths, run_dir)
             owner_started_at, owner_error = process_start_time(os.getpid(), startup_runner)
             if owner_started_at is None:
                 raise ControlError(
                     "owner.identity_unavailable",
                     owner_error or "Supervisor process start time is unavailable",
                 )
-            _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
+            _remaining_timeout(host_deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
             bridge_log = run_dir / BRIDGE_LOG_NAME
             _write_new_file(run_dir, bridge_log, b"")
             _make_private_directory(run_dir, run_dir / ALVR_ROOT_NAME)
-            launch_plist = render_launch_agent(admission, run_dir, generation)
+            launch_plist = render_launch_agent(active_admission, run_dir, generation)
             plist_sha256 = artifact_contract.sha256_bytes(launch_plist)
             _write_file_atomic(
-                admission.paths.launch_agent_plist.parent,
-                admission.paths.launch_agent_plist,
+                active_admission.paths.launch_agent_plist.parent,
+                active_admission.paths.launch_agent_plist,
                 launch_plist,
             )
-            if artifact_contract.sha256_file(admission.paths.launch_agent_plist) != plist_sha256:
+            if (
+                artifact_contract.sha256_file(active_admission.paths.launch_agent_plist)
+                != plist_sha256
+            ):
                 raise ControlError(
                     "runtime.start_failed",
                     "Rendered launch agent plist changed during publication",
                 )
-            plist_owned, plist_error = validate_plist_ownership(admission.paths)
+            plist_owned, plist_error = validate_plist_ownership(active_admission.paths)
             if not plist_owned:
                 raise ControlError(
                     "service.plist_foreign",
@@ -1209,82 +2502,446 @@ def supervise_runtime(
                 listener.settimeout(MONITOR_INTERVAL_SECONDS)
                 actions.extend(
                     _bootstrap_service(
-                        admission,
+                        active_admission,
                         startup_runner,
-                        deadline,
+                        host_deadline,
                         monotonic,
                     )
                 )
                 ready_window = _remaining_timeout(
-                    deadline,
+                    host_deadline,
                     SERVICE_READY_TIMEOUT_SECONDS,
                     monotonic,
                 )
                 service = _service_ready(
-                    admission,
+                    active_admission,
                     startup_runner,
                     bridge_log,
                     monotonic() + ready_window,
                     monotonic,
                     context.sleeper,
                 )
-                state_payload = _state_payload(
-                    admission,
+                bridge_pid = service.snapshot.pid
+                if bridge_pid is None:
+                    raise ControlError(
+                        "service.identity_unknown",
+                        "Ready launchd service has no live PID",
+                    )
+                producer_log = run_dir / PRODUCER_LOG_NAME
+                producer_state = _launching_producer_record(
+                    profile_admission,
+                    producer_log,
+                )
+                launching_payload = _state_payload(
+                    active_admission,
                     run_dir,
                     generation,
                     service,
                     owner_started_at,
                     control_socket,
                     plist_sha256,
-                )
-                _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
-                _write_json_atomic(
-                    admission.paths.state_root,
-                    admission.paths.state_path,
-                    state_payload,
-                )
-                report = StartReport(
-                    True,
                     "idle",
-                    "runtime.idle",
-                    "Runtime supervisor and exact Mach bridge are awaiting a game producer",
-                    admission.artifact,
-                    generation,
-                    os.getpid(),
-                    run_dir,
-                    supervisor_log,
-                    tuple(actions),
+                    "launching-producer",
+                    producer_state,
                 )
-                _write_startup_result(run_dir, report)
+                _write_json_atomic(
+                    active_admission.paths.state_root,
+                    active_admission.paths.state_path,
+                    launching_payload,
+                )
+                effective_producer_launcher = producer_launcher or SubprocessProducerLauncher()
+                producer_process, producer_log = _producer_launch(
+                    active_admission,
+                    run_dir,
+                    generation,
+                    effective_producer_launcher,
+                )
+                launcher_started_at, launcher_error = process_start_time(
+                    producer_process.pid,
+                    context.runner,
+                )
+                if launcher_started_at is None:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        launcher_error or "Producer launcher process start time is unavailable",
+                    )
+                launcher_birth_token, launcher_birth_error = context.birth_token_reader(
+                    producer_process.pid
+                )
+                if launcher_birth_token is None:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        launcher_birth_error
+                        or "Producer launcher process birth token is unavailable",
+                    )
+                try:
+                    process_group_id = group_id(producer_process.pid)
+                except OSError as error:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        "Producer launcher process group is unavailable",
+                        detail=str(error),
+                    ) from error
+                if process_group_id != producer_process.pid or producer_process.poll() is not None:
+                    raise ControlError(
+                        "producer.identity_unavailable",
+                        "Producer launcher did not retain its exact new process group",
+                        pid=producer_process.pid,
+                        processGroupId=process_group_id,
+                    )
+                producer_state = _producer_record(
+                    profile_admission,
+                    "starting",
+                    producer_process.pid,
+                    launcher_birth_token,
+                    launcher_started_at,
+                    process_group_id,
+                    producer_log,
+                    None,
+                )
+                starting_payload = _state_payload(
+                    active_admission,
+                    run_dir,
+                    generation,
+                    service,
+                    owner_started_at,
+                    control_socket,
+                    plist_sha256,
+                    "idle",
+                    "starting-producer",
+                    producer_state,
+                )
+                _write_json_atomic(
+                    active_admission.paths.state_root,
+                    active_admission.paths.state_path,
+                    starting_payload,
+                )
+                producer_quiesced = False
+
+                def quiesce_and_publish() -> None:
+                    nonlocal producer_identity, producer_quiesced, producer_state
+                    if not producer_quiesced:
+                        producer_identity = _quiesce_producer(
+                            producer_process,
+                            launcher_birth_token,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_identity,
+                            profile_admission,
+                            bridge_log,
+                            active_admission.paths.service_label,
+                            generation,
+                            bridge_pid,
+                            context,
+                            monotonic,
+                            group_id,
+                            group_signaler,
+                            group_live,
+                        )
+                        producer_quiesced = True
+                    producer_state = _producer_record(
+                        profile_admission,
+                        "quiesced",
+                        producer_process.pid,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_log,
+                        producer_identity,
+                    )
+                    quiesced_payload = _state_payload(
+                        active_admission,
+                        run_dir,
+                        generation,
+                        service,
+                        owner_started_at,
+                        control_socket,
+                        plist_sha256,
+                        "idle",
+                        "producer-quiesced",
+                        producer_state,
+                    )
+                    _write_json_atomic(
+                        active_admission.paths.state_root,
+                        active_admission.paths.state_path,
+                        quiesced_payload,
+                    )
+
                 stop_requested = False
-                live_pid = service.snapshot.pid
+                provisional_identity: ProducerIdentity | None = None
+                producer_deadline = min(
+                    deadline,
+                    monotonic()
+                    + float(
+                        profile_admission.installed.loaded.data["launch"][
+                            "startupTimeoutSeconds"
+                        ]
+                    ),
+                )
+                producer_runner = DeadlineRunner(
+                    context.runner,
+                    producer_deadline,
+                    monotonic,
+                )
+                while monotonic() < producer_deadline:
+                    if (
+                        _receive_control_request(
+                            listener,
+                            generation,
+                            quiesce_and_publish,
+                        )
+                        == "stop"
+                    ):
+                        stop_requested = True
+                        break
+                    if producer_process.poll() is not None:
+                        raise ControlError(
+                            "producer.exited",
+                            "CrossOver producer exited before authenticated readiness",
+                        )
+                    try:
+                        observed = _inspect_producer_identity(
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        if observed is None:
+                            if provisional_identity is not None:
+                                raise ControlError(
+                                    "producer.identity_changed",
+                                    "Provisional owned process disappeared before authenticated readiness",
+                                    pid=provisional_identity.pid,
+                                )
+                            continue
+                        observed = _confirm_producer_identity(
+                            observed,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                    except ControlError as error:
+                        if (
+                            error.code == "producer.identity_unavailable"
+                            and monotonic() >= producer_deadline
+                        ):
+                            break
+                        raise
+                    if provisional_identity is None:
+                        provisional_identity = observed
+                    elif observed != provisional_identity:
+                        raise ControlError(
+                            "producer.identity_changed",
+                            "Owned process changed before authenticated readiness",
+                            expectedPid=provisional_identity.pid,
+                            observedPid=observed.pid,
+                        )
+                    if _producer_markers_ready(
+                        bridge_log,
+                        active_admission.paths.service_label,
+                        generation,
+                        bridge_pid,
+                        provisional_identity.pid,
+                        provisional_identity.pid_version,
+                        provisional_identity.birth_token,
+                    ):
+                        producer_identity = _confirm_producer_identity(
+                            provisional_identity,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        break
+                if not stop_requested:
+                    if producer_identity is None:
+                        raise ControlError(
+                            "producer.start_timeout",
+                            "Exact producer and authenticated bridge readiness did not complete before the profile deadline",
+                        )
+                    service_runs = service.snapshot.runs
+                    if service_runs is None:
+                        raise ControlError(
+                            "service.identity_unknown",
+                            "Ready launchd service has no run count",
+                        )
+                    service = _revalidate_waiting_service(
+                        active_admission,
+                        bridge_pid,
+                        service_runs,
+                        plist_sha256,
+                        starting_payload["bridgeExecutableSha256"],
+                        producer_runner,
+                    )
+                    producer_identity = _confirm_producer_identity(
+                        producer_identity,
+                        profile_admission,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
+                    producer_state = _producer_record(
+                        profile_admission,
+                        "ready",
+                        producer_process.pid,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_log,
+                        producer_identity,
+                    )
+                    waiting_payload = _state_payload(
+                        active_admission,
+                        run_dir,
+                        generation,
+                        service,
+                        owner_started_at,
+                        control_socket,
+                        plist_sha256,
+                        "waiting",
+                        "waiting-for-client",
+                        producer_state,
+                    )
+                    _write_json_atomic(
+                        active_admission.paths.state_root,
+                        active_admission.paths.state_path,
+                        waiting_payload,
+                    )
+                    service = _revalidate_waiting_service(
+                        active_admission,
+                        bridge_pid,
+                        service_runs,
+                        plist_sha256,
+                        starting_payload["bridgeExecutableSha256"],
+                        producer_runner,
+                    )
+                    producer_identity = _confirm_producer_identity(
+                        producer_identity,
+                        profile_admission,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
+                    report = StartReport(
+                        True,
+                        "waiting",
+                        "runtime.waiting",
+                        "Exact curated game producer is ready and waiting for Vision Pro",
+                        active_admission.artifact,
+                        generation,
+                        os.getpid(),
+                        run_dir,
+                        supervisor_log,
+                        tuple(actions),
+                        _profile_record(profile_admission),
+                        producer_state,
+                    )
+                    _write_startup_result(run_dir, report)
+                live_pid = bridge_pid
                 next_status_check = monotonic()
                 next_identity_check = monotonic() + SERVICE_IDENTITY_INTERVAL_SECONDS
                 while True:
-                    if _receive_control_request(listener, generation) == "stop":
+                    if (
+                        _receive_control_request(
+                            listener,
+                            generation,
+                            quiesce_and_publish,
+                        )
+                        == "stop"
+                    ):
                         stop_requested = True
                     now = monotonic()
                     if not stop_requested and now < next_status_check:
                         continue
                     next_status_check = now + SERVICE_STATUS_INTERVAL_SECONDS
-                    snapshot = read_launchd_snapshot(admission.paths, context.runner)
+                    if not producer_quiesced:
+                        if producer_process.poll() is not None:
+                            failure = start_failure(
+                                "producer.exited",
+                                "Owned producer exited without a stop request",
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                        try:
+                            assert producer_identity is not None
+                            current_producer = _confirm_producer_identity(
+                                producer_identity,
+                                profile_admission,
+                                launcher_started_at,
+                                process_group_id,
+                                context.runner,
+                                context.birth_token_reader,
+                                context.pid_version_reader,
+                            )
+                        except ControlError as error:
+                            failure = start_failure(
+                                error.code,
+                                error.message,
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                        if current_producer != producer_identity:
+                            failure = start_failure(
+                                "producer.identity_changed",
+                                "Owned producer identity changed after startup",
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                    snapshot = read_launchd_snapshot(active_admission.paths, context.runner)
                     if snapshot.error_code is not None:
                         failure = start_failure(
                             snapshot.error_code,
                             snapshot.message or "Live launchd state inspection failed",
-                            artifact=admission.artifact,
+                            artifact=active_admission.artifact,
                             generation=generation,
                             owner_pid=os.getpid(),
                             run_dir=run_dir,
                             supervisor_log=supervisor_log,
                             actions=actions,
+                            profile=_profile_record(profile_admission),
+                            producer=producer_state,
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
                     if not snapshot.present:
                         if stop_requested:
                             _cleanup_started_state(
-                                admission,
+                                active_admission,
                                 run_dir,
                                 generation,
                                 plist_sha256,
@@ -1296,49 +2953,96 @@ def supervise_runtime(
                                 "stopped",
                                 "runtime.stopped",
                                 "Runtime supervisor completed cooperative cleanup",
-                                admission.artifact,
+                                active_admission.artifact,
                                 generation,
                                 os.getpid(),
                                 run_dir,
                                 supervisor_log,
                                 tuple(actions),
+                                _profile_record(profile_admission),
+                                producer_state,
                             )
                             return stopped
                         failure = start_failure(
                             "service.exited",
                             "Owned launchd service disappeared without a stop request",
-                            artifact=admission.artifact,
+                            artifact=active_admission.artifact,
                             generation=generation,
                             owner_pid=os.getpid(),
                             run_dir=run_dir,
                             supervisor_log=supervisor_log,
                             actions=actions,
+                            profile=_profile_record(profile_admission),
+                            producer=producer_state,
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
+                    if stop_requested:
+                        transitioning_service = inspect_service(
+                            active_admission.paths,
+                            context.runner,
+                        )
+                        if not transitioning_service.snapshot.present:
+                            continue
+                        try:
+                            transition_plist_sha256 = artifact_contract.sha256_file(
+                                active_admission.paths.launch_agent_plist
+                            )
+                            transition_bridge_sha256 = artifact_contract.sha256_file(
+                                active_admission.paths.bridge_program
+                            )
+                        except OSError:
+                            transition_plist_sha256 = None
+                            transition_bridge_sha256 = None
+                        if (
+                            transitioning_service.error_code is not None
+                            or not transitioning_service.owned
+                            or not transitioning_service.identity_valid
+                            or transition_plist_sha256 != plist_sha256
+                            or transition_bridge_sha256
+                            != starting_payload["bridgeExecutableSha256"]
+                        ):
+                            failure = start_failure(
+                                "service.identity_changed",
+                                transitioning_service.message
+                                or "Owned launchd service identity changed during cooperative stop",
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                        continue
                     if (
                         snapshot.pid != live_pid
                         or snapshot.runs != 1
                         or snapshot.state != "running"
-                        or not paths_match(snapshot.path, admission.paths.launch_agent_plist)
-                        or not paths_match(snapshot.program, admission.paths.bridge_program)
+                        or not paths_match(snapshot.path, active_admission.paths.launch_agent_plist)
+                        or not paths_match(snapshot.program, active_admission.paths.bridge_program)
                     ):
                         failure = start_failure(
                             "service.identity_changed",
                             "Owned launchd service identity changed after startup",
-                            artifact=admission.artifact,
+                            artifact=active_admission.artifact,
                             generation=generation,
                             owner_pid=os.getpid(),
                             run_dir=run_dir,
                             supervisor_log=supervisor_log,
                             actions=actions,
+                            profile=_profile_record(profile_admission),
+                            producer=producer_state,
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
                     if now < next_identity_check:
                         continue
                     next_identity_check = now + SERVICE_IDENTITY_INTERVAL_SECONDS
-                    current = inspect_service(admission.paths, context.runner)
+                    current = inspect_service(active_admission.paths, context.runner)
                     if (
                         current.error_code is not None
                         or not current.snapshot.present
@@ -1351,12 +3055,14 @@ def supervise_runtime(
                         failure = start_failure(
                             current.error_code or "service.identity_changed",
                             current.message or "Owned launchd service identity changed after startup",
-                            artifact=admission.artifact,
+                            artifact=active_admission.artifact,
                             generation=generation,
                             owner_pid=os.getpid(),
                             run_dir=run_dir,
                             supervisor_log=supervisor_log,
                             actions=actions,
+                            profile=_profile_record(profile_admission),
+                            producer=producer_state,
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
@@ -1378,10 +3084,48 @@ def supervise_runtime(
             run_dir=run_dir,
             supervisor_log=supervisor_log,
             actions=actions,
+            profile=(
+                _profile_record(admission.profile)
+                if admission is not None and admission.profile is not None
+                else None
+            ),
+            producer=producer_state,
         )
         cleanup_failures: list[str] = []
+        producer_clean = producer_process is None
+        if (
+            producer_process is not None
+            and launcher_birth_token is not None
+            and launcher_started_at is not None
+            and process_group_id is not None
+            and bridge_pid is not None
+            and admission is not None
+            and admission.profile is not None
+        ):
+            try:
+                _quiesce_producer(
+                    producer_process,
+                    launcher_birth_token,
+                    launcher_started_at,
+                    process_group_id,
+                    producer_identity,
+                    admission.profile,
+                    run_dir / BRIDGE_LOG_NAME,
+                    admission.paths.service_label,
+                    generation,
+                    bridge_pid,
+                    context,
+                    monotonic,
+                    group_id,
+                    group_signaler,
+                    group_live,
+                )
+            except (ControlError, OSError) as cleanup_error:
+                cleanup_failures.append(str(cleanup_error))
+            else:
+                producer_clean = True
         service_clean = admission is None
-        if admission is not None:
+        if producer_clean and admission is not None:
             try:
                 _bootout_created_service(
                     admission,
@@ -1417,6 +3161,12 @@ def supervise_runtime(
                 run_dir=run_dir,
                 supervisor_log=supervisor_log,
                 actions=actions,
+                profile=(
+                    _profile_record(admission.profile)
+                    if admission is not None and admission.profile is not None
+                    else None
+                ),
+                producer=producer_state,
             )
         with contextlib.suppress(ControlError, OSError):
             _write_startup_result(run_dir, failure)
@@ -1427,6 +3177,8 @@ def build_supervisor_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Internal Mac ALVR runtime supervisor")
     parser.add_argument("--bindings", type=pathlib.Path, required=True)
     parser.add_argument("--artifact", type=pathlib.Path, required=True)
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--profile-sha256", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--run-dir", type=pathlib.Path, required=True)
     parser.add_argument("--deadline", type=float, required=True)
@@ -1439,6 +3191,8 @@ def main(argv: list[str] | None = None) -> int:
     report = supervise_runtime(
         context,
         arguments.artifact,
+        arguments.profile,
+        arguments.profile_sha256,
         arguments.generation,
         arguments.run_dir,
         startup_deadline=arguments.deadline,

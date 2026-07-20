@@ -53,6 +53,7 @@ jobs:
             tools/launch_freedom_crossover.py \
             tools/build_runtime_artifact.py \
             tools/runtime_profile.py \
+            tools/runtime_profile_test.py \
             tools/runtime_control.py \
             tools/runtime_cli.py \
             tools/runtime_start.py \
@@ -69,6 +70,7 @@ jobs:
         run: |
           python3 tools/runtime_profile.py check
           python3 tools/runtime_profile.py self-test
+          python3 tools/runtime_profile_test.py
 
       - name: Validate runtime control plane
         run: |
@@ -113,10 +115,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Compile lifecycle tools
         run: |
           python3 -m py_compile \
             tools/build_runtime_artifact.py \
+            tools/runtime_profile.py \
+            tools/runtime_profile_test.py \
             tools/runtime_control.py \
             tools/runtime_cli.py \
             tools/runtime_start.py \
@@ -129,8 +138,14 @@ jobs:
             tools/runtime_transaction_test.py \
             tools/runtime_install_test.py
 
+      - name: Prepare fixture root
+        run: mkdir -p "$RUNTIME_FIXTURE_ROOT"
+
       - name: Validate lifecycle fixtures
         run: |
+          python3 tools/runtime_profile.py check
+          python3 tools/runtime_profile.py self-test
+          python3 tools/runtime_profile_test.py
           python3 tools/runtime_control_test.py
           python3 tools/runtime_start_test.py
           python3 tools/runtime_descriptor_test.py
