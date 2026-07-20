@@ -15,6 +15,7 @@ import time
 import unittest
 from collections.abc import Iterator, Sequence
 from dataclasses import replace
+from typing import Any
 from unittest import mock
 
 import runtime_profile
@@ -580,6 +581,41 @@ class RuntimeStartTests(unittest.TestCase):
             group_live=producer_launcher.group_live,
         )
 
+    def wait_for_state(
+        self,
+        state_name: str,
+        *,
+        producer_status: str | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = load_control_state(self.fixture.paths.state_path)
+            if state.valid and state.record is not None:
+                producer = state.record.get("producer")
+                if state.record.get("state") == state_name and (
+                    producer_status is None
+                    or (
+                        isinstance(producer, dict)
+                        and producer.get("status") == producer_status
+                    )
+                ):
+                    return state.record
+            time.sleep(0.01)
+        self.fail(
+            f"runtime did not reach state={state_name} producer={producer_status}"
+        )
+
+    def wait_for_waiting_startup(self, run_dir: pathlib.Path) -> dict[str, Any]:
+        result_path = run_dir / STARTUP_RESULT_NAME
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not result_path.exists():
+            time.sleep(0.01)
+        self.assertTrue(result_path.exists())
+        result = json.loads(result_path.read_text())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "waiting")
+        return self.wait_for_state("waiting", producer_status="ready")
+
     def exact_profile_plan(self) -> dict[str, object]:
         target = self.fixture.profile.installed.entrypoint
         stock_openvr = target.openvr_directory / "openvr_api.dll"
@@ -903,19 +939,8 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
-            assert state.record is not None
-            self.assertEqual(state.record["state"], "waiting")
-            producer = state.record["producer"]
+            record = self.wait_for_waiting_startup(run_dir)
+            producer = record["producer"]
             assert isinstance(producer, dict)
             launcher_state = producer["launcher"]
             owned_process = producer["ownedProcess"]
@@ -927,9 +952,9 @@ class RuntimeStartTests(unittest.TestCase):
                 self.fixture.runner.target_pid_version,
             )
             self.fixture.runner.producer_pid_version += 1
-            responsive, ping_error = request_supervisor_ping(state.record)
+            responsive, ping_error = request_supervisor_ping(record)
             self.assertTrue(responsive, ping_error)
-            accepted, error = request_supervisor_stop(state.record)
+            accepted, error = request_supervisor_stop(record)
             self.assertTrue(accepted, error)
             self.fixture.runner.loaded = False
             thread.join(timeout=5)
@@ -964,18 +989,8 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
-            assert state.record is not None
-            accepted, error = request_supervisor_stop(state.record)
+            record = self.wait_for_waiting_startup(run_dir)
+            accepted, error = request_supervisor_stop(record)
             self.assertTrue(accepted, error)
             self.assertTrue(self.fixture.runner.transition_observed.wait(timeout=5))
             self.assertTrue(thread.is_alive())
@@ -1013,18 +1028,8 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
-            assert state.record is not None
-            accepted, error = request_supervisor_stop(state.record)
+            record = self.wait_for_waiting_startup(run_dir)
+            accepted, error = request_supervisor_stop(record)
             self.assertTrue(accepted, error)
             thread.join(timeout=5)
 
@@ -1060,18 +1065,8 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
-            assert state.record is not None
-            accepted, error = request_supervisor_stop(state.record)
+            record = self.wait_for_waiting_startup(run_dir)
+            accepted, error = request_supervisor_stop(record)
             self.assertTrue(accepted, error)
             thread.join(timeout=5)
 
@@ -1105,19 +1100,8 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "idle"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
-            assert state.record is not None
-            self.assertEqual(state.record["producer"]["status"], "starting")
-            accepted, error = request_supervisor_stop(state.record)
+            record = self.wait_for_state("idle", producer_status="starting")
+            accepted, error = request_supervisor_stop(record)
             self.assertTrue(accepted, error)
             self.fixture.runner.loaded = False
             thread.join(timeout=5)
@@ -1173,15 +1157,7 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
+            self.wait_for_waiting_startup(run_dir)
             self.fixture.runner.producer_live = False
             self.fixture.runner.target_live = False
             thread.join(timeout=5)
@@ -1214,15 +1190,7 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
+            self.wait_for_waiting_startup(run_dir)
             self.fixture.runner.target_started_at = "Sat Jul 18 05:00:02 2026"
             thread.join(timeout=5)
 
@@ -2110,16 +2078,7 @@ class RuntimeStartTests(unittest.TestCase):
         ):
             thread = threading.Thread(target=supervise)
             thread.start()
-            deadline = time.monotonic() + 5
-            state = load_control_state(self.fixture.paths.state_path)
-            while time.monotonic() < deadline and (
-                not state.valid
-                or state.record is None
-                or state.record.get("state") != "waiting"
-            ):
-                time.sleep(0.01)
-                state = load_control_state(self.fixture.paths.state_path)
-            self.assertTrue(state.valid)
+            self.wait_for_waiting_startup(run_dir)
             self.fixture.runner.loaded = False
             thread.join(timeout=5)
 
