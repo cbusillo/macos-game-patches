@@ -456,11 +456,18 @@ class RuntimeInstallTests(unittest.TestCase):
                     return_value=live,
                 ):
                     install = runtime_install.install_runtime(context, fixture.artifact_root)
+                    install_replay = runtime_install.install_runtime(
+                        context, fixture.artifact_root
+                    )
                     uninstall = runtime_install.uninstall_runtime(context, fixture.artifact_root)
                 self.assertTrue(install.ok)
+                self.assertTrue(install_replay.ok)
                 self.assertTrue(uninstall.ok)
-                self.assertGreaterEqual(stop_mock.call_count, 4)
+                self.assertGreaterEqual(stop_mock.call_count, 5)
                 self.assertEqual(install.stop_actions.count("already-stopped"), 2)
+                self.assertEqual(
+                    install_replay.stop_actions.count("already-stopped"), 1
+                )
                 self.assertEqual(uninstall.stop_actions.count("already-stopped"), 2)
 
     def test_sealing_gate_has_zero_lifecycle_mutation(self) -> None:

@@ -717,6 +717,7 @@ def _settle_active_journal(
                     reason_code="transaction.already_committed",
                     message="The requested lifecycle transaction is already committed",
                     ok=True,
+                    stop_actions=stop_actions,
                 ),
                 None,
             )
