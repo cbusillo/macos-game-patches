@@ -67,8 +67,10 @@ group without adopting or signaling cached PIDs?
    executable, working directory, profile arguments, generation nonce, bridge
    service, runtime bridge root, geometry, and profile environment.
 5. Launch `cxstart --wait-children` in a new POSIX session with stdout/stderr
-   below the generation directory. Retain the live process handle and its exact
-   launcher identity in supervisor memory.
+   below the generation directory. Retain the live process handle plus the
+   launcher's PID, birth token, start time, and process-group identity in
+   supervisor memory. Do not bind launcher authority to macOS PID version:
+   CrossOver legitimately increments it when `cxstart` execs `winewrapper`.
 6. Resolve an optional singleton `launch.ownedProcess` from the sealed profile.
    Freedom names only
    `FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe` and
@@ -101,10 +103,11 @@ group without adopting or signaling cached PIDs?
 
 1. An authenticated schema-v4 `stop` request asks the supervisor to quiesce the
    producer before acknowledging the request.
-2. Revalidate the retained launcher and in-memory steady-state process by PID,
-   birth token, PID version, start time, PGID, command, and exact executable
-   mapping immediately before every signal. Serialized producer PIDs and PGIDs
-   remain evidence only.
+2. Revalidate the retained launcher by PID, birth token, start time, and PGID,
+   which remain stable across its admitted `exec` transition. Revalidate the
+   in-memory steady-state process by PID, birth token, PID version, start time,
+   PGID, command, and exact executable mapping immediately before every signal.
+   Serialized producer PIDs and PGIDs remain evidence only.
 3. Stop the independently grouped steady-state process first, then the launcher
    group. Send `SIGTERM`, wait a fixed grace period, and send `SIGKILL` only
    after another exact live revalidation.
@@ -132,13 +135,14 @@ group without adopting or signaling cached PIDs?
    detached Shipping group exists.
 9. A dead schema-v4 owner triggers identity-anchored recorded-group checks and a
    non-signaling global exact executable/pattern scan. Reused PGIDs whose leader
-   no longer matches the recorded birth token and PID version are ignored; an
-   original leaderless group, exact candidate, unreadable scan, incomplete
-   discovery, malformed state, or unsupported state preserves all ownership
-   evidence instead of permitting stale cleanup.
+   no longer matches its recorded exec-stable identity are ignored: launcher
+   anchors use birth token plus start time, while owned-process anchors also use
+   PID version. An original leaderless group, exact candidate, unreadable scan,
+   incomplete discovery, malformed state, or unsupported state preserves all
+   ownership evidence instead of permitting stale cleanup.
 10. Install and uninstall continue to stop synchronized live state before the
-   global lock and recheck stopped state under the lock. Failed producer
-   quiescence leaves transaction targets and journals untouched.
+    global lock and recheck stopped state under the lock. Failed producer
+    quiescence leaves transaction targets and journals untouched.
 
 ## State Contract
 
@@ -147,10 +151,10 @@ optional independently grouped owned process.
 
 - `profile`: ID, SHA-256, app ID, build ID, and entrypoint target.
 - `producer`: `launching`, `starting`, `ready`, or `quiesced`; optional launcher
-  identity while launch is still incomplete; expected profile-owned
-  executable/pattern evidence; optional live owned-process PID, birth token,
-  PID version, start time, PGID, command, and executable evidence; and the
-  generation-local producer log.
+  PID, birth token, start time, and PGID while launch is still incomplete;
+  expected profile-owned executable/pattern evidence; optional live
+  owned-process PID, birth token, PID version, start time, PGID, command, and
+  executable evidence; and the generation-local producer log.
 - `idle`: bridge is synchronized and producer launch is in progress or has been
   quiesced during stop.
 - `waiting`: the exact producer is live, the bridge handshake and startup

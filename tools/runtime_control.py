@@ -1409,12 +1409,10 @@ def validate_recorded_producer(
         return True, None, None
 
     launcher_birth_token, launcher_birth_error = birth_token_reader(launcher["pid"])
-    launcher_pid_version, launcher_pid_version_error = pid_version_reader(launcher["pid"])
     launcher_started_at, launcher_error = process_start_time(launcher["pid"], runner)
     launcher_group, group_error = process_group_id(launcher["pid"], runner)
     if (
         launcher_birth_token != launcher["birthToken"]
-        or launcher_pid_version != launcher["pidVersion"]
         or launcher_started_at != launcher["startedAt"]
         or launcher_group != launcher["processGroupId"]
         or launcher["pid"] not in group_members[launcher["processGroupId"]]
@@ -1423,7 +1421,6 @@ def validate_recorded_producer(
             False,
             "producer.identity_changed",
             launcher_birth_error
-            or launcher_pid_version_error
             or launcher_error
             or group_error
             or "Producer launcher identity does not match control state",
@@ -1501,26 +1498,41 @@ def recorded_producer_group_present(
             )
         return False, None
     identities = [
-        identity
-        for identity in (producer["launcher"], producer["ownedProcess"])
+        (identity, require_pid_version)
+        for identity, require_pid_version in (
+            (producer["launcher"], False),
+            (producer["ownedProcess"], True),
+        )
         if isinstance(identity, dict)
     ]
-    groups = {identity["processGroupId"] for identity in identities}
+    groups = {identity["processGroupId"] for identity, _ in identities}
     for group in groups:
         members, error = process_group_members(group, runner)
         if members is None:
             return None, error
         if not members:
             continue
-        anchors = [identity for identity in identities if identity["pid"] in members]
+        anchors = [
+            (identity, require_pid_version)
+            for identity, require_pid_version in identities
+            if identity["pid"] in members
+        ]
         if not anchors:
             return True, None
         exact_anchor = False
-        for identity in anchors:
+        for identity, require_pid_version in anchors:
             birth_token, birth_error = birth_token_reader(identity["pid"])
-            pid_version, pid_version_error = pid_version_reader(identity["pid"])
             started_at, start_error = process_start_time(identity["pid"], runner)
-            if birth_token is None or pid_version is None or started_at is None:
+            expected_pid_version = identity["pidVersion"] if require_pid_version else None
+            pid_version: int | None = None
+            pid_version_error: str | None = None
+            if expected_pid_version is not None:
+                pid_version, pid_version_error = pid_version_reader(identity["pid"])
+            if (
+                birth_token is None
+                or started_at is None
+                or (expected_pid_version is not None and pid_version is None)
+            ):
                 refreshed_members, refresh_error = process_group_members(group, runner)
                 if refreshed_members is None:
                     return None, refresh_error
@@ -1537,8 +1549,11 @@ def recorded_producer_group_present(
                 )
             if (
                 birth_token == identity["birthToken"]
-                and pid_version == identity["pidVersion"]
                 and started_at == identity["startedAt"]
+                and (
+                    expected_pid_version is None
+                    or pid_version == expected_pid_version
+                )
             ):
                 exact_anchor = True
                 break
@@ -1593,14 +1608,20 @@ def recorded_producer_group_present(
         and producer["ownedProcess"] is None
     ):
         return None, "Schema-v4 state has not completed owned-process discovery"
-    for identity in identities:
+    for identity, require_pid_version in identities:
         birth_token, _ = birth_token_reader(identity["pid"])
-        pid_version, _ = pid_version_reader(identity["pid"])
         started_at, _ = process_start_time(identity["pid"], runner)
+        expected_pid_version = identity["pidVersion"] if require_pid_version else None
+        pid_version = None
+        if expected_pid_version is not None:
+            pid_version, _ = pid_version_reader(identity["pid"])
         if (
             birth_token == identity["birthToken"]
-            and pid_version == identity["pidVersion"]
             and started_at == identity["startedAt"]
+            and (
+                expected_pid_version is None
+                or pid_version == expected_pid_version
+            )
         ):
             return True, None
     return False, None
@@ -1982,11 +2003,14 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             expected_owned_process = producer["expectedOwnedProcess"]
             owned_process = producer["ownedProcess"]
             launcher_valid = False
-            if (
-                isinstance(launcher, dict)
-                and set(launcher)
-                == {"pid", "birthToken", "pidVersion", "startedAt", "processGroupId"}
-            ):
+            launcher_keys = frozenset(launcher) if isinstance(launcher, dict) else frozenset()
+            if launcher_keys in {
+                frozenset({"pid", "birthToken", "startedAt", "processGroupId"}),
+                frozenset(
+                    {"pid", "birthToken", "pidVersion", "startedAt", "processGroupId"}
+                ),
+            }:
+                assert isinstance(launcher, dict)
                 launcher_valid = (
                     isinstance(launcher["pid"], int)
                     and not isinstance(launcher["pid"], bool)
@@ -1994,9 +2018,14 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
                     and isinstance(launcher["birthToken"], int)
                     and not isinstance(launcher["birthToken"], bool)
                     and launcher["birthToken"] > 0
-                    and isinstance(launcher["pidVersion"], int)
-                    and not isinstance(launcher["pidVersion"], bool)
-                    and launcher["pidVersion"] > 0
+                    and (
+                        "pidVersion" not in launcher
+                        or (
+                            isinstance(launcher["pidVersion"], int)
+                            and not isinstance(launcher["pidVersion"], bool)
+                            and launcher["pidVersion"] > 0
+                        )
+                    )
                     and isinstance(launcher["startedAt"], str)
                     and bool(launcher["startedAt"])
                     and isinstance(launcher["processGroupId"], int)

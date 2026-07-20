@@ -915,6 +915,18 @@ class RuntimeStartTests(unittest.TestCase):
             self.assertTrue(state.valid)
             assert state.record is not None
             self.assertEqual(state.record["state"], "waiting")
+            producer = state.record["producer"]
+            assert isinstance(producer, dict)
+            launcher_state = producer["launcher"]
+            owned_process = producer["ownedProcess"]
+            assert isinstance(launcher_state, dict)
+            assert isinstance(owned_process, dict)
+            self.assertNotIn("pidVersion", launcher_state)
+            self.assertEqual(
+                owned_process["pidVersion"],
+                self.fixture.runner.target_pid_version,
+            )
+            self.fixture.runner.producer_pid_version += 1
             responsive, ping_error = request_supervisor_ping(state.record)
             self.assertTrue(responsive, ping_error)
             accepted, error = request_supervisor_stop(state.record)
@@ -1246,14 +1258,10 @@ class RuntimeStartTests(unittest.TestCase):
             launcher_birth_token, birth_error = context.birth_token_reader(process.pid)
             self.assertIsNotNone(launcher_birth_token, birth_error)
             assert launcher_birth_token is not None
-            launcher_pid_version, pid_version_error = context.pid_version_reader(process.pid)
-            self.assertIsNotNone(launcher_pid_version, pid_version_error)
-            assert launcher_pid_version is not None
             process_group = os.getpgid(process.pid)
             _quiesce_producer(
                 process,
                 launcher_birth_token,
-                launcher_pid_version,
                 started_at,
                 process_group,
                 None,
@@ -1327,9 +1335,6 @@ class RuntimeStartTests(unittest.TestCase):
             launcher_birth_token, birth_error = context.birth_token_reader(process.pid)
             self.assertIsNotNone(launcher_birth_token, birth_error)
             assert launcher_birth_token is not None
-            launcher_pid_version, pid_version_error = context.pid_version_reader(process.pid)
-            self.assertIsNotNone(launcher_pid_version, pid_version_error)
-            assert launcher_pid_version is not None
             launcher_group = os.getpgid(process.pid)
             target = _inspect_producer_identity(
                 self.fixture.profile,
@@ -1353,7 +1358,6 @@ class RuntimeStartTests(unittest.TestCase):
             _quiesce_producer(
                 process,
                 launcher_birth_token,
-                launcher_pid_version,
                 started_at,
                 launcher_group,
                 target,
@@ -1393,7 +1397,6 @@ class RuntimeStartTests(unittest.TestCase):
             _quiesce_producer(
                 process,
                 9_001_001,
-                self.fixture.runner.producer_pid_version,
                 self.fixture.runner.launcher_started_at,
                 self.fixture.runner.producer_group,
                 None,
@@ -1426,7 +1429,6 @@ class RuntimeStartTests(unittest.TestCase):
         target = _quiesce_producer(
             process,
             9_001_001,
-            self.fixture.runner.producer_pid_version,
             self.fixture.runner.launcher_started_at,
             self.fixture.runner.producer_group,
             None,
@@ -1472,7 +1474,6 @@ class RuntimeStartTests(unittest.TestCase):
         target = _quiesce_producer(
             process,
             self.fixture.runner.producer_birth_token,
-            self.fixture.runner.producer_pid_version,
             self.fixture.runner.launcher_started_at,
             self.fixture.runner.producer_group,
             None,
@@ -1517,7 +1518,6 @@ class RuntimeStartTests(unittest.TestCase):
             _quiesce_producer(
                 process,
                 9_001_001,
-                self.fixture.runner.producer_pid_version,
                 self.fixture.runner.launcher_started_at,
                 self.fixture.runner.producer_group,
                 target,
@@ -1558,7 +1558,6 @@ class RuntimeStartTests(unittest.TestCase):
             _quiesce_producer(
                 process,
                 self.fixture.runner.producer_birth_token,
-                self.fixture.runner.producer_pid_version,
                 self.fixture.runner.launcher_started_at,
                 self.fixture.runner.producer_group,
                 target,
@@ -1605,7 +1604,6 @@ class RuntimeStartTests(unittest.TestCase):
         stopped_target = _quiesce_producer(
             process,
             self.fixture.runner.producer_birth_token,
-            self.fixture.runner.producer_pid_version,
             self.fixture.runner.launcher_started_at,
             self.fixture.runner.producer_group,
             target,
@@ -1647,7 +1645,6 @@ class RuntimeStartTests(unittest.TestCase):
         stopped_target = _quiesce_producer(
             process,
             self.fixture.runner.producer_birth_token,
-            self.fixture.runner.producer_pid_version,
             self.fixture.runner.launcher_started_at,
             self.fixture.runner.producer_group,
             target,

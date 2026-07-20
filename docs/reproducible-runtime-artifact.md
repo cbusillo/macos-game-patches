@@ -347,23 +347,26 @@ until its three targets receive separately reviewed lifecycle operations.
 The detached supervisor admits CrossOver 26.2's exact in-bundle relative
 `cxstart -> wine` link only when its sibling target is a real executable. It
 launches that exact command in one new process group and retains the live
-process handle as launcher authority. The sealed profile separately identifies
-Freedom's Shipping executable because Wine may move it into a new session and
-PGID. Schema v4 records a `launching` ownership boundary before spawning
-CrossOver, then publishes `waiting` only after globally discovering one exact
-profile-declared process that remains stable across repeated PID, birth-token,
-PID-version, command, start-time, PGID, and `lsof` text-mapping checks. The
-bridge handshake must bind the generation nonce, bridge PID, Mach-audit sender
-PID and PID version, and matching high-resolution start token before all startup
-self-tests pass. Stop freshly revalidates and quiesces the detached process
-group and launcher group, uses a 1,230-second RPC bound for the schema's maximum
-queued startup and transition windows, promotes an exact same-PGID target to
-signal anchor if its launcher exits, distinguishes reused PGIDs from original
-leaderless groups, preserves malformed or incomplete dead-owner evidence, scans
-for unrecorded exact Shipping processes, and revalidates service content plus
-producer identity immediately before publication and exact launchd bootout;
-serialized PIDs remain evidence only. Vision Pro connection, streaming, and
-recovery state remain outside this host-only producer slice.
+process handle plus PID, birth token, start time, and PGID as launcher authority.
+Launcher PID version is intentionally excluded because CrossOver legitimately
+increments it when `cxstart` execs `winewrapper`. The sealed profile separately
+identifies Freedom's Shipping executable because Wine may move it into a new
+session and PGID. Schema v4 records a `launching` ownership boundary before
+spawning CrossOver, then publishes `waiting` only after globally discovering one
+exact profile-declared process that remains stable across repeated PID,
+birth-token, PID-version, command, start-time, PGID, and `lsof` text-mapping
+checks. The bridge handshake must bind the generation nonce, bridge PID,
+Mach-audit sender PID and PID version, and matching high-resolution start token
+before all startup self-tests pass. Stop freshly revalidates and quiesces the
+detached process group and launcher group, uses a 1,230-second RPC bound for the
+schema's maximum queued startup and transition windows, promotes an exact
+same-PGID target to signal anchor if its launcher exits, distinguishes reused
+PGIDs from original leaderless groups, preserves malformed or incomplete
+dead-owner evidence, scans for unrecorded exact Shipping processes, and
+revalidates service content plus producer identity immediately before
+publication and exact launchd bootout; serialized PIDs remain evidence only.
+Vision Pro connection, streaming, and recovery state remain outside this
+host-only producer slice.
 
 ### Verify And Compare
 

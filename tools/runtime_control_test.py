@@ -455,7 +455,6 @@ class LifecycleTests(unittest.TestCase):
                         "launcher": {
                             "pid": launcher_pid,
                             "birthToken": 5001001,
-                            "pidVersion": 101,
                             "startedAt": "Sat Jul 18 03:00:01 2026",
                             "processGroupId": launcher_pid,
                         },
@@ -948,6 +947,71 @@ class LifecycleTests(unittest.TestCase):
         finally:
             control_socket.close()
 
+    def test_schema_four_waiting_allows_launcher_pid_version_change(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            record = self.create_state(
+                state="waiting",
+                owner_pid=2000,
+                schema_version=4,
+                run_dir=run_dir,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            producer = record["producer"]
+            assert isinstance(producer, dict)
+            launcher = producer["launcher"]
+            assert isinstance(launcher, dict)
+            self.assertNotIn("pidVersion", launcher)
+
+            self.runner.processes[5001]["pidVersion"] = 999
+            waiting = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(waiting.state, "waiting")
+        finally:
+            control_socket.close()
+
+    def test_schema_four_waiting_ignores_legacy_launcher_pid_version(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            record = self.create_state(
+                state="waiting",
+                owner_pid=2000,
+                schema_version=4,
+                run_dir=run_dir,
+            )
+            producer = record["producer"]
+            assert isinstance(producer, dict)
+            launcher = producer["launcher"]
+            assert isinstance(launcher, dict)
+            launcher["pidVersion"] = 101
+            self.paths.state_path.write_text(json.dumps(record))
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+
+            self.runner.processes[5001]["pidVersion"] = 999
+            waiting = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(waiting.state, "waiting")
+        finally:
+            control_socket.close()
+
     def test_schema_four_quiesced_state_requires_both_groups_empty(self) -> None:
         self.create_bridge()
         self.create_plist()
@@ -1253,6 +1317,34 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(self.paths.state_path.exists())
         self.assertFalse(self.paths.lock_path.exists())
         self.assertFalse(run_dir.exists())
+
+    def test_dead_schema_four_owner_preserves_matching_launcher_lifetime(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=4,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        self.runner.processes[5001] = {
+            "birthToken": 5001001,
+            "pidVersion": 999,
+            "startedAt": "Sat Jul 18 03:00:01 2026",
+            "pgid": 7001,
+            "command": "winewrapper --wait-children FreedomLocomotion.exe",
+        }
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
 
     def test_stop_requests_synchronized_supervisor_cleanup(self) -> None:
         self.create_bridge()

@@ -995,7 +995,6 @@ def _producer_record(
     status: str,
     launcher_pid: int,
     launcher_birth_token: int,
-    launcher_pid_version: int,
     launcher_started_at: str,
     process_group_id: int,
     producer_log: pathlib.Path,
@@ -1007,7 +1006,6 @@ def _producer_record(
         "launcher": {
             "pid": launcher_pid,
             "birthToken": launcher_birth_token,
-            "pidVersion": launcher_pid_version,
             "startedAt": launcher_started_at,
             "processGroupId": process_group_id,
         },
@@ -1502,7 +1500,6 @@ def _group_is_live(process_group_id: int) -> bool:
 def _quiesce_producer(
     process: ProducerProcess,
     launcher_birth_token: int,
-    launcher_pid_version: int,
     launcher_started_at: str,
     launcher_process_group_id: int,
     target: ProducerIdentity | None,
@@ -1585,7 +1582,6 @@ def _quiesce_producer(
         stop_owned_process(target)
     if process.poll() is None:
         current_birth_token, birth_error = context.birth_token_reader(process.pid)
-        current_pid_version, pid_version_error = context.pid_version_reader(process.pid)
         current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
         try:
             current_group_id = group_id(process.pid)
@@ -1597,14 +1593,12 @@ def _quiesce_producer(
             ) from error
         if (
             current_birth_token != launcher_birth_token
-            or current_pid_version != launcher_pid_version
             or current_started_at != launcher_started_at
             or current_group_id != launcher_process_group_id
         ):
             raise ControlError(
                 "producer.quiesce_failed",
                 birth_error
-                or pid_version_error
                 or start_error
                 or "Producer launcher identity changed before stop",
             )
@@ -1633,7 +1627,6 @@ def _quiesce_producer(
                 current_group_id = launcher_process_group_id
             else:
                 current_birth_token, birth_error = context.birth_token_reader(process.pid)
-                current_pid_version, pid_version_error = context.pid_version_reader(process.pid)
                 current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
                 try:
                     current_group_id = group_id(process.pid)
@@ -1645,14 +1638,12 @@ def _quiesce_producer(
                     ) from error
                 if (
                     current_birth_token != launcher_birth_token
-                    or current_pid_version != launcher_pid_version
                     or current_started_at != launcher_started_at
                     or current_group_id != launcher_process_group_id
                 ):
                     raise ControlError(
                         "producer.quiesce_failed",
                         birth_error
-                        or pid_version_error
                         or start_error
                         or "Producer launcher identity changed before forced stop",
                     )
@@ -2389,7 +2380,6 @@ def supervise_runtime(
     producer_log: pathlib.Path | None = None
     bridge_pid: int | None = None
     launcher_birth_token: int | None = None
-    launcher_pid_version: int | None = None
     launcher_started_at: str | None = None
     process_group_id: int | None = None
     producer_identity: ProducerIdentity | None = None
@@ -2584,15 +2574,6 @@ def supervise_runtime(
                         launcher_birth_error
                         or "Producer launcher process birth token is unavailable",
                     )
-                launcher_pid_version, launcher_pid_version_error = context.pid_version_reader(
-                    producer_process.pid
-                )
-                if launcher_pid_version is None:
-                    raise ControlError(
-                        "producer.identity_unavailable",
-                        launcher_pid_version_error
-                        or "Producer launcher process PID version is unavailable",
-                    )
                 try:
                     process_group_id = group_id(producer_process.pid)
                 except OSError as error:
@@ -2613,7 +2594,6 @@ def supervise_runtime(
                     "starting",
                     producer_process.pid,
                     launcher_birth_token,
-                    launcher_pid_version,
                     launcher_started_at,
                     process_group_id,
                     producer_log,
@@ -2644,7 +2624,6 @@ def supervise_runtime(
                         producer_identity = _quiesce_producer(
                             producer_process,
                             launcher_birth_token,
-                            launcher_pid_version,
                             launcher_started_at,
                             process_group_id,
                             producer_identity,
@@ -2665,7 +2644,6 @@ def supervise_runtime(
                         "quiesced",
                         producer_process.pid,
                         launcher_birth_token,
-                        launcher_pid_version,
                         launcher_started_at,
                         process_group_id,
                         producer_log,
@@ -2816,7 +2794,6 @@ def supervise_runtime(
                         "ready",
                         producer_process.pid,
                         launcher_birth_token,
-                        launcher_pid_version,
                         launcher_started_at,
                         process_group_id,
                         producer_log,
@@ -3119,7 +3096,6 @@ def supervise_runtime(
         if (
             producer_process is not None
             and launcher_birth_token is not None
-            and launcher_pid_version is not None
             and launcher_started_at is not None
             and process_group_id is not None
             and bridge_pid is not None
@@ -3130,7 +3106,6 @@ def supervise_runtime(
                 _quiesce_producer(
                     producer_process,
                     launcher_birth_token,
-                    launcher_pid_version,
                     launcher_started_at,
                     process_group_id,
                     producer_identity,
