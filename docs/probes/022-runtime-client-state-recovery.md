@@ -42,6 +42,12 @@ The bridge heartbeat remains independent. The supervisor measures heartbeat
 and transported-frame progress against its own monotonic clock instead of
 trusting wall-clock timestamps.
 
+Before launchd starts the bridge, the supervisor reads the manifest-declared
+retained ALVR session state through a no-follow descriptor, filters out every
+untrusted client, resets copied connection state to disconnected, and writes a
+private generation-local `session.json`. Startup fails if no retained trusted
+client exists; the source session remains user-owned and unchanged.
+
 Every fresh bridge start zeroes the protocol header, publishes a new session
 ID, binds the active runtime generation and bridge PID, and restores mode
 `0600` even when the shared-memory file already exists.
@@ -162,6 +168,9 @@ Physical gate:
 ## Known Failure Signatures
 
 - `client.telemetry_missing`: no exact version-7 mapping after bridge startup.
+- `client.trust_missing`: retained ALVR state has no trusted client to seed.
+- `client.trust_invalid`: retained ALVR state is unsafe, malformed, or outside
+  the admitted roots.
 - `client.telemetry_stale`: bridge heartbeat stopped advancing while the exact
   service remained live.
 - `client.telemetry_mismatch`: generation, bridge PID, or bridge session changed.

@@ -415,9 +415,41 @@ class StartFixture:
             bottle_name="Steam",
             bridge_root=self.root / "bridge",
         )
+        self.alvr_session_root = self.root / "retained-alvr-session"
+        self.alvr_session_root.mkdir(mode=0o700)
+        self.alvr_session_path = self.alvr_session_root / "session.json"
+        self.alvr_session_path.write_text(
+            json.dumps(
+                {
+                    "client_connections": {
+                        "fixture.client.alvr": {
+                            "display_name": "Fixture",
+                            "current_ip": "192.0.2.1",
+                            "manual_ips": ["192.0.2.1"],
+                            "trusted": True,
+                            "connection_state": "Streaming",
+                        },
+                        "untrusted.client.alvr": {
+                            "display_name": "Untrusted",
+                            "current_ip": None,
+                            "manual_ips": [],
+                            "trusted": False,
+                            "connection_state": "Disconnected",
+                        },
+                    }
+                }
+            )
+        )
         self.runner.producer_root = install_root
         self.admission = StartAdmission(
-            manifest={},
+            manifest={
+                "mutableState": [
+                    {
+                        "id": "alvr_session_state",
+                        "location": str(self.alvr_session_root),
+                    }
+                ]
+            },
             bindings={"CROSSOVER_APP": str(self.root / "CrossOver.app")},
             paths=self.paths,
             allowed_roots=(self.root,),
@@ -2378,6 +2410,19 @@ class RuntimeStartTests(unittest.TestCase):
             record = self.wait_for_waiting_startup(run_dir)
             self.assertEqual(record["schemaVersion"], 5)
             self.assertEqual(record["client"]["status"], "waiting")
+            seeded_session_path = run_dir / "alvr-root/session.json"
+            seeded_session = json.loads(seeded_session_path.read_text())
+            self.assertEqual(
+                set(seeded_session["client_connections"]),
+                {"fixture.client.alvr"},
+            )
+            self.assertEqual(
+                seeded_session["client_connections"]["fixture.client.alvr"][
+                    "connection_state"
+                ],
+                "Disconnected",
+            )
+            self.assertEqual(seeded_session_path.stat().st_mode & 0o777, 0o600)
 
             self.fixture.telemetry.connect()
             connected = self.wait_for_state("connected", producer_status="ready")
@@ -2398,6 +2443,32 @@ class RuntimeStartTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(result[0].state, "stopped")
+
+    def test_supervisor_fails_without_retained_trusted_client(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000043"
+        run_dir.mkdir(mode=0o700)
+        payload = json.loads(self.fixture.alvr_session_path.read_text())
+        for connection in payload["client_connections"].values():
+            connection["trusted"] = False
+        self.fixture.alvr_session_path.write_text(json.dumps(payload))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            report = self.supervise_fixture(67, run_dir, FixtureProducerLauncher(self.fixture))
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.reason_code, "client.trust_missing")
+        self.assertFalse(self.fixture.runner.loaded)
+        self.assertFalse(self.fixture.paths.lock_path.exists())
 
     def test_installed_layout_mismatch_fails_closed(self) -> None:
         with self.assertRaisesRegex(Exception, "exact committed installed layout"):

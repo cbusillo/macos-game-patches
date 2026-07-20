@@ -43,6 +43,7 @@ from runtime_control import (
     inspect_service,
     load_control_state,
     load_runtime_contract,
+    mutable_state_item,
     paths_match,
     process_command,
     process_group_id,
@@ -1241,6 +1242,123 @@ def _write_new_file(root: pathlib.Path, path: pathlib.Path, payload: bytes, mode
             session.bind(path).write_bytes(payload, mode)
     except runtime_descriptor.DescriptorError as error:
         raise ControlError(error.code, error.message, **error.context) from error
+
+
+def _seed_alvr_session(admission: StartAdmission, run_dir: pathlib.Path) -> int:
+    item = mutable_state_item(admission.manifest, "alvr_session_state")
+    try:
+        expanded = artifact_contract.expand_template(
+            item["location"],
+            admission.bindings,
+            "mutableState.alvr_session_state.location",
+        )
+    except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    source_root = _absolute(pathlib.Path(expanded))
+    source_allowed = False
+    for root in admission.allowed_roots:
+        try:
+            if os.path.commonpath([str(source_root), str(root)]) == str(root):
+                source_allowed = True
+                break
+        except ValueError:
+            continue
+    if not source_allowed:
+        raise ControlError(
+            "client.trust_invalid",
+            "Retained ALVR session state is outside the admitted roots",
+            path=str(source_root),
+        )
+    try:
+        artifact_contract.reject_symlink_components(source_root)
+    except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    source_session = source_root / "session.json"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(source_session, flags)
+    except OSError as error:
+        raise ControlError(
+            "client.trust_missing",
+            "Retained ALVR session state is unavailable",
+            path=str(source_session),
+            detail=str(error),
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or metadata.st_size <= 0
+            or metadata.st_size > 4 * 1024 * 1024
+        ):
+            raise ControlError(
+                "client.trust_invalid",
+                "Retained ALVR session state has unsafe metadata",
+                path=str(source_session),
+            )
+        data = bytearray()
+        while len(data) <= metadata.st_size:
+            chunk = os.read(descriptor, min(65536, metadata.st_size - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    finally:
+        os.close(descriptor)
+    if len(data) != metadata.st_size:
+        raise ControlError(
+            "client.trust_invalid",
+            "Retained ALVR session state changed while being read",
+            path=str(source_session),
+        )
+    try:
+        session = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlError(
+            "client.trust_invalid",
+            "Retained ALVR session state is not valid JSON",
+            path=str(source_session),
+        ) from error
+    connections = session.get("client_connections") if isinstance(session, dict) else None
+    if not isinstance(connections, dict):
+        raise ControlError(
+            "client.trust_invalid",
+            "Retained ALVR session state has no client connection map",
+            path=str(source_session),
+        )
+    trusted_connections: dict[str, dict[str, Any]] = {}
+    for client_id, connection in connections.items():
+        if (
+            isinstance(client_id, str)
+            and bool(client_id)
+            and isinstance(connection, dict)
+            and connection.get("trusted") is True
+        ):
+            trusted_connection = dict(connection)
+            trusted_connection["connection_state"] = "Disconnected"
+            trusted_connections[client_id] = trusted_connection
+    if not trusted_connections:
+        raise ControlError(
+            "client.trust_missing",
+            "Retained ALVR session state has no trusted client",
+            path=str(source_session),
+        )
+    assert isinstance(session, dict)
+    seeded_session = dict(session)
+    seeded_session["client_connections"] = trusted_connections
+    alvr_root = run_dir / ALVR_ROOT_NAME
+    _write_new_file(
+        alvr_root,
+        alvr_root / "session.json",
+        artifact_contract.canonical_json_bytes(seeded_session),
+    )
+    return len(trusted_connections)
 
 
 def _write_file_atomic(root: pathlib.Path, path: pathlib.Path, payload: bytes) -> None:
@@ -2885,6 +3003,8 @@ def supervise_runtime(
             bridge_log = run_dir / BRIDGE_LOG_NAME
             _write_new_file(run_dir, bridge_log, b"")
             _make_private_directory(run_dir, run_dir / ALVR_ROOT_NAME)
+            trusted_client_count = _seed_alvr_session(active_admission, run_dir)
+            actions.append(f"seed trusted ALVR clients count={trusted_client_count}")
             launch_plist = render_launch_agent(active_admission, run_dir, generation)
             plist_sha256 = artifact_contract.sha256_bytes(launch_plist)
             _write_file_atomic(
