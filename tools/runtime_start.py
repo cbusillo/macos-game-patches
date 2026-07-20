@@ -15,6 +15,7 @@ import shlex
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ import runtime_profile
 import runtime_transaction
 from runtime_control import (
     CONTROL_SOCKET_NAME,
+    LEGACY_LIVE_STATES,
     LIVE_STATES,
     MAX_RUNTIME_GENERATION,
     CommandResult,
@@ -76,6 +78,31 @@ PRODUCER_KILL_WAIT_SECONDS = 1.0
 PRODUCER_QUIESCE_TIMEOUT_SECONDS = 40.0
 PRODUCER_QUIESCE_MARGIN_SECONDS = 10.0
 MAX_RUNTIME_FRAMES = (1 << 64) - 1
+ALVR_SHM_PATH = pathlib.Path("/tmp/alvr_frame_buffer.shm")
+ALVR_SHM_MAGIC = 0x414C5652
+ALVR_SHM_VERSION = 7
+ALVR_SHM_HEADER_SIZE = 1064
+ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET = 992
+ALVR_CLIENT_STATE_WAITING = 0
+ALVR_CLIENT_STATE_CONNECTED = 1
+ALVR_CLIENT_STATE_STREAMING = 2
+CLIENT_TELEMETRY_READY_TIMEOUT_SECONDS = 5.0
+CLIENT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
+CLIENT_STREAM_ACTIVITY_TIMEOUT_SECONDS = 2.0
+CLIENT_RECOVERY_TIMEOUT_SECONDS = 30.0
+CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS = 30.0
+CLIENT_STATE_PHASES = {
+    "waiting": "waiting-for-client",
+    "connected": "client-connected",
+    "streaming": "client-streaming",
+    "recovering": "client-recovering",
+}
+CLIENT_STATE_MESSAGES = {
+    "waiting": "Exact curated game producer is ready and waiting for Vision Pro",
+    "connected": "Vision Pro is connected with an exact negotiated stream contract",
+    "streaming": "Vision Pro stream transport is active",
+    "recovering": "Vision Pro disconnected; bounded recovery is in progress",
+}
 INSTALLED_FALSE_ACTIONS = frozenset({"assert_sha256", "backup", "assert_absent"})
 
 
@@ -222,6 +249,384 @@ class ProducerIdentity:
             "command": self.command,
             "executable": str(self.executable),
         }
+
+
+@dataclass(frozen=True)
+class ClientTelemetry:
+    sequence: int
+    client_state: int
+    stream_contract_valid: bool
+    runtime_generation: int
+    bridge_pid: int
+    bridge_session_id: int
+    bridge_heartbeat_ns: int
+    stream_epoch: int
+    frames_transported: int
+    connect_events: int
+    disconnect_events: int
+    contract_failure_events: int
+
+
+class ClientTelemetryMonitor:
+    def __init__(
+        self,
+        runtime_generation: int,
+        bridge_pid: int,
+        *,
+        heartbeat_timeout: float = CLIENT_HEARTBEAT_TIMEOUT_SECONDS,
+        stream_activity_timeout: float = CLIENT_STREAM_ACTIVITY_TIMEOUT_SECONDS,
+        recovery_timeout: float = CLIENT_RECOVERY_TIMEOUT_SECONDS,
+    ) -> None:
+        self.runtime_generation = runtime_generation
+        self.bridge_pid = bridge_pid
+        self.heartbeat_timeout = heartbeat_timeout
+        self.stream_activity_timeout = stream_activity_timeout
+        self.recovery_timeout = recovery_timeout
+        self.bridge_session_id: int | None = None
+        self.last_heartbeat_ns: int | None = None
+        self.last_heartbeat_progress_at: float | None = None
+        self.last_stream_epoch: int | None = None
+        self.last_frames_transported: int | None = None
+        self.last_connect_events: int | None = None
+        self.last_disconnect_events: int | None = None
+        self.last_contract_failure_events: int | None = None
+        self.last_frame_progress_at: float | None = None
+        self.last_bridge_state: int | None = None
+        self.state = "waiting"
+        self.recovery_deadline: float | None = None
+
+    def observe(
+        self,
+        telemetry: ClientTelemetry,
+        now: float,
+    ) -> tuple[str, dict[str, Any]]:
+        if (
+            telemetry.runtime_generation != self.runtime_generation
+            or telemetry.bridge_pid != self.bridge_pid
+            or telemetry.bridge_session_id <= 0
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Bridge telemetry identity does not match the active runtime",
+                expectedGeneration=self.runtime_generation,
+                observedGeneration=telemetry.runtime_generation,
+                expectedBridgePid=self.bridge_pid,
+                observedBridgePid=telemetry.bridge_pid,
+            )
+        if self.bridge_session_id is None:
+            self.bridge_session_id = telemetry.bridge_session_id
+        elif telemetry.bridge_session_id != self.bridge_session_id:
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Bridge telemetry session changed without a service transition",
+                expectedBridgeSessionId=self.bridge_session_id,
+                observedBridgeSessionId=telemetry.bridge_session_id,
+            )
+        if telemetry.bridge_heartbeat_ns <= 0:
+            raise ControlError(
+                "client.telemetry_stale",
+                "Bridge telemetry heartbeat is absent",
+            )
+        if telemetry.bridge_heartbeat_ns != self.last_heartbeat_ns:
+            self.last_heartbeat_ns = telemetry.bridge_heartbeat_ns
+            self.last_heartbeat_progress_at = now
+        elif (
+            self.last_heartbeat_progress_at is not None
+            and now - self.last_heartbeat_progress_at >= self.heartbeat_timeout
+        ):
+            raise ControlError(
+                "client.telemetry_stale",
+                "Bridge telemetry heartbeat stopped advancing",
+            )
+
+        if telemetry.client_state not in {
+            ALVR_CLIENT_STATE_WAITING,
+            ALVR_CLIENT_STATE_CONNECTED,
+            ALVR_CLIENT_STATE_STREAMING,
+        }:
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Bridge telemetry reported an unknown client state",
+                clientState=telemetry.client_state,
+            )
+        if (
+            self.last_connect_events is not None
+            and telemetry.connect_events < self.last_connect_events
+        ) or (
+            self.last_disconnect_events is not None
+            and telemetry.disconnect_events < self.last_disconnect_events
+        ) or (
+            self.last_contract_failure_events is not None
+            and telemetry.contract_failure_events < self.last_contract_failure_events
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "ALVR client event counter regressed",
+            )
+        if telemetry.contract_failure_events > 0:
+            raise ControlError(
+                "client.contract_failed",
+                "ALVR client negotiated a stream outside the sealed contract",
+                contractFailureEvents=telemetry.contract_failure_events,
+            )
+        if telemetry.stream_epoch != telemetry.connect_events + telemetry.disconnect_events:
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "ALVR stream epoch does not match client event counters",
+            )
+        if telemetry.client_state == ALVR_CLIENT_STATE_WAITING:
+            if (
+                telemetry.stream_contract_valid
+                or telemetry.stream_epoch % 2 != 0
+                or telemetry.connect_events != telemetry.disconnect_events
+            ):
+                raise ControlError(
+                    "client.telemetry_mismatch",
+                    "Waiting telemetry has an invalid stream contract or epoch",
+                )
+        else:
+            if not telemetry.stream_contract_valid:
+                raise ControlError(
+                    "client.contract_failed",
+                    "ALVR client negotiated a stream outside the sealed contract",
+                )
+            if (
+                telemetry.stream_epoch == 0
+                or telemetry.stream_epoch % 2 == 0
+                or telemetry.connect_events != telemetry.disconnect_events + 1
+            ):
+                raise ControlError(
+                    "client.telemetry_mismatch",
+                    "Connected telemetry has an invalid stream epoch",
+                )
+        if (
+            telemetry.client_state == ALVR_CLIENT_STATE_STREAMING
+            and telemetry.frames_transported == 0
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Streaming telemetry has no transported frames",
+            )
+        if (
+            self.last_stream_epoch is not None
+            and telemetry.stream_epoch < self.last_stream_epoch
+        ):
+            raise ControlError(
+                "client.epoch_regressed",
+                "ALVR client stream epoch regressed",
+                previousEpoch=self.last_stream_epoch,
+                observedEpoch=telemetry.stream_epoch,
+            )
+        if (
+            self.last_frames_transported is not None
+            and telemetry.frames_transported < self.last_frames_transported
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "ALVR transported-frame counter regressed",
+            )
+        frames_advanced = (
+            self.last_frames_transported is not None
+            and telemetry.frames_transported > self.last_frames_transported
+        )
+        disconnect_advanced = (
+            telemetry.disconnect_events > 0
+            if self.last_disconnect_events is None
+            else telemetry.disconnect_events > self.last_disconnect_events
+        )
+        if (
+            frames_advanced
+            and telemetry.client_state != ALVR_CLIENT_STATE_STREAMING
+            and not disconnect_advanced
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Transported frames advanced outside the streaming state",
+            )
+        if (
+            self.last_stream_epoch == telemetry.stream_epoch
+            and self.last_bridge_state is not None
+            and self.last_bridge_state != telemetry.client_state
+            and (self.last_bridge_state, telemetry.client_state)
+            != (ALVR_CLIENT_STATE_CONNECTED, ALVR_CLIENT_STATE_STREAMING)
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "ALVR client state changed without a new stream epoch",
+            )
+
+        previous_state = self.state
+        if telemetry.client_state == ALVR_CLIENT_STATE_WAITING:
+            if previous_state in {"connected", "streaming"} or disconnect_advanced:
+                self.recovery_deadline = now + self.recovery_timeout
+                self.state = "recovering"
+            elif previous_state == "recovering":
+                if self.recovery_deadline is None:
+                    raise ControlError(
+                        "client.telemetry_mismatch",
+                        "Recovery state has no monotonic deadline",
+                    )
+                if now >= self.recovery_deadline:
+                    self.recovery_deadline = None
+                    self.state = "waiting"
+            else:
+                self.state = "waiting"
+        else:
+            self.recovery_deadline = None
+            if telemetry.client_state == ALVR_CLIENT_STATE_CONNECTED:
+                self.state = "connected"
+            else:
+                if self.last_frames_transported is None or frames_advanced:
+                    self.last_frame_progress_at = now
+                if self.last_frame_progress_at is None:
+                    self.last_frame_progress_at = now
+                self.state = (
+                    "streaming"
+                    if now - self.last_frame_progress_at < self.stream_activity_timeout
+                    else "connected"
+                )
+
+        self.last_stream_epoch = telemetry.stream_epoch
+        self.last_frames_transported = telemetry.frames_transported
+        self.last_connect_events = telemetry.connect_events
+        self.last_disconnect_events = telemetry.disconnect_events
+        self.last_contract_failure_events = telemetry.contract_failure_events
+        self.last_bridge_state = telemetry.client_state
+        return self.state, {
+            "status": self.state,
+            "telemetryVersion": ALVR_SHM_VERSION,
+            "runtimeGeneration": telemetry.runtime_generation,
+            "bridgePid": telemetry.bridge_pid,
+            "bridgeSessionId": telemetry.bridge_session_id,
+            "streamEpoch": telemetry.stream_epoch,
+            "streamContractValid": telemetry.stream_contract_valid,
+            "framesTransported": telemetry.frames_transported,
+            "connectEvents": telemetry.connect_events,
+            "disconnectEvents": telemetry.disconnect_events,
+            "contractFailureEvents": telemetry.contract_failure_events,
+        }
+
+
+def read_client_telemetry(path: pathlib.Path = ALVR_SHM_PATH) -> ClientTelemetry:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError as error:
+        raise ControlError(
+            "client.telemetry_missing",
+            "Bridge telemetry mapping is absent",
+            path=str(path),
+        ) from error
+    except OSError as error:
+        raise ControlError(
+            "client.telemetry_mismatch",
+            "Bridge telemetry mapping could not be opened safely",
+            path=str(path),
+            detail=str(error),
+        ) from error
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size < ALVR_SHM_HEADER_SIZE
+        ):
+            raise ControlError(
+                "client.telemetry_mismatch",
+                "Bridge telemetry mapping has unsafe metadata",
+                path=str(path),
+            )
+        header: bytes | None = None
+        sequence = 0
+        for _ in range(8):
+            before = os.pread(descriptor, 4, ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET)
+            if len(before) != 4:
+                break
+            sequence = struct.unpack("<I", before)[0]
+            if sequence % 2 != 0:
+                continue
+            candidate = os.pread(descriptor, ALVR_SHM_HEADER_SIZE, 0)
+            after = os.pread(descriptor, 4, ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET)
+            if len(candidate) != ALVR_SHM_HEADER_SIZE or len(after) != 4:
+                break
+            observed_sequence = struct.unpack("<I", after)[0]
+            candidate_sequence = struct.unpack_from(
+                "<I", candidate, ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET
+            )[0]
+            if sequence == observed_sequence == candidate_sequence and sequence % 2 == 0:
+                header = candidate
+                break
+        if header is None:
+            raise ControlError(
+                "client.telemetry_stale",
+                "Bridge telemetry could not be read consistently",
+            )
+    finally:
+        os.close(descriptor)
+
+    magic, version, initialized, shutdown = struct.unpack_from("<IIII", header, 0)
+    if magic != ALVR_SHM_MAGIC or version != ALVR_SHM_VERSION:
+        raise ControlError(
+            "client.telemetry_mismatch",
+            "Bridge telemetry protocol does not match the sealed runtime",
+            expectedVersion=ALVR_SHM_VERSION,
+            observedVersion=version,
+        )
+    if initialized != 1 or shutdown != 0:
+        raise ControlError(
+            "client.telemetry_missing",
+            "Bridge telemetry mapping is not initialized",
+        )
+    bridge_session_id, bridge_heartbeat_ns = struct.unpack_from("<QQ", header, 72)
+    client_state, stream_contract_valid = struct.unpack_from("<II", header, 996)
+    if stream_contract_valid not in {0, 1}:
+        raise ControlError(
+            "client.telemetry_mismatch",
+            "Bridge telemetry stream-contract flag is invalid",
+        )
+    runtime_generation, bridge_pid, stream_epoch, frames_transported = struct.unpack_from(
+        "<QQQQ", header, 1008
+    )
+    connect_events, disconnect_events, contract_failure_events = struct.unpack_from(
+        "<QQQ", header, 1040
+    )
+    return ClientTelemetry(
+        sequence,
+        client_state,
+        stream_contract_valid == 1,
+        runtime_generation,
+        bridge_pid,
+        bridge_session_id,
+        bridge_heartbeat_ns,
+        stream_epoch,
+        frames_transported,
+        connect_events,
+        disconnect_events,
+        contract_failure_events,
+    )
+
+
+def _wait_for_client_state(
+    telemetry_reader: Callable[[], ClientTelemetry],
+    monitor: ClientTelemetryMonitor,
+    deadline: float,
+    monotonic: Callable[[], float],
+    sleeper: Callable[[float], None],
+) -> tuple[str, dict[str, Any]]:
+    while True:
+        now = monotonic()
+        try:
+            return monitor.observe(telemetry_reader(), now)
+        except ControlError as error:
+            if error.code not in {"client.telemetry_missing", "client.telemetry_stale"} or now >= deadline:
+                raise
+        sleeper(READINESS_SAMPLE_INTERVAL_SECONDS)
 
 
 def _process_start_datetime(value: str) -> datetime.datetime | None:
@@ -915,7 +1320,7 @@ def render_launch_agent(
             "NATIVE_BRIDGE_PROGRAM": str(admission.paths.bridge_program),
             "NATIVE_BRIDGE_LOG": str(run_dir / BRIDGE_LOG_NAME),
             "ALVR_BRIDGE_ROOT": str(run_dir / ALVR_ROOT_NAME),
-            "ALVR_BRIDGE_CONNECT": "false",
+            "ALVR_BRIDGE_CONNECT": "true",
             "ALVR_BRIDGE_FRAMES": str(MAX_RUNTIME_FRAMES),
             "ALVR_IOSURFACE_POOL_NONCE": str(generation),
         },
@@ -1054,11 +1459,12 @@ def _state_payload(
     state: str,
     phase: str,
     producer: dict[str, Any],
+    client: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if service.snapshot.pid is None or service.file_identity is None or admission.profile is None:
         raise ControlError("runtime.start_failed", "Live service identity is incomplete")
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "state": state,
         "generation": generation,
         "ownerPid": os.getpid(),
@@ -1077,6 +1483,7 @@ def _state_payload(
         ),
         "profile": _profile_record(admission.profile),
         "producer": producer,
+        "client": client,
         "updatedAt": datetime.datetime.now(datetime.UTC).isoformat(),
         "diagnostic": {
             "phase": phase,
@@ -1856,7 +2263,7 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         return None
     if (
         not isinstance(value.get("ok"), bool)
-        or value.get("state") not in {"waiting", "failed"}
+        or value.get("state") not in {*LEGACY_LIVE_STATES, "failed"}
         or not isinstance(value.get("reasonCode"), str)
         or not isinstance(value.get("message"), str)
         or (value.get("artifact") is not None and not isinstance(value.get("artifact"), dict))
@@ -1872,7 +2279,7 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         or not pathlib.Path(value["supervisorLog"]).is_absolute()
         or (value.get("profile") is not None and not isinstance(value.get("profile"), dict))
         or (value.get("producer") is not None and not isinstance(value.get("producer"), dict))
-        or (value["ok"] and value["state"] != "waiting")
+        or (value["ok"] and value["state"] not in LEGACY_LIVE_STATES)
         or (value["ok"] and not isinstance(value.get("profile"), dict))
         or (value["ok"] and not isinstance(value.get("producer"), dict))
         or (not value["ok"] and value["state"] != "failed")
@@ -2366,6 +2773,7 @@ def supervise_runtime(
     monotonic: Callable[[], float] = time.monotonic,
     startup_deadline: float | None = None,
     producer_launcher: ProducerLauncher | None = None,
+    telemetry_reader: Callable[[], ClientTelemetry] = read_client_telemetry,
     group_id: Callable[[int], int] = os.getpgid,
     group_signaler: Callable[[int, int], None] = os.killpg,
     group_live: Callable[[int], bool] = _group_is_live,
@@ -2384,6 +2792,10 @@ def supervise_runtime(
     process_group_id: int | None = None
     producer_identity: ProducerIdentity | None = None
     producer_state: dict[str, Any] | None = None
+    client_monitor: ClientTelemetryMonitor | None = None
+    published_client_state: str | None = None
+    published_client_record: dict[str, Any] | None = None
+    next_client_snapshot = 0.0
     try:
         _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
         manifest, bindings, initial_paths = resolve_context_paths_for_start(context)
@@ -2799,7 +3211,22 @@ def supervise_runtime(
                         producer_log,
                         producer_identity,
                     )
-                    waiting_payload = _state_payload(
+                    client_monitor = ClientTelemetryMonitor(generation, bridge_pid)
+                    telemetry_deadline = min(
+                        deadline,
+                        monotonic() + CLIENT_TELEMETRY_READY_TIMEOUT_SECONDS,
+                    )
+                    published_client_state, published_client_record = _wait_for_client_state(
+                        telemetry_reader,
+                        client_monitor,
+                        telemetry_deadline,
+                        monotonic,
+                        context.sleeper,
+                    )
+                    next_client_snapshot = (
+                        monotonic() + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
+                    )
+                    live_payload = _state_payload(
                         active_admission,
                         run_dir,
                         generation,
@@ -2807,14 +3234,15 @@ def supervise_runtime(
                         owner_started_at,
                         control_socket,
                         plist_sha256,
-                        "waiting",
-                        "waiting-for-client",
+                        published_client_state,
+                        CLIENT_STATE_PHASES[published_client_state],
                         producer_state,
+                        published_client_record,
                     )
                     _write_json_atomic(
                         active_admission.paths.state_root,
                         active_admission.paths.state_path,
-                        waiting_payload,
+                        live_payload,
                     )
                     service = _revalidate_waiting_service(
                         active_admission,
@@ -2835,9 +3263,9 @@ def supervise_runtime(
                     )
                     report = StartReport(
                         True,
-                        "waiting",
-                        "runtime.waiting",
-                        "Exact curated game producer is ready and waiting for Vision Pro",
+                        published_client_state,
+                        f"runtime.{published_client_state}",
+                        CLIENT_STATE_MESSAGES[published_client_state],
                         active_admission.artifact,
                         generation,
                         os.getpid(),
@@ -3039,6 +3467,58 @@ def supervise_runtime(
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
+                    assert client_monitor is not None
+                    assert published_client_state is not None
+                    assert published_client_record is not None
+                    try:
+                        observed_client_state, observed_client_record = client_monitor.observe(
+                            telemetry_reader(),
+                            now,
+                        )
+                    except ControlError as error:
+                        failure = start_failure(
+                            error.code,
+                            error.message,
+                            artifact=active_admission.artifact,
+                            generation=generation,
+                            owner_pid=os.getpid(),
+                            run_dir=run_dir,
+                            supervisor_log=supervisor_log,
+                            actions=actions,
+                            profile=_profile_record(profile_admission),
+                            producer=producer_state,
+                        )
+                        _write_supervisor_exit(run_dir, failure)
+                        return failure
+                    if (
+                        observed_client_state != published_client_state
+                        or observed_client_record["streamEpoch"]
+                        != published_client_record["streamEpoch"]
+                        or now >= next_client_snapshot
+                    ):
+                        client_payload = _state_payload(
+                            active_admission,
+                            run_dir,
+                            generation,
+                            service,
+                            owner_started_at,
+                            control_socket,
+                            plist_sha256,
+                            observed_client_state,
+                            CLIENT_STATE_PHASES[observed_client_state],
+                            producer_state,
+                            observed_client_record,
+                        )
+                        _write_json_atomic(
+                            active_admission.paths.state_root,
+                            active_admission.paths.state_path,
+                            client_payload,
+                        )
+                        published_client_state = observed_client_state
+                        published_client_record = observed_client_record
+                        next_client_snapshot = (
+                            now + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
+                        )
                     if now < next_identity_check:
                         continue
                     next_identity_check = now + SERVICE_IDENTITY_INTERVAL_SECONDS

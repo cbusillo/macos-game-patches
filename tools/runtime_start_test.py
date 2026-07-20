@@ -8,12 +8,13 @@ import os
 import pathlib
 import plistlib
 import shlex
+import struct
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from typing import Any
 from unittest import mock
@@ -32,6 +33,15 @@ from runtime_control import (
 )
 from runtime_start import (
     BRIDGE_LOG_NAME,
+    ALVR_CLIENT_STATE_CONNECTED,
+    ALVR_CLIENT_STATE_STREAMING,
+    ALVR_CLIENT_STATE_WAITING,
+    ALVR_SHM_HEADER_SIZE,
+    ALVR_SHM_MAGIC,
+    ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET,
+    ALVR_SHM_VERSION,
+    ClientTelemetry,
+    ClientTelemetryMonitor,
     DeadlineRunner,
     ProducerIdentity,
     STARTUP_RESULT_NAME,
@@ -51,6 +61,7 @@ from runtime_start import (
     _require_installed_plan,
     _require_launch_template_state,
     _resolve_crossover_launcher,
+    read_client_telemetry,
     start_runtime,
     supervise_runtime,
 )
@@ -209,6 +220,70 @@ class SupervisorRunner:
         return CommandResult(command, 0)
 
 
+class FixtureClientTelemetry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.runtime_generation = 1
+        self.bridge_pid = 4321
+        self.bridge_session_id = 7_001
+        self.bridge_heartbeat_ns = 1
+        self.sequence = 2
+        self.client_state = ALVR_CLIENT_STATE_WAITING
+        self.stream_contract_valid = False
+        self.stream_epoch = 0
+        self.frames_transported = 0
+        self.connect_events = 0
+        self.disconnect_events = 0
+        self.contract_failure_events = 0
+        self.advance_heartbeat = True
+
+    def bind(self, runtime_generation: int, bridge_pid: int) -> None:
+        with self.lock:
+            self.runtime_generation = runtime_generation
+            self.bridge_pid = bridge_pid
+
+    def read(self) -> ClientTelemetry:
+        with self.lock:
+            if self.advance_heartbeat:
+                self.bridge_heartbeat_ns += 1
+            return ClientTelemetry(
+                self.sequence,
+                self.client_state,
+                self.stream_contract_valid,
+                self.runtime_generation,
+                self.bridge_pid,
+                self.bridge_session_id,
+                self.bridge_heartbeat_ns,
+                self.stream_epoch,
+                self.frames_transported,
+                self.connect_events,
+                self.disconnect_events,
+                self.contract_failure_events,
+            )
+
+    def connect(self) -> None:
+        with self.lock:
+            self.stream_epoch += 1
+            self.connect_events += 1
+            self.client_state = ALVR_CLIENT_STATE_CONNECTED
+            self.stream_contract_valid = True
+            self.sequence += 2
+
+    def transport_frame(self) -> None:
+        with self.lock:
+            self.client_state = ALVR_CLIENT_STATE_STREAMING
+            self.frames_transported += 1
+            self.sequence += 2
+
+    def disconnect(self) -> None:
+        with self.lock:
+            self.stream_epoch += 1
+            self.disconnect_events += 1
+            self.client_state = ALVR_CLIENT_STATE_WAITING
+            self.stream_contract_valid = False
+            self.sequence += 2
+
+
 class StartFixture:
     def __init__(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="rs-", dir=CODE_ROOT)
@@ -263,6 +338,7 @@ class StartFixture:
                 sort_keys=True,
             )
         self.runner = SupervisorRunner(self.paths)
+        self.telemetry = FixtureClientTelemetry()
         lifecycle_root = self.root / "lifecycle"
         lifecycle_root.mkdir(mode=0o700)
         self.context = RuntimeContext(
@@ -562,7 +638,10 @@ class RuntimeStartTests(unittest.TestCase):
         generation: int,
         run_dir: pathlib.Path,
         producer_launcher: FixtureProducerLauncher | None = None,
+        telemetry_reader: Callable[[], ClientTelemetry] | None = None,
     ) -> StartReport:
+        self.fixture.telemetry.bind(generation, 4321)
+        read_telemetry = telemetry_reader or self.fixture.telemetry.read
         arguments = (
             self.fixture.context,
             self.fixture.artifact,
@@ -572,10 +651,11 @@ class RuntimeStartTests(unittest.TestCase):
             run_dir,
         )
         if producer_launcher is None:
-            return supervise_runtime(*arguments)
+            return supervise_runtime(*arguments, telemetry_reader=read_telemetry)
         return supervise_runtime(
             *arguments,
             producer_launcher=producer_launcher,
+            telemetry_reader=read_telemetry,
             group_id=producer_launcher.group_id,
             group_signaler=producer_launcher.group_signaler,
             group_live=producer_launcher.group_live,
@@ -2088,6 +2168,236 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertTrue(self.fixture.paths.lock_path.exists())
         self.assertTrue(self.fixture.paths.state_path.exists())
         self.assertTrue(self.fixture.paths.launch_agent_plist.exists())
+
+    def test_client_monitor_tracks_stream_activity_and_bounded_recovery(self) -> None:
+        monitor = ClientTelemetryMonitor(
+            42,
+            4321,
+            heartbeat_timeout=5,
+            stream_activity_timeout=2,
+            recovery_timeout=30,
+        )
+        telemetry = ClientTelemetry(
+            2,
+            ALVR_CLIENT_STATE_WAITING,
+            False,
+            42,
+            4321,
+            7001,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+
+        state, record = monitor.observe(telemetry, 0)
+        self.assertEqual(state, "waiting")
+        self.assertEqual(record["status"], "waiting")
+
+        telemetry = replace(
+            telemetry,
+            sequence=4,
+            client_state=ALVR_CLIENT_STATE_CONNECTED,
+            stream_contract_valid=True,
+            bridge_heartbeat_ns=2,
+            stream_epoch=1,
+            connect_events=1,
+        )
+        state, _ = monitor.observe(telemetry, 1)
+        self.assertEqual(state, "connected")
+
+        telemetry = replace(
+            telemetry,
+            sequence=6,
+            client_state=ALVR_CLIENT_STATE_STREAMING,
+            bridge_heartbeat_ns=3,
+            frames_transported=1,
+        )
+        state, _ = monitor.observe(telemetry, 2)
+        self.assertEqual(state, "streaming")
+
+        telemetry = replace(telemetry, sequence=8, bridge_heartbeat_ns=4)
+        state, _ = monitor.observe(telemetry, 4.1)
+        self.assertEqual(state, "connected")
+
+        telemetry = replace(
+            telemetry,
+            sequence=10,
+            client_state=ALVR_CLIENT_STATE_WAITING,
+            stream_contract_valid=False,
+            bridge_heartbeat_ns=5,
+            stream_epoch=2,
+            disconnect_events=1,
+        )
+        state, _ = monitor.observe(telemetry, 5)
+        self.assertEqual(state, "recovering")
+
+        telemetry = replace(telemetry, sequence=12, bridge_heartbeat_ns=6)
+        state, _ = monitor.observe(telemetry, 35)
+        self.assertEqual(state, "waiting")
+
+        telemetry = replace(
+            telemetry,
+            sequence=14,
+            client_state=ALVR_CLIENT_STATE_CONNECTED,
+            stream_contract_valid=True,
+            bridge_heartbeat_ns=7,
+            stream_epoch=3,
+            connect_events=2,
+        )
+        state, _ = monitor.observe(telemetry, 36)
+        self.assertEqual(state, "connected")
+
+    def test_client_monitor_rejects_stale_and_regressed_telemetry(self) -> None:
+        telemetry = ClientTelemetry(
+            2,
+            ALVR_CLIENT_STATE_CONNECTED,
+            True,
+            42,
+            4321,
+            7001,
+            1,
+            1,
+            0,
+            1,
+            0,
+            0,
+        )
+        monitor = ClientTelemetryMonitor(42, 4321, heartbeat_timeout=5)
+        monitor.observe(telemetry, 0)
+        with self.assertRaisesRegex(ControlError, "heartbeat stopped advancing"):
+            monitor.observe(telemetry, 5)
+
+        monitor = ClientTelemetryMonitor(42, 4321)
+        monitor.observe(telemetry, 0)
+        with self.assertRaisesRegex(ControlError, "event counter regressed"):
+            monitor.observe(
+                replace(
+                    telemetry,
+                    sequence=4,
+                    client_state=ALVR_CLIENT_STATE_WAITING,
+                    stream_contract_valid=False,
+                    bridge_heartbeat_ns=2,
+                    stream_epoch=0,
+                    connect_events=0,
+                ),
+                1,
+            )
+
+    def test_client_monitor_recovers_missed_cycle_and_latches_contract_failure(self) -> None:
+        waiting = ClientTelemetry(
+            2,
+            ALVR_CLIENT_STATE_WAITING,
+            False,
+            42,
+            4321,
+            7001,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        monitor = ClientTelemetryMonitor(42, 4321)
+        monitor.observe(waiting, 0)
+
+        missed_cycle = replace(
+            waiting,
+            sequence=8,
+            bridge_heartbeat_ns=2,
+            stream_epoch=2,
+            frames_transported=1,
+            connect_events=1,
+            disconnect_events=1,
+        )
+        state, record = monitor.observe(missed_cycle, 1)
+        self.assertEqual(state, "recovering")
+        self.assertEqual(record["framesTransported"], 1)
+        self.assertEqual(record["connectEvents"], 1)
+        self.assertEqual(record["disconnectEvents"], 1)
+
+        monitor = ClientTelemetryMonitor(42, 4321)
+        monitor.observe(waiting, 0)
+        with self.assertRaisesRegex(ControlError, "outside the sealed contract"):
+            monitor.observe(
+                replace(
+                    missed_cycle,
+                    contract_failure_events=1,
+                ),
+                1,
+            )
+
+    def test_reads_exact_version_seven_client_telemetry(self) -> None:
+        path = self.fixture.root / "client-telemetry.shm"
+        header = bytearray(ALVR_SHM_HEADER_SIZE)
+        struct.pack_into("<IIII", header, 0, ALVR_SHM_MAGIC, ALVR_SHM_VERSION, 1, 0)
+        struct.pack_into("<QQ", header, 72, 7001, 99)
+        struct.pack_into("<I", header, ALVR_SHM_TELEMETRY_SEQUENCE_OFFSET, 2)
+        struct.pack_into("<II", header, 996, ALVR_CLIENT_STATE_STREAMING, 1)
+        struct.pack_into("<QQQQ", header, 1008, 42, 4321, 1, 7)
+        struct.pack_into("<QQQ", header, 1040, 1, 0, 0)
+        path.write_bytes(header)
+        path.chmod(0o600)
+
+        telemetry = read_client_telemetry(path)
+        self.assertEqual(telemetry.runtime_generation, 42)
+        self.assertEqual(telemetry.bridge_pid, 4321)
+        self.assertEqual(telemetry.bridge_session_id, 7001)
+        self.assertEqual(telemetry.stream_epoch, 1)
+        self.assertEqual(telemetry.frames_transported, 7)
+
+        path.chmod(0o644)
+        with self.assertRaisesRegex(ControlError, "unsafe metadata"):
+            read_client_telemetry(path)
+
+    def test_supervisor_publishes_client_stream_and_recovery_transitions(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000042"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(66, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            record = self.wait_for_waiting_startup(run_dir)
+            self.assertEqual(record["schemaVersion"], 5)
+            self.assertEqual(record["client"]["status"], "waiting")
+
+            self.fixture.telemetry.connect()
+            connected = self.wait_for_state("connected", producer_status="ready")
+            self.assertEqual(connected["client"]["streamEpoch"], 1)
+
+            self.fixture.telemetry.transport_frame()
+            streaming = self.wait_for_state("streaming", producer_status="ready")
+            self.assertEqual(streaming["client"]["framesTransported"], 1)
+
+            self.fixture.telemetry.disconnect()
+            recovering = self.wait_for_state("recovering", producer_status="ready")
+            self.assertFalse(recovering["client"]["streamContractValid"])
+
+            accepted, error = request_supervisor_stop(recovering)
+            self.assertTrue(accepted, error)
+            self.fixture.runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
 
     def test_installed_layout_mismatch_fails_closed(self) -> None:
         with self.assertRaisesRegex(Exception, "exact committed installed layout"):

@@ -108,3 +108,4 @@ Use this shape:
 - [019 - Runtime stable bundle lifecycle](019-runtime-stable-bundle-lifecycle.md)
 - [020 - Runtime start supervisor](020-runtime-start-supervisor.md)
 - [021 - Runtime profile producer ownership](021-runtime-profile-producer-ownership.md)
+- [022 - Runtime client state and recovery](022-runtime-client-state-recovery.md)

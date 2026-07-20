@@ -324,7 +324,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "c02bca35616ac4e3b95deae41fbbe70e2602e906"
+      "revision": "fae5a673792f7b8b3e6de24adc8c0b1be7181f4d"
     },
     {
       "cleanPolicy": "all",
@@ -781,7 +781,7 @@
     {
       "id": "shared_protocol",
       "path": "${REPO_ROOT}/tools/shared/alvr_shm_protocol.h",
-      "sha256": "e427989902b3e2db01b6e36698f9d953bafe9c6f0d02f1be530a5e3b86fe93af",
+      "sha256": "6f3d846cc864d2526a98854707cc3fcf905bc8ac360232e23cd36110be54f083",
       "supplyClass": "repo-source"
     },
     {
@@ -877,13 +877,13 @@
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "330a95156548e8a59b0359ab9d49839f0c9e8d465cbbdd0298d26c05da5150c6",
+      "sha256": "f4c54a149ecb3ad4a7db753f7b3d20ce4598b9118dd0a5974dbb0d71641903d9",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "4b35c0eb72ae86a2d465a85c4420967ebaf41f0be686a8c88c0cdd4a20c08a4b",
+      "sha256": "ef43ed3b8f2383b101c55b8d180d39a77f90be7e2ce606ef979cce89cca9ac84",
       "supplyClass": "repo-source"
     },
     {

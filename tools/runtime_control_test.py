@@ -29,6 +29,7 @@ from runtime_control import (
     doctor_runtime,
     evaluate_command_prerequisite,
     evaluate_plist_prerequisite,
+    load_control_state,
     request_supervisor_ping,
     request_supervisor_stop,
     resolve_context_paths,
@@ -367,7 +368,7 @@ class LifecycleTests(unittest.TestCase):
                 "cdHashes": ["0123456789abcdef0123456789abcdef01234567"],
             },
         }
-        if schema_version in {2, 3, 4}:
+        if schema_version in {2, 3, 4, 5}:
             assert run_dir is not None
             record.update(
                 {
@@ -419,7 +420,7 @@ class LifecycleTests(unittest.TestCase):
                         "pgid": launcher_pid,
                         "command": "FreedomLocomotion.exe",
                     }
-        if schema_version == 4:
+        if schema_version in {4, 5}:
             assert run_dir is not None
             launcher_pid = 5001
             target_pid = 5002 if producer_status in {"ready", "quiesced"} else None
@@ -467,6 +468,27 @@ class LifecycleTests(unittest.TestCase):
                     },
                 }
             )
+            if schema_version == 5:
+                if producer_status == "ready":
+                    contract_valid = state in {"connected", "streaming"}
+                    stream_epoch = 1 if contract_valid else (2 if state == "recovering" else 0)
+                    connect_events = 1 if state != "waiting" else 0
+                    disconnect_events = 1 if state == "recovering" else 0
+                    record["client"] = {
+                        "status": state,
+                        "telemetryVersion": 7,
+                        "runtimeGeneration": 1,
+                        "bridgePid": 4321,
+                        "bridgeSessionId": 7001,
+                        "streamEpoch": stream_epoch,
+                        "streamContractValid": contract_valid,
+                        "framesTransported": 1 if state == "streaming" else 0,
+                        "connectEvents": connect_events,
+                        "disconnectEvents": disconnect_events,
+                        "contractFailureEvents": 0,
+                    }
+                else:
+                    record["client"] = None
             if producer_live:
                 self.runner.processes[launcher_pid] = {
                     "birthToken": 5001001,
@@ -946,6 +968,53 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(changed.reason_code, "producer.identity_changed")
         finally:
             control_socket.close()
+
+    def test_schema_five_accepts_exact_client_lifecycle_states(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+
+        for state in ("waiting", "connected", "streaming", "recovering"):
+            with self.subTest(state=state):
+                self.create_state(
+                    state=state,
+                    owner_pid=2000,
+                    schema_version=5,
+                    run_dir=run_dir,
+                )
+                inspected = load_control_state(self.paths.state_path)
+                self.assertTrue(inspected.valid, inspected.message)
+                assert inspected.record is not None
+                self.assertEqual(inspected.record["state"], state)
+                self.assertEqual(inspected.record["client"]["status"], state)
+
+    def test_schema_five_rejects_client_identity_and_state_mismatch(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+
+        record = self.create_state(
+            state="streaming",
+            owner_pid=2000,
+            schema_version=5,
+            run_dir=run_dir,
+        )
+        client = record["client"]
+        assert isinstance(client, dict)
+        client["runtimeGeneration"] = 2
+        self.paths.state_path.write_text(json.dumps(record))
+        generation_mismatch = load_control_state(self.paths.state_path)
+        self.assertFalse(generation_mismatch.valid)
+        self.assertEqual(generation_mismatch.error_code, "state.invalid_schema")
+
+        client["runtimeGeneration"] = 1
+        client["status"] = "connected"
+        self.paths.state_path.write_text(json.dumps(record))
+        state_mismatch = load_control_state(self.paths.state_path)
+        self.assertFalse(state_mismatch.valid)
+        self.assertEqual(state_mismatch.error_code, "state.invalid_schema")
 
     def test_schema_four_waiting_allows_launcher_pid_version_change(self) -> None:
         self.create_bridge()

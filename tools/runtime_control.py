@@ -1330,7 +1330,7 @@ def validate_recorded_producer(
     pid_version_reader: Callable[[int], tuple[int | None, str | None]],
 ) -> tuple[bool, str | None, str | None]:
     schema_version = record.get("schemaVersion")
-    if schema_version not in {3, 4} or not isinstance(record.get("producer"), dict):
+    if schema_version not in {3, 4, 5} or not isinstance(record.get("producer"), dict):
         return True, None, None
     producer = record["producer"]
     if schema_version == 3:
@@ -1481,7 +1481,7 @@ def recorded_producer_group_present(
     pid_version_reader: Callable[[int], tuple[int | None, str | None]],
 ) -> tuple[bool | None, str | None]:
     schema_version = record.get("schemaVersion")
-    if schema_version not in {3, 4} or not isinstance(record.get("producer"), dict):
+    if schema_version not in {3, 4, 5} or not isinstance(record.get("producer"), dict):
         return False, None
     producer = record["producer"]
     if schema_version == 3:
@@ -1805,7 +1805,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
         required = common_required
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LEGACY_LIVE_STATES
-    elif schema_version in {2, 3, 4}:
+    elif schema_version in {2, 3, 4, 5}:
         required = common_required | {
             "runDir",
             "controlSocket",
@@ -1813,8 +1813,10 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             "bridgeExecutableSha256",
             "serviceRuns",
         }
-        if schema_version in {3, 4}:
+        if schema_version in {3, 4, 5}:
             required |= {"profile", "producer"}
+        if schema_version == 5:
+            required.add("client")
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LIVE_STATES
     else:
@@ -1858,7 +1860,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             for value in record["bridgeIdentity"]["cdHashes"]
         )
     )
-    if schema_version in {2, 3, 4}:
+    if schema_version in {2, 3, 4, 5}:
         run_dir = pathlib.Path(record["runDir"]) if isinstance(record["runDir"], str) else None
         control_socket = (
             pathlib.Path(record["controlSocket"])
@@ -1974,7 +1976,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
         if profile_valid and producer_valid and isinstance(profile, dict) and isinstance(producer, dict):
             identities_consistent = producer["targetId"] == profile["entrypointTarget"]
         valid = valid and identities_consistent
-    if schema_version == 4:
+    if schema_version in {4, 5}:
         profile = record.get("profile")
         producer = record.get("producer")
         profile_valid = (
@@ -2123,7 +2125,8 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
                     )
                     or (
                         producer["status"] == "ready"
-                        and record["state"] == "waiting"
+                        and record["state"]
+                        in ({"waiting"} if schema_version == 4 else LEGACY_LIVE_STATES)
                         and launcher_valid
                         and isinstance(owned_process, dict)
                     )
@@ -2135,6 +2138,81 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
                 )
             )
         valid = valid and profile_valid and producer_valid
+        if schema_version == 5:
+            client = record.get("client")
+            producer_status = producer.get("status") if isinstance(producer, dict) else None
+            client_valid = client is None and producer_status != "ready"
+            if isinstance(client, dict) and set(client) == {
+                "status",
+                "telemetryVersion",
+                "runtimeGeneration",
+                "bridgePid",
+                "bridgeSessionId",
+                "streamEpoch",
+                "streamContractValid",
+                "framesTransported",
+                "connectEvents",
+                "disconnectEvents",
+                "contractFailureEvents",
+            }:
+                client_status = client["status"]
+                stream_contract_valid = client["streamContractValid"]
+                client_valid = (
+                    producer_status == "ready"
+                    and client_status == record["state"]
+                    and client_status in LEGACY_LIVE_STATES
+                    and isinstance(client["telemetryVersion"], int)
+                    and not isinstance(client["telemetryVersion"], bool)
+                    and client["telemetryVersion"] == 7
+                    and isinstance(client["runtimeGeneration"], int)
+                    and not isinstance(client["runtimeGeneration"], bool)
+                    and client["runtimeGeneration"] == record["generation"]
+                    and isinstance(client["bridgePid"], int)
+                    and not isinstance(client["bridgePid"], bool)
+                    and client["bridgePid"] == record["servicePid"]
+                    and isinstance(client["bridgeSessionId"], int)
+                    and not isinstance(client["bridgeSessionId"], bool)
+                    and client["bridgeSessionId"] > 0
+                    and isinstance(client["streamEpoch"], int)
+                    and not isinstance(client["streamEpoch"], bool)
+                    and client["streamEpoch"] >= 0
+                    and isinstance(stream_contract_valid, bool)
+                    and isinstance(client["framesTransported"], int)
+                    and not isinstance(client["framesTransported"], bool)
+                    and client["framesTransported"] >= 0
+                    and isinstance(client["connectEvents"], int)
+                    and not isinstance(client["connectEvents"], bool)
+                    and client["connectEvents"] >= 0
+                    and isinstance(client["disconnectEvents"], int)
+                    and not isinstance(client["disconnectEvents"], bool)
+                    and client["disconnectEvents"] >= 0
+                    and isinstance(client["contractFailureEvents"], int)
+                    and not isinstance(client["contractFailureEvents"], bool)
+                    and client["contractFailureEvents"] == 0
+                    and client["streamEpoch"]
+                    == client["connectEvents"] + client["disconnectEvents"]
+                    and (
+                        (
+                            client_status in {"waiting", "recovering"}
+                            and not stream_contract_valid
+                            and client["streamEpoch"] % 2 == 0
+                            and client["connectEvents"] == client["disconnectEvents"]
+                        )
+                        or (
+                            client_status in {"connected", "streaming"}
+                            and stream_contract_valid
+                            and client["streamEpoch"] > 0
+                            and client["streamEpoch"] % 2 == 1
+                            and client["connectEvents"]
+                            == client["disconnectEvents"] + 1
+                            and (
+                                client_status != "streaming"
+                                or client["framesTransported"] > 0
+                            )
+                        )
+                    )
+                )
+            valid = valid and client_valid
     if not valid:
         return ControlStateInspection(
             True,
@@ -2146,7 +2224,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
 
 
 def validate_control_socket(record: dict[str, Any]) -> tuple[pathlib.Path | None, str | None]:
-    if record.get("schemaVersion") not in {2, 3, 4}:
+    if record.get("schemaVersion") not in {2, 3, 4, 5}:
         return None, "Live control state does not expose a supervisor control socket"
     socket_value = record.get("controlSocket")
     run_dir_value = record.get("runDir")
@@ -2441,7 +2519,7 @@ def status_runtime(
                 lock,
                 control_state,
             )
-        if record["schemaVersion"] in {2, 3, 4}:
+        if record["schemaVersion"] in {2, 3, 4, 5}:
             run_dir = pathlib.Path(record["runDir"])
             if (
                 run_dir.parent != paths.state_root
@@ -2760,7 +2838,7 @@ def validate_recorded_content(
     if not control_state.valid or control_state.record is None:
         return True, None
     record = control_state.record
-    if record.get("schemaVersion") not in {2, 3, 4}:
+    if record.get("schemaVersion") not in {2, 3, 4, 5}:
         return True, None
     try:
         if path_lexists(paths.launch_agent_plist):
@@ -2868,7 +2946,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
         lock.alive
         and lock.pid is not None
         and initial_record is not None
-        and initial_record.get("schemaVersion") in {2, 3, 4}
+        and initial_record.get("schemaVersion") in {2, 3, 4, 5}
         and initial_record.get("ownerPid") == lock.pid
     ):
         actual_started_at, _ = process_start_time(lock.pid, context.runner)
@@ -2880,7 +2958,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     if (
         not lock.alive
         and initial_record is not None
-        and initial_record.get("schemaVersion") in {3, 4}
+        and initial_record.get("schemaVersion") in {3, 4, 5}
         and isinstance(initial_record.get("producer"), dict)
     ):
         producer_present, producer_error = recorded_producer_group_present(
@@ -2947,7 +3025,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
                 not live_status.ok
                 or live_status.state not in LIVE_STATES
                 or record is None
-                or record.get("schemaVersion") not in {2, 3, 4}
+                or record.get("schemaVersion") not in {2, 3, 4, 5}
             ):
                 return stop_failure(
                     "owner.unresponsive",
@@ -3123,7 +3201,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     stale_run_dir: pathlib.Path | None = None
     if control_state.valid and control_state.record is not None:
         record = control_state.record
-        if record.get("schemaVersion") in {2, 3, 4} and isinstance(record.get("controlSocket"), str):
+        if record.get("schemaVersion") in {2, 3, 4, 5} and isinstance(record.get("controlSocket"), str):
             run_dir = pathlib.Path(record["runDir"])
             if run_dir.parent != paths.state_root:
                 return stop_failure(
