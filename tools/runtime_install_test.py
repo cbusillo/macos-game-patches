@@ -438,9 +438,9 @@ def patched_lifecycle(
 
 class RuntimeInstallTests(unittest.TestCase):
     def test_live_supervisor_stops_before_both_lifecycle_directions(self) -> None:
-        for schema_version in (2, 3):
+        states = {2: "idle", 3: "waiting", 4: "waiting", 5: "streaming"}
+        for schema_version, state in states.items():
             with self.subTest(schema_version=schema_version), lifecycle_fixture() as fixture:
-                state = "idle" if schema_version == 2 else "waiting"
                 live = StatusReport(
                     state,
                     f"runtime.{state}",
