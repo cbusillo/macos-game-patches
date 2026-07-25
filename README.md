@@ -126,14 +126,17 @@ Shipping executable remains globally unique and stable across repeated exact
 PID, birth-token, PID-version, start-time, process-group, command, and executable
 checks around a bridge handshake bound to the generation nonce, bridge PID, and
 Mach-audit-authenticated producer identity, plus startup self-tests. Schema-v4
-records ownership before spawning CrossOver, then stop freshly revalidates and
+ownership remains the producer authority inside schema v5, which also records
+generation-, bridge-PID-, and bridge-session-bound client telemetry. Before
+launchd starts, the supervisor seeds private generation-local ALVR state from
+retained trusted clients. It reports `waiting` without a client, `connected`
+after a valid ALVR negotiation, `streaming` while transported frames advance,
+and bounded `recovering` after disconnect. Stop freshly revalidates and
 quiesces each live owned process group, refuses ambiguous dead-owner cleanup,
-revalidates service and producer identity before publication or launchd bootout,
-and never signals serialized PIDs. The first
-production-admitted profile is
-`freedom-locomotion`; The Lab remains a separate multi-target lifecycle slice.
-Vision Pro `connected`, `streaming`, and `recovering` transitions are still the
-next issue #60 slice.
+revalidates service and producer identity before publication or launchd
+bootout, ignores late client telemetry, and never signals serialized PIDs. The
+first production-admitted profile is `freedom-locomotion`; The Lab remains a
+separate multi-target lifecycle slice.
 
 ## Starting New Work
 
