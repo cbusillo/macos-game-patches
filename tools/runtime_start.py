@@ -3193,11 +3193,17 @@ def supervise_runtime(
                         "producer-quiesced",
                         producer_state,
                     )
-                    _write_json_atomic(
-                        active_admission.paths.state_root,
-                        active_admission.paths.state_path,
-                        quiesced_payload,
-                    )
+                    try:
+                        _write_json_atomic(
+                            active_admission.paths.state_root,
+                            active_admission.paths.state_path,
+                            quiesced_payload,
+                        )
+                    except ControlError as error:
+                        actions.append(
+                            "retain terminal producer quiescence after state "
+                            f"publication failure code={error.code}"
+                        )
 
                 stop_requested = False
                 provisional_identity: ProducerIdentity | None = None

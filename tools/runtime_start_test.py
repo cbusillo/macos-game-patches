@@ -20,6 +20,7 @@ from typing import Any
 from unittest import mock
 
 import runtime_profile
+import runtime_start
 from runtime_control import (
     CommandResult,
     ControlError,
@@ -1073,6 +1074,89 @@ class RuntimeStartTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(result[0].state, "stopped")
+        self.assertFalse(self.fixture.paths.state_path.exists())
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+        self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
+        self.assertFalse(run_dir.exists())
+
+    def test_post_quiescence_publication_failure_keeps_stop_terminal(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000037"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+        original_write_json_atomic = runtime_start._write_json_atomic
+        failed_quiesced_publication = False
+        invalid_live_publications: list[dict[str, Any]] = []
+
+        def fail_first_quiesced_publication(
+            root: pathlib.Path,
+            path: pathlib.Path,
+            value: dict[str, Any],
+        ) -> None:
+            nonlocal failed_quiesced_publication
+            producer = value.get("producer")
+            producer_status = (
+                producer.get("status") if isinstance(producer, dict) else None
+            )
+            if (
+                producer_status == "quiesced"
+                and value.get("diagnostic", {}).get("phase") == "producer-quiesced"
+                and not failed_quiesced_publication
+            ):
+                failed_quiesced_publication = True
+                raise ControlError(
+                    "transaction.write_failed",
+                    "Fixture quiesced-state publication failed",
+                )
+            if producer_status == "quiesced" and value.get("state") in {
+                "waiting",
+                "connected",
+                "streaming",
+                "recovering",
+            }:
+                invalid_live_publications.append(value)
+            original_write_json_atomic(root, path, value)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(55, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ), mock.patch(
+            "runtime_start._write_json_atomic",
+            side_effect=fail_first_quiesced_publication,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            self.wait_for_waiting_startup(run_dir)
+            with mock.patch(
+                "runtime_control.resolve_context_paths",
+                return_value=({}, {}, self.fixture.paths),
+            ):
+                stopped = stop_runtime(self.fixture.context)
+            if not stopped.ok:
+                self.fixture.runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertTrue(failed_quiesced_publication)
+        self.assertTrue(stopped.ok, stopped.message)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+        self.assertEqual(invalid_live_publications, [])
+        self.assertFalse(
+            producer_launcher.group_live(self.fixture.runner.producer_group)
+        )
+        self.assertFalse(
+            producer_launcher.group_live(self.fixture.runner.target_group)
+        )
         self.assertFalse(self.fixture.paths.state_path.exists())
         self.assertFalse(self.fixture.paths.lock_path.exists())
         self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
