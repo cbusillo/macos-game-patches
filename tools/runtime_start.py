@@ -458,7 +458,9 @@ class ClientTelemetryMonitor:
 
         previous_state = self.state
         if telemetry.client_state == ALVR_CLIENT_STATE_WAITING:
-            if previous_state in {"connected", "streaming"} or disconnect_advanced:
+            if previous_state in {"connected", "streaming"} or (
+                disconnect_advanced and previous_state != "recovering"
+            ):
                 self.recovery_deadline = now + self.recovery_timeout
                 self.state = "recovering"
             elif previous_state == "recovering":
