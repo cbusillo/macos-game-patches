@@ -441,6 +441,19 @@ class RuntimeInstallTests(unittest.TestCase):
         states = {2: "idle", 3: "waiting", 4: "waiting", 5: "streaming"}
         for schema_version, state in states.items():
             with self.subTest(schema_version=schema_version), lifecycle_fixture() as fixture:
+                lock_held = False
+                original_global_lock = runtime_install.global_lifecycle_lock
+
+                @contextlib.contextmanager
+                def tracked_global_lock(*args: Any, **kwargs: Any) -> Iterator[None]:
+                    nonlocal lock_held
+                    with original_global_lock(*args, **kwargs):
+                        lock_held = True
+                        try:
+                            yield
+                        finally:
+                            lock_held = False
+
                 live = StatusReport(
                     state,
                     f"runtime.{state}",
@@ -450,11 +463,27 @@ class RuntimeInstallTests(unittest.TestCase):
                     {"alive": True},
                     {"record": {"schemaVersion": schema_version}},
                 )
-                with patched_lifecycle(fixture) as (context, _, stop_mock), mock.patch.object(
-                    runtime_install,
-                    "status_runtime",
-                    return_value=live,
+                with (
+                    patched_lifecycle(fixture) as (context, _, stop_mock),
+                    mock.patch.object(
+                        runtime_install,
+                        "status_runtime",
+                        return_value=live,
+                    ),
+                    mock.patch.object(
+                        runtime_install,
+                        "global_lifecycle_lock",
+                        new=tracked_global_lock,
+                    ),
                 ):
+                    stopped_report = stop_mock.return_value
+                    stop_lock_states: list[bool] = []
+
+                    def tracked_stop(_: RuntimeContext) -> StopReport:
+                        stop_lock_states.append(lock_held)
+                        return stopped_report
+
+                    stop_mock.side_effect = tracked_stop
                     install = runtime_install.install_runtime(context, fixture.artifact_root)
                     install_replay = runtime_install.install_runtime(
                         context, fixture.artifact_root
@@ -463,10 +492,14 @@ class RuntimeInstallTests(unittest.TestCase):
                 self.assertTrue(install.ok)
                 self.assertTrue(install_replay.ok)
                 self.assertTrue(uninstall.ok)
-                self.assertGreaterEqual(stop_mock.call_count, 5)
+                self.assertEqual(stop_mock.call_count, 6)
+                self.assertEqual(
+                    stop_lock_states,
+                    [False, True, False, True, False, True],
+                )
                 self.assertEqual(install.stop_actions.count("already-stopped"), 2)
                 self.assertEqual(
-                    install_replay.stop_actions.count("already-stopped"), 1
+                    install_replay.stop_actions.count("already-stopped"), 2
                 )
                 self.assertEqual(uninstall.stop_actions.count("already-stopped"), 2)
 
@@ -528,6 +561,7 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertTrue(replay.ok)
             self.assertEqual(replay.state, "already-committed")
             self.assertEqual(replay.transaction_id, installed.transaction_id)
+            self.assertEqual(replay.stop_actions, ("already-stopped",))
 
             uninstalled = runtime_install.uninstall_runtime(context, fixture.artifact_root)
             self.assertTrue(uninstalled.ok)
@@ -540,11 +574,128 @@ class RuntimeInstallTests(unittest.TestCase):
             uninstall_replay = runtime_install.uninstall_runtime(context, fixture.artifact_root)
             self.assertTrue(uninstall_replay.ok)
             self.assertEqual(uninstall_replay.state, "already-committed")
+            self.assertEqual(uninstall_replay.stop_actions, ("already-stopped",))
 
             reinstalled = runtime_install.install_runtime(context, fixture.artifact_root)
             self.assertTrue(reinstalled.ok)
             self.assertNotEqual(reinstalled.transaction_id, installed.transaction_id)
             self.assertEqual(len(list(fixture.history_root.glob("*.json"))), 2)
+
+    def test_committed_replay_surfaces_stopped_state_failures(self) -> None:
+        failure_codes = (
+            "producer.orphaned",
+            "producer.identity_unavailable",
+            "service.foreign",
+            "runtime.cleanup_failed",
+        )
+        commands = {
+            "install": (
+                runtime_install.install_runtime,
+                b"patched payload",
+                0,
+            ),
+            "uninstall": (
+                runtime_install.uninstall_runtime,
+                b"stock payload",
+                1,
+            ),
+        }
+        for command, (
+            replay_command,
+            expected_payload,
+            expected_history_count,
+        ) in commands.items():
+            for failure_code in failure_codes:
+                with (
+                    self.subTest(command=command, failure_code=failure_code),
+                    lifecycle_fixture() as fixture,
+                ):
+                    with patched_lifecycle(fixture) as (context, _, stop_mock):
+                        installed = runtime_install.install_runtime(
+                            context,
+                            fixture.artifact_root,
+                        )
+                        self.assertTrue(installed.ok)
+                        committed = installed
+                        if command == "uninstall":
+                            committed = runtime_install.uninstall_runtime(
+                                context,
+                                fixture.artifact_root,
+                            )
+                            self.assertTrue(committed.ok)
+                        failed_status = StatusReport(
+                            "failed",
+                            failure_code,
+                            "fixture stale runtime state requires exact cleanup",
+                            committed.artifact,
+                            {"present": False},
+                            {"alive": False},
+                            {"record": {"schemaVersion": 5}},
+                        )
+                        failed_stop = StopReport(
+                            False,
+                            "failed",
+                            failure_code,
+                            "fixture stopped-state verification failed",
+                            (f"preserve {failure_code}",),
+                            {"present": False},
+                            {"alive": False},
+                        )
+                        stop_mock.reset_mock()
+                        lock_held = False
+                        stop_lock_states: list[bool] = []
+                        original_global_lock = runtime_install.global_lifecycle_lock
+
+                        @contextlib.contextmanager
+                        def tracked_global_lock(
+                            *args: Any,
+                            **kwargs: Any,
+                        ) -> Iterator[None]:
+                            nonlocal lock_held
+                            with original_global_lock(*args, **kwargs):
+                                lock_held = True
+                                try:
+                                    yield
+                                finally:
+                                    lock_held = False
+
+                        def failed_stopped_state(_: RuntimeContext) -> StopReport:
+                            stop_lock_states.append(lock_held)
+                            return failed_stop
+
+                        stop_mock.side_effect = failed_stopped_state
+                        with (
+                            mock.patch.object(
+                                runtime_install,
+                                "status_runtime",
+                                return_value=failed_status,
+                            ),
+                            mock.patch.object(
+                                runtime_install,
+                                "global_lifecycle_lock",
+                                new=tracked_global_lock,
+                            ),
+                        ):
+                            replay = replay_command(
+                                context,
+                                fixture.artifact_root,
+                            )
+
+                    self.assertFalse(replay.ok)
+                    self.assertEqual(replay.state, "blocked")
+                    self.assertEqual(replay.reason_code, failure_code)
+                    self.assertIsNone(replay.transaction_id)
+                    self.assertEqual(replay.stop_actions, (f"preserve {failure_code}",))
+                    stop_mock.assert_called_once_with(context)
+                    self.assertEqual(stop_lock_states, [True])
+                    journal = json.loads(fixture.journal.read_text())
+                    self.assertEqual(journal["kind"], command)
+                    self.assertEqual(journal["state"], "committed")
+                    self.assertEqual(
+                        len(list(fixture.history_root.glob("*.json"))),
+                        expected_history_count,
+                    )
+                    self.assertEqual(fixture.stock.read_bytes(), expected_payload)
 
     def test_prior_committed_plan_journal_archives_before_new_install(self) -> None:
         with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (
