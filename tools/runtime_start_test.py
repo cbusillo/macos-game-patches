@@ -2446,6 +2446,120 @@ class RuntimeStartTests(unittest.TestCase):
                 1,
             )
 
+    def test_client_monitor_keeps_deadline_across_missed_reconnect_cycle(self) -> None:
+        connected = ClientTelemetry(
+            2,
+            ALVR_CLIENT_STATE_CONNECTED,
+            True,
+            42,
+            4321,
+            7001,
+            1,
+            1,
+            0,
+            1,
+            0,
+            0,
+        )
+        monitor = ClientTelemetryMonitor(42, 4321, recovery_timeout=30)
+        monitor.observe(connected, 0)
+        disconnected = replace(
+            connected,
+            sequence=4,
+            client_state=ALVR_CLIENT_STATE_WAITING,
+            stream_contract_valid=False,
+            bridge_heartbeat_ns=2,
+            stream_epoch=2,
+            disconnect_events=1,
+        )
+        state, _ = monitor.observe(disconnected, 1)
+        self.assertEqual(state, "recovering")
+        original_deadline = monitor.recovery_deadline
+        self.assertEqual(original_deadline, 31)
+
+        missed_cycle = replace(
+            disconnected,
+            sequence=8,
+            bridge_heartbeat_ns=3,
+            stream_epoch=4,
+            connect_events=2,
+            disconnect_events=2,
+        )
+        state, _ = monitor.observe(missed_cycle, 10)
+        self.assertEqual(state, "recovering")
+        self.assertEqual(monitor.recovery_deadline, original_deadline)
+
+        state, _ = monitor.observe(
+            replace(missed_cycle, sequence=10, bridge_heartbeat_ns=4),
+            31,
+        )
+        self.assertEqual(state, "waiting")
+        self.assertIsNone(monitor.recovery_deadline)
+
+    def test_client_monitor_observed_reconnect_starts_new_deadline(self) -> None:
+        for reconnect_state, frames_transported, expected_state in (
+            (ALVR_CLIENT_STATE_CONNECTED, 0, "connected"),
+            (ALVR_CLIENT_STATE_STREAMING, 1, "streaming"),
+        ):
+            with self.subTest(reconnect_state=reconnect_state):
+                connected = ClientTelemetry(
+                    2,
+                    ALVR_CLIENT_STATE_CONNECTED,
+                    True,
+                    42,
+                    4321,
+                    7001,
+                    1,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                )
+                monitor = ClientTelemetryMonitor(42, 4321, recovery_timeout=30)
+                monitor.observe(connected, 0)
+                disconnected = replace(
+                    connected,
+                    sequence=4,
+                    client_state=ALVR_CLIENT_STATE_WAITING,
+                    stream_contract_valid=False,
+                    bridge_heartbeat_ns=2,
+                    stream_epoch=2,
+                    disconnect_events=1,
+                )
+                monitor.observe(disconnected, 1)
+                original_deadline = monitor.recovery_deadline
+
+                reconnected = replace(
+                    disconnected,
+                    sequence=6,
+                    client_state=reconnect_state,
+                    stream_contract_valid=True,
+                    bridge_heartbeat_ns=3,
+                    stream_epoch=3,
+                    frames_transported=frames_transported,
+                    connect_events=2,
+                )
+                state, _ = monitor.observe(reconnected, 10)
+                self.assertEqual(state, expected_state)
+                self.assertIsNone(monitor.recovery_deadline)
+
+                state, _ = monitor.observe(
+                    replace(
+                        reconnected,
+                        sequence=8,
+                        client_state=ALVR_CLIENT_STATE_WAITING,
+                        stream_contract_valid=False,
+                        bridge_heartbeat_ns=4,
+                        stream_epoch=4,
+                        disconnect_events=2,
+                    ),
+                    12,
+                )
+                self.assertEqual(state, "recovering")
+                self.assertEqual(monitor.recovery_deadline, 42)
+                self.assertNotEqual(monitor.recovery_deadline, original_deadline)
+
     def test_reads_exact_version_seven_client_telemetry(self) -> None:
         path = self.fixture.root / "client-telemetry.shm"
         header = bytearray(ALVR_SHM_HEADER_SIZE)
