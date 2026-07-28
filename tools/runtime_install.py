@@ -1376,7 +1376,7 @@ def _mutate_runtime(
             }
             plan_digest = executors[command].plan_digest
             active_journal = _read_active_journal(paths)
-            recovery_stop_actions = stop_actions
+            settlement_stop_actions = stop_actions
             if active_journal is not None:
                 ensure_private_directory(
                     paths.transaction_root,
@@ -1402,29 +1402,36 @@ def _mutate_runtime(
                             "Active lifecycle journal disappeared during inspection",
                             path=str(paths.journal),
                         )
-                    if validated_journal["state"] in INCOMPLETE_TRANSACTION_STATES:
-                        recovery_stop = stop_runtime(context)
-                        recovery_stop_actions = (*stop_actions, *recovery_stop.actions)
-                        stop_actions = recovery_stop_actions
-                        if not recovery_stop.ok:
+                    journal_state = validated_journal["state"]
+                    if journal_state in INCOMPLETE_TRANSACTION_STATES or (
+                        journal_state == "committed" and existing_kind == command
+                    ):
+                        settlement_stop = stop_runtime(context)
+                        settlement_stop_actions = (
+                            *stop_actions,
+                            *settlement_stop.actions,
+                        )
+                        stop_actions = settlement_stop_actions
+                        if not settlement_stop.ok:
                             return MutationReport(
                                 command=command,
                                 ok=False,
                                 state="blocked",
-                                reason_code=recovery_stop.reason_code,
-                                message=recovery_stop.message,
+                                reason_code=settlement_stop.reason_code,
+                                message=settlement_stop.message,
                                 artifact=artifact,
                                 plan_digest=plan_digest,
                                 journal=paths.journal,
-                                stop_actions=recovery_stop_actions,
+                                stop_actions=settlement_stop_actions,
                             )
+                    if journal_state in INCOMPLETE_TRANSACTION_STATES:
                         _ensure_paths_closed(context, _journal_paths(validated_journal))
             settled, settled_archive = _settle_active_journal(
                 command,
                 artifact,
                 executors,
                 paths,
-                stop_actions=recovery_stop_actions,
+                stop_actions=settlement_stop_actions,
             )
             if settled_archive is not None:
                 archived_journal = settled_archive
