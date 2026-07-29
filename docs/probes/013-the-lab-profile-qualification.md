@@ -567,8 +567,57 @@ diagnostic verdict remained `fail` only because the profile's all-target gate
 still saw the hub alone; it is confirmation of the updated automated path, not
 a substitute for the worn acceptance run.
 
-Verdict:
+Verdict at this point:
 `alive` on the beta 4 host/headset pair. Automated rendering, transport, pose,
-cadence, client lifecycle, and cleanup evidence pass. Issue #67 still requires
-one worn run that selects a hub destination, exercises trigger and grip in
-gameplay, confirms clear/smooth output, and repeats exact cleanup.
+cadence, client lifecycle, and cleanup evidence pass. Issue #67 still required
+one worn run that selected a hub destination, exercised trigger and grip in
+gameplay, confirmed clear/smooth output, and repeated exact cleanup. The worn
+result below supersedes that remaining-gate statement.
+
+### Worn Hub Acceptance After PR 92
+
+PR #92 merged on July 29, 2026 as
+`2315465091cfa1608871a6ccf914044461b09241`. The operator then ran the unchanged
+physical The Lab profile from merged `main` with the Vision Pro and both PS VR2
+Sense controllers. The retained run is
+`the-lab/real-native-encode-20260729T224407Z`.
+
+Human observation and interaction passed the compositor/input gate:
+
+- the Vision Pro image was stable, smooth, and usable;
+- the only visual qualification note was softer apparent resolution, with no
+  black frames, flashing, warping, or distracting artifacts;
+- right-thumbstick turning worked;
+- holding the left thumbstick click while aiming at the floor displayed and
+  committed teleport locomotion; and
+- trigger and grip visibly responded in The Lab.
+
+Retained `IVRInput` telemetry independently recorded teleport, trigger, and
+grip state transitions from both hands. Only the hub process ran. Secret Shop
+and Robot Repair transitions therefore remain #59's multi-target packaged
+runtime work rather than part of the completed #67 eye-submission gate.
+
+The operator ended the worn run after sufficient human validation instead of
+waiting for the full `81000`-frame duration. Stopping only the outer
+`runtime_profile.py probe` process left the child probe, launchd service, and
+game alive; signaling the actual `run_real_native_iosurface_probe.sh` process
+then invoked its verified restoration trap. Final state was exact:
+
+- runtime status `stopped` with no transient owned state;
+- no native bridge, game, or profile process;
+- no launchd job or plist;
+- no shared-memory or temporary probe files; and
+- no `unexpected-present` restoration entry.
+
+This is a known operator-stop failure signature for #62's lifecycle matrix:
+programmatic termination of the profile wrapper must be tested separately from
+terminal process-group interruption, and the wrapper should not leave a live
+probe child.
+
+Issue #67 closed from combined evidence. Full connected run
+`the-lab/real-native-encode-20260729T211234Z` supplies the strict `90.006 FPS`,
+zero-drop, zero-pose-gap, decoder, and cleanup evidence; the worn run supplies
+the user-observed visual and PS VR2 Sense interaction evidence. The softer
+resolution remains a #59/#63 quality follow-up. The current profile's fixed
+`1152x1280` per-eye source should be compared with a bounded higher-resolution
+candidate before attributing the softness only to the title.
