@@ -136,8 +136,10 @@ avp_client_ready_latency_ms=0
 avp_connection_gate_epoch_ms=0
 avp_client_connection_epoch_ms=0
 avp_client_connection_latency_ms=0
+avp_client_connection_same_sample=0
 avp_sink_connection_epoch_ms=0
 avp_sink_connection_latency_ms=0
+avp_sink_connection_same_sample=0
 avp_post_host_observed=0
 avp_post_host_stream_stopped=0
 avp_post_host_stale_ipd=0
@@ -439,6 +441,21 @@ game_process_pids() {
 			printf '%s\n' "$pid"
 		fi
 	done < <(pgrep -f "$probe_process_pattern" 2>/dev/null || true)
+}
+
+native_bridge_process_pids() {
+	ps -ww -axo pid=,comm= | awk '
+		{
+			pid = $1
+			$1 = ""
+			sub(/^[[:space:]]+/, "")
+			executable = $0
+			sub(/^.*\//, "", executable)
+			if (executable == "alvr_macos_bridge") {
+				print pid
+			}
+		}
+	'
 }
 
 shutdown_bottle() {
@@ -932,6 +949,7 @@ validate_avp_client_before_bootstrap() {
 }
 
 capture_avp_connection_state() {
+	local gate_observed=0
 	local now
 
 	normalize_avp_console_log || return 1
@@ -942,23 +960,62 @@ capture_avp_connection_state() {
 			return 0
 		fi
 		avp_connection_gate_epoch_ms=$now
+		gate_observed=1
 	fi
 	if [[ $avp_client_connection_epoch_ms -eq 0 ]] &&
 		rg -q '^Successful connection!$' "$avp_console_normalized_log"; then
 		avp_client_connection_epoch_ms=$now
 		avp_client_connection_latency_ms=$((now - avp_connection_gate_epoch_ms))
+		avp_client_connection_same_sample=$gate_observed
 	fi
 	if [[ $avp_sink_connection_epoch_ms -eq 0 ]] &&
 		rg -q 'alvr_sink connected epoch=1 ' "$run_dir/native-bridge.log"; then
 		avp_sink_connection_epoch_ms=$now
 		avp_sink_connection_latency_ms=$((now - avp_connection_gate_epoch_ms))
+		avp_sink_connection_same_sample=$gate_observed
 	fi
 	return 0
 }
 
 wait_for_avp_connection() {
-	capture_avp_connection_state || return 1
-	[[ $avp_client_connection_epoch_ms -gt 0 &&
+	local now
+	local wait_deadline
+	local wait_status=1
+
+	wait_deadline=$(($(epoch_milliseconds) + 5000))
+	while :; do
+		capture_avp_connection_state || break
+		now=$(epoch_milliseconds)
+		if [[ $avp_connection_gate_epoch_ms -gt 0 ]]; then
+			if [[ $avp_client_connection_epoch_ms -gt 0 &&
+				$avp_sink_connection_epoch_ms -gt 0 ]]; then
+				wait_status=0
+				break
+			fi
+			if [[ ($avp_client_connection_epoch_ms -eq 0 &&
+				$now -gt $((avp_connection_gate_epoch_ms + 2000))) ||
+				($avp_sink_connection_epoch_ms -eq 0 &&
+				$now -gt $((avp_connection_gate_epoch_ms + 5000))) ]]; then
+				break
+			fi
+		elif [[ $now -gt $wait_deadline ]]; then
+			break
+		fi
+		sleep 0.1
+	done
+	{
+		printf 'measurement=poll-observation\n'
+		printf 'poll_interval_ms=100\n'
+		printf 'gate_epoch_ms=%s\n' "$avp_connection_gate_epoch_ms"
+		printf 'client_epoch_ms=%s\n' "$avp_client_connection_epoch_ms"
+		printf 'client_latency_ms=%s\n' "$avp_client_connection_latency_ms"
+		printf 'client_same_sample_as_gate=%s\n' "$avp_client_connection_same_sample"
+		printf 'sink_epoch_ms=%s\n' "$avp_sink_connection_epoch_ms"
+		printf 'sink_latency_ms=%s\n' "$avp_sink_connection_latency_ms"
+		printf 'sink_same_sample_as_gate=%s\n' "$avp_sink_connection_same_sample"
+	} >"$run_dir/avp-connection-gate.txt"
+	[[ $wait_status -eq 0 &&
+		$avp_client_connection_epoch_ms -gt 0 &&
 		$avp_sink_connection_epoch_ms -gt 0 &&
 		$avp_client_connection_latency_ms -le 2000 &&
 		$avp_sink_connection_latency_ms -le 5000 ]] || return 1
@@ -1161,6 +1218,61 @@ paths_refer_to_same_file() {
 
 	[[ $left == "$right" ]] ||
 		[[ -e $left && -e $right && $left -ef $right ]]
+}
+
+remove_owned_native_bridge_bundle() {
+	local bundle=$1
+	local actual_identifier
+	local actual_team
+	local directory
+	local marker="$bundle/Contents/Resources/runtime-owner.json"
+	local program="$bundle/Contents/MacOS/alvr_macos_bridge"
+
+	if [[ ! -e $bundle && ! -L $bundle ]]; then
+		return 0
+	fi
+	if [[ -L $bundle || ! -d $bundle ]]; then
+		echo "refusing to replace native bridge bundle with an unsafe root" >&2
+		return 1
+	fi
+	if [[ -n $(find "$bundle" -type l -print -quit) ]]; then
+		echo "refusing to replace native bridge bundle containing symlinks" >&2
+		return 1
+	fi
+	if [[ -n $(find "$bundle" ! -user "$UID" -print -quit) ]]; then
+		echo "refusing to replace native bridge bundle with foreign ownership" >&2
+		return 1
+	fi
+	if [[ ! -f $program ]] || ! codesign --verify --strict --deep "$bundle"; then
+		echo "refusing to replace an unverified native bridge bundle" >&2
+		return 1
+	fi
+	actual_identifier=$(codesign -dv --verbose=4 "$program" 2>&1 |
+		sed -n 's/^Identifier=//p')
+	actual_team=$(codesign -dv --verbose=4 "$program" 2>&1 |
+		sed -n 's/^TeamIdentifier=//p')
+	if [[ $actual_identifier != "$native_bridge_signature_identifier" ||
+		$actual_team != "$native_bridge_signature_team" ]]; then
+		echo "refusing to replace a native bridge bundle with foreign signing identity" >&2
+		return 1
+	fi
+	if [[ ! -f $marker ]] ||
+		! jq -e --arg bundle "$native_bridge_bundle_id" '
+			.ownershipSchemaVersion == 1 and
+			.artifactId == "mac-alvr-runtime" and
+			.bundleId == $bundle
+		' "$marker" >/dev/null; then
+		echo "refusing to replace a native bridge bundle without its valid owner marker" >&2
+		return 1
+	fi
+	while IFS= read -r -d '' directory; do
+		chmod u+w "$directory" || return 1
+	done < <(find "$bundle" -type d -print0)
+	rm -rf "$bundle"
+	if [[ -e $bundle || -L $bundle ]]; then
+		echo "owned native bridge bundle removal was incomplete" >&2
+		return 1
+	fi
 }
 
 probe_owns_stale_launch_agent_state() {
@@ -1718,7 +1830,7 @@ if [[ -n $(game_process_pids) ]]; then
 	echo "$probe_app_name is already running" >&2
 	exit 1
 fi
-if pgrep -f '[a]lvr_macos_bridge' >/dev/null 2>&1; then
+if [[ -n $(native_bridge_process_pids) ]]; then
 	echo "alvr_macos_bridge is already running" >&2
 	exit 1
 fi
@@ -1820,6 +1932,14 @@ else
 		"$native_bridge_install_staging/Contents/Info.plist"
 	/usr/bin/plutil -insert NSBonjourServices -json '["_alvr._tcp"]' \
 		"$native_bridge_install_staging/Contents/Info.plist"
+	mkdir -p "$native_bridge_install_staging/Contents/Resources"
+	jq -n --arg bundle "$native_bridge_bundle_id" '
+		{
+			ownershipSchemaVersion: 1,
+			artifactId: "mac-alvr-runtime",
+			bundleId: $bundle
+		}
+	' >"$native_bridge_install_staging/Contents/Resources/runtime-owner.json"
 fi
 chmod u+w "$native_bridge_install_program"
 codesign --force --deep \
@@ -1841,7 +1961,7 @@ native_bridge_signature_cdhash=$(codesign -dv --verbose=4 "$native_bridge_instal
 	echo "native bridge stable code-signing identity is incomplete" >&2
 	exit 1
 }
-rm -rf "$native_bridge_bundle"
+remove_owned_native_bridge_bundle "$native_bridge_bundle"
 mv "$native_bridge_install_staging" "$native_bridge_bundle"
 codesign --verify --strict --deep "$native_bridge_bundle"
 "$launch_services_register" -f "$native_bridge_bundle" \
