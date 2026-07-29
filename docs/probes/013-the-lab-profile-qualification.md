@@ -478,3 +478,97 @@ python3 tools/vr_stack_cleanup.py
 Issue routing:
 merge the reusable eye/input compatibility correction without closing #67;
 then complete #67's physical controller/cadence gate before unblocking #59.
+
+### Beta 4 Automated Qualification Without Human Observation
+
+On July 29, 2026, the Mac and connected Vision Pro were on macOS 27 beta 4
+build `26A5388g` and visionOS 27 beta 4 build `24M5326g`. The installed ALVR
+client remained version `20.14.5` build `3` with protocol `21-dev12`. Testing
+used sealed schema-v5 artifact
+`1c5e8f81ee7923d4f50bcfb218f2fa06175331a97dc5526af6b226f865def5a7`.
+
+The first disconnected attempt,
+`the-lab/real-native-encode-20260729T205625Z`, failed before game launch. The
+research runner could not replace the retained stable bridge because the sealed
+bundle tree correctly had read-only directory modes. The production
+transaction path already handles cleanup modes, but the research runner still
+used a bare `rm -rf`. The focused fix verifies bundle type, ownership, signing
+identity, required owner marker, and absence of symlinks before making only its
+directories owner-writable and removing the exact owned tree. Development-mode
+bundles now receive the same marker before signing.
+
+A follow-up smoke also proved that a full-command-line `pgrep` can mistake an
+AI review prompt containing `alvr_macos_bridge` for the bridge itself. The
+runner now checks the exact executable basename, preserving the fail-closed
+single-bridge guard without coupling test execution to unrelated process text.
+After that correction, smoke run
+`the-lab/real-native-encode-20260729T215051Z` passed with `300/300` frames,
+`90.164 FPS` in its final 100-frame producer window, zero producer/native
+drops, and exact cleanup while the review process remained active.
+
+Strict payload preflight then detected Finder-created `.DS_Store` files rather
+than weakening the full-tree identity check. The files were removed while
+Finder was temporarily paused and automatically resumed after each probe.
+
+Disconnected run `the-lab/real-native-encode-20260729T210501Z` reached the real
+data plane and proved:
+
+- `5400/5400` submitted, received, encoded, and released frames;
+- visible-content validation;
+- zero producer/native drops, pool exhaustion, and pose-generation gaps;
+- all three startup self-tests and exact launchd identity checks; and
+- exact restoration of stock MoltenVK, all three OpenVR DLLs, staged files,
+  launchd state, locks, and processes.
+
+The run remained negative cadence evidence: its final 300-frame window was
+`88.227 FPS`, below the `89.5 FPS` gate. Multiple high-CPU coding, game, and UI
+workloads were active on the host, so this result requires a quiet-host rerun
+and does not identify a rendering or transport regression.
+
+Two connected startup attempts,
+`the-lab/real-native-encode-20260729T210918Z` and
+`the-lab/real-native-encode-20260729T211117Z`, launched the exact AVP app,
+published the expected mDNS identity, negotiated `21-dev12`, connected the
+native sink, created the `1440x1792` HEVC stream, and began tracking. Both were
+stopped by the strict startup timing gate before the full frame run. Exact
+cleanup passed.
+
+The immediate connected retry
+`the-lab/real-native-encode-20260729T211234Z` satisfied the startup admission
+gate and ran for approximately 15 minutes. Its client and sink markers were
+already present in the first post-handshake poll, so the recorded `0 ms` values
+mean same-sample observation rather than precise sub-millisecond timing:
+
+- `81000/81000` frames were submitted, encoded, and transported;
+- the final 300-frame producer window was `90.006 FPS`;
+- producer/native drops, pool exhaustion, and pose-generation gaps were zero;
+- `80999` frames used exact shared poses and one bootstrap frame used fallback;
+- the client created three decoder instances and one matching format with zero
+  decoder errors or resets;
+- post-host observation found stream stop with no stale IPD, origin, or format
+  diagnostics; and
+- the owned AVP client, launchd job, bottle processes, staged files, lock, and
+  stock hashes were restored exactly.
+
+The run's only failed gate was the expected multi-target transition: the hub was
+seen, but Secret Shop and Robot Repair were not selected because no human eyes
+or controller interaction were available. No claim is made for visual clarity,
+smoothness, or PS VR2 Sense gameplay.
+
+After the runner hardening, short connected diagnostic
+`the-lab/real-native-encode-20260729T220040Z` exercised the updated polling path
+against the physical headset with a deliberately reduced frame count and
+transition wait. It encoded and transported `900/900` frames, reached
+`90.006 FPS` in the final 300-frame window, recorded zero producer/native drops
+and pose-generation gaps, created clean decoder/format state, passed post-host
+observation, and restored exact host/device state. Its connection evidence
+labels both client and sink `0 ms` values as same-sample poll observations. The
+diagnostic verdict remained `fail` only because the profile's all-target gate
+still saw the hub alone; it is confirmation of the updated automated path, not
+a substitute for the worn acceptance run.
+
+Verdict:
+`alive` on the beta 4 host/headset pair. Automated rendering, transport, pose,
+cadence, client lifecycle, and cleanup evidence pass. Issue #67 still requires
+one worn run that selects a hub destination, exercises trigger and grip in
+gameplay, confirms clear/smooth output, and repeats exact cleanup.
