@@ -110,3 +110,4 @@ Use this shape:
 - [021 - Runtime profile producer ownership](021-runtime-profile-producer-ownership.md)
 - [022 - Runtime client state and recovery](022-runtime-client-state-recovery.md)
 - [023 - Aircar packaged-runtime qualification](023-aircar-profile-qualification.md)
+- [024 - Google Earth VR legacy classification](024-google-earth-vr-classification.md)
