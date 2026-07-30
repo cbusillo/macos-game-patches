@@ -274,9 +274,9 @@ its signed in-bundle attestation, while independently updating the Windows
 runtime payload. The final sealed artifact is:
 
 ```text
-.code/runtime-aircar-preserved-dev11-84ccf61/
+.code/runtime-aircar-preserved-dev11-a92da5d/
   mac-alvr-runtime-1.0.0-dev11-
-  68cb6fdf9fe3544b385c9570a27b4aa4224b17da25172a49e9993b2cdef0d5f2
+  180f8dd0f73a1290505b89d0f9c27b4169e0c65e2804b39462d68d694b6b4e56
 ```
 
 The artifact preserves bridge tree SHA-256
@@ -293,16 +293,30 @@ ongoing gate to `ALVR_IOSURFACE_REQUIRE_CLIENT`. The connected recovery path is
 unchanged, while disconnected production no longer maps or waits for client
 telemetry.
 
-- Warm smoke
+Commit `a92da5da5d20287b024663ed850a3d21091bf0c3` teaches the runtime
+control plane to derive the same canonical signed owner marker for preserved
+bundles instead of requiring the removed generated-file declaration. The final
+artifact's complete `payload/` tree is byte-for-byte identical to qualified seal
+`68cb6fdf9fe3544b385c9570a27b4aa4224b17da25172a49e9993b2cdef0d5f2`;
+only contract and control-plane provenance changed.
+
+- Payload-equivalent warm smoke
   `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T223917Z`
   passed with `300/300` submitted and encoded frames, `90.000` FPS in the
   steady tail, zero producer/native drops, clean bridge exit, and exact stock
   restoration.
-- Disconnected qualification
+- Payload-equivalent disconnected qualification
   `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T224010Z`
   passed with `5,400/5,400` submitted and encoded frames, `89.979` FPS in the
   steady tail, zero producer/native drops, zero pose-generation gaps, clean
   bridge exit, and exact stock restoration.
+
+Direct final-seal smoke reruns each still submitted and encoded `300/300`
+frames with zero drops, zero pose-generation gaps, clean bridge exit, and exact
+restoration. Their short cadence windows were invalidated by unrelated host
+contention with load average above `47`; they are retained as functional and
+cleanup evidence, not cadence qualification. The longer passing qualification
+above remains applicable because every runtime payload byte is identical.
 
 Hardware-free qualification is complete for the packaged artifact. The
 remaining Aircar closeout is one connected replay from this exact seal when a
@@ -312,8 +326,8 @@ thumbsticks, both triggers, menu/pause/Turbo interactions, and client reentry;
 the title did not emit a haptic command during the observed interval.
 
 Current verdict: physical video, cadence, startup, controller pose, steering,
-thrust, menu, Turbo, reconnect, and exact host/game restoration are proven on
-the retained authorized bridge. Production admission still requires packaging
-the retained signed bundle as a frozen artifact input, then repeating the full
-`81,000`-frame physical profile from that self-contained artifact. Haptic output
-remains unobserved rather than failed.
+thrust, menu, Turbo, reconnect, exact host/game restoration, and frozen
+preserved-bundle packaging are proven on the retained authorized bridge. The
+remaining production-admission step is the full `81,000`-frame connected
+physical profile from final seal `180f8dd0f73a1290505b89d0f9c27b4169e0c65e2804b39462d68d694b6b4e56`.
+Haptic output remains unobserved rather than failed.
