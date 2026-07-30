@@ -1063,6 +1063,94 @@ os.close(descriptor)
         self.assertEqual(report.state, "committed")
         self.assertEqual(report.cleanup_failures, ("undo cleanup failed",))
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS bundle signing and flags")
+    def test_probe_bundle_removal_restores_modes_after_delete_failure(self) -> None:
+        script = REPO_ROOT / "tools" / "run_real_native_iosurface_probe.sh"
+        harness = r'''
+set -euo pipefail
+
+script=$1
+root=$2
+failure_bundle="$root/failure/ALVRMacOSBridge.app"
+success_bundle="$root/success/ALVRMacOSBridge.app"
+locked="$failure_bundle/Contents/Resources/locked.dat"
+locked_macos="$failure_bundle/Contents/MacOS/locked.dat"
+
+cleanup() {
+    chflags nouchg "$locked" 2>/dev/null || true
+    chflags nouchg "$locked_macos" 2>/dev/null || true
+    chmod -R u+w "$root" 2>/dev/null || true
+    rm -rf "$root"
+}
+trap cleanup EXIT
+
+make_bundle() {
+    local bundle=$1
+    mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+    cp /usr/bin/true "$bundle/Contents/MacOS/alvr_macos_bridge"
+    cat >"$bundle/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>alvr_macos_bridge</string>
+<key>CFBundleIdentifier</key><string>com.example.probe-bundle</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+EOF
+    cat >"$bundle/Contents/Resources/runtime-owner.json" <<'EOF'
+{"artifactId":"mac-alvr-runtime","bundleId":"com.example.probe-bundle","ownershipSchemaVersion":1}
+EOF
+    printf locked >"$bundle/Contents/Resources/locked.dat"
+    printf locked >"$bundle/Contents/MacOS/locked.dat"
+    codesign --force --deep --sign - --identifier com.example.probe-bundle \
+        "$bundle" >/dev/null 2>&1
+    find "$bundle" -type d -exec chmod 0555 {} +
+    find "$bundle" -type f ! -path '*/MacOS/alvr_macos_bridge' -exec chmod 0444 {} +
+    chmod 0555 "$bundle/Contents/MacOS/alvr_macos_bridge"
+}
+
+eval "$(awk '/^remove_owned_native_bridge_bundle\(\)/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$script")"
+
+make_bundle "$failure_bundle"
+native_bridge_signature_identifier=$(codesign -dv --verbose=4 \
+    "$failure_bundle/Contents/MacOS/alvr_macos_bridge" 2>&1 | sed -n 's/^Identifier=//p')
+native_bridge_signature_team=$(codesign -dv --verbose=4 \
+    "$failure_bundle/Contents/MacOS/alvr_macos_bridge" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+native_bridge_bundle_id=com.example.probe-bundle
+root_mode=$(stat -f '%Lp' "$failure_bundle")
+contents_mode=$(stat -f '%Lp' "$failure_bundle/Contents")
+macos_mode=$(stat -f '%Lp' "$failure_bundle/Contents/MacOS")
+resources_mode=$(stat -f '%Lp' "$failure_bundle/Contents/Resources")
+chflags uchg "$locked"
+chflags uchg "$locked_macos"
+set +e
+remove_owned_native_bridge_bundle "$failure_bundle" >/dev/null 2>"$root/failure.log"
+failure_status=$?
+set -e
+[[ $failure_status -ne 0 && -d $failure_bundle ]]
+[[ $(stat -f '%Lp' "$failure_bundle") == "$root_mode" ]]
+[[ $(stat -f '%Lp' "$failure_bundle/Contents") == "$contents_mode" ]]
+[[ $(stat -f '%Lp' "$failure_bundle/Contents/MacOS") == "$macos_mode" ]]
+[[ $(stat -f '%Lp' "$failure_bundle/Contents/Resources") == "$resources_mode" ]]
+
+chflags nouchg "$locked"
+chflags nouchg "$locked_macos"
+chmod -R u+w "$failure_bundle"
+rm -rf "$failure_bundle"
+make_bundle "$success_bundle"
+remove_owned_native_bridge_bundle "$success_bundle"
+[[ ! -e $success_bundle && ! -L $success_bundle ]]
+'''
+        CODE_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="probe-bundle-mode-", dir=CODE_ROOT) as root:
+            result = subprocess.run(
+                ["/bin/bash", "-c", harness, "probe-bundle-test", str(script), root],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_cli_json_contract_returns_domain_exit_one(self) -> None:
         report = runtime_install.MutationReport(
             command="install",

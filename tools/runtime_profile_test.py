@@ -136,6 +136,14 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile.validate_profile(profile)
         self.assertEqual(raised.exception.code, "profile.invalid")
 
+    def test_probe_validation_environment_enforces_profile_gates(self) -> None:
+        environment = runtime_profile.probe_validation_environment(self.profile, "physical")
+        self.assertEqual(environment["ALVR_NATIVE_PROBE_FRAMES"], "81000")
+        self.assertEqual(environment["ALVR_NATIVE_PROBE_MAX_NATIVE_DROPS"], "0")
+        self.assertEqual(environment["ALVR_NATIVE_PROBE_MAX_PRODUCER_DROPS"], "0")
+        self.assertEqual(environment["ALVR_NATIVE_PROBE_MIN_PRODUCER_FPS"], "89.5")
+        self.assertEqual(environment["ALVR_NATIVE_PROBE_MAX_PRODUCER_FPS"], "90.5")
+
     def test_projected_payload_substitutes_and_excludes_overlay_files(self) -> None:
         payload = self.root / "payload"
         payload.mkdir()
