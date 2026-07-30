@@ -1063,6 +1063,81 @@ os.close(descriptor)
         self.assertEqual(report.state, "committed")
         self.assertEqual(report.cleanup_failures, ("undo cleanup failed",))
 
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS bundle signing")
+    def test_probe_artifact_staging_preserves_signed_bundle_identity(self) -> None:
+        script = REPO_ROOT / "tools" / "run_real_native_iosurface_probe.sh"
+        harness = r'''
+set -euo pipefail
+
+script=$1
+root=$2
+artifact_native_bridge_bundle="$root/source/ALVRMacOSBridge.app"
+native_bridge_install_staging="$root/staged/native-bridge-install"
+native_bridge_install_program="$native_bridge_install_staging/Contents/MacOS/alvr_macos_bridge"
+native_bridge_bundle="$root/stable/ALVRMacOSBridge.app"
+run_dir="$root/run"
+artifact_mode=1
+
+mkdir -p \
+    "$artifact_native_bridge_bundle/Contents/MacOS" \
+    "$artifact_native_bridge_bundle/Contents/Resources" \
+    "$(dirname "$native_bridge_bundle")" \
+    "$run_dir"
+cp /usr/bin/true "$artifact_native_bridge_bundle/Contents/MacOS/alvr_macos_bridge"
+cat >"$artifact_native_bridge_bundle/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>alvr_macos_bridge</string>
+<key>CFBundleIdentifier</key><string>com.example.probe-bundle</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+EOF
+printf '%s\n' '{"artifactId":"mac-alvr-runtime","bundleId":"com.example.probe-bundle","ownershipSchemaVersion":1}' \
+    >"$artifact_native_bridge_bundle/Contents/Resources/runtime-owner.json"
+printf '%s\n' '{"schemaVersion":1}' \
+    >"$artifact_native_bridge_bundle/Contents/Resources/runtime-sealing.json"
+codesign --force --deep --sign - --identifier com.example.probe-bundle \
+    "$artifact_native_bridge_bundle" >/dev/null 2>&1
+chmod 0555 "$artifact_native_bridge_bundle"
+source_cdhash=$(codesign -dv --verbose=4 "$artifact_native_bridge_bundle" 2>&1 |
+    sed -n 's/^CDHash=//p')
+
+eval "$(awk '/^stage_native_bridge_install_tree\(\)/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$script")"
+eval "$(awk '/^move_staged_native_bridge_bundle\(\)/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$script")"
+eval "$(awk '/^native_bridge_bundle_matches_staging\(\)/ { capture=1 } capture { print } capture && /^}$/ { exit }' "$script")"
+stage_native_bridge_install_tree
+
+codesign --verify --strict --deep "$native_bridge_install_staging"
+staged_cdhash=$(codesign -dv --verbose=4 "$native_bridge_install_staging" 2>&1 |
+    sed -n 's/^CDHash=//p')
+[[ -n $source_cdhash && $staged_cdhash == "$source_cdhash" ]]
+diff -qr "$artifact_native_bridge_bundle" "$native_bridge_install_staging"
+move_staged_native_bridge_bundle
+[[ ! -e $native_bridge_install_staging && -d $native_bridge_bundle ]]
+[[ $(stat -f '%Lp' "$native_bridge_bundle") == 555 ]]
+codesign --verify --strict --deep "$native_bridge_bundle"
+installed_cdhash=$(codesign -dv --verbose=4 "$native_bridge_bundle" 2>&1 |
+    sed -n 's/^CDHash=//p')
+[[ $installed_cdhash == "$source_cdhash" ]]
+diff -qr "$artifact_native_bridge_bundle" "$native_bridge_bundle"
+stage_native_bridge_install_tree
+native_bridge_signature_identifier=$(codesign -dv --verbose=4 \
+    "$native_bridge_install_program" 2>&1 | sed -n 's/^Identifier=//p')
+native_bridge_signature_team=$(codesign -dv --verbose=4 \
+    "$native_bridge_install_program" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+native_bridge_signature_cdhash=$(codesign -dv --verbose=4 \
+    "$native_bridge_install_program" 2>&1 | sed -n 's/^CDHash=//p')
+native_bridge_bundle_matches_staging
+/usr/bin/grep -q '^mode=artifact-preserved$' "$run_dir/native-bridge-codesign.log"
+'''
+        CODE_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="probe-bundle-stage-", dir=CODE_ROOT) as root:
+            subprocess.run(
+                ["bash", "-c", harness, "probe-stage", str(script), root],
+                check=True,
+            )
+
     @unittest.skipUnless(sys.platform == "darwin", "requires macOS bundle signing and flags")
     def test_probe_bundle_removal_restores_modes_after_delete_failure(self) -> None:
         script = REPO_ROOT / "tools" / "run_real_native_iosurface_probe.sh"

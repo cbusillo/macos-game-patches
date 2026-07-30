@@ -553,6 +553,47 @@ bool bridge_mapping_live(AlvrSharedMemory* shm) {
     return header_ready && bridge_ready && !bridge_shutdown && heartbeat_ready;
 }
 
+struct ClientTelemetrySnapshot {
+    uint32_t state = ALVR_CLIENT_STATE_WAITING;
+    uint32_t contract_valid = 0;
+    uint64_t stream_epoch = 0;
+};
+
+bool read_client_telemetry(
+    AlvrSharedMemory* shm,
+    ClientTelemetrySnapshot* snapshot
+) {
+    if (!bridge_mapping_live(shm) || !snapshot) {
+        return false;
+    }
+    auto* sequence = reinterpret_cast<volatile const uint32_t*>(
+        &shm->telemetry_sequence);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t before = *sequence;
+        if ((before & 1U) != 0) {
+            continue;
+        }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        ClientTelemetrySnapshot current;
+        current.state = shm->client_state;
+        current.contract_valid = shm->stream_contract_valid;
+        current.stream_epoch = shm->stream_epoch;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t after = *sequence;
+        if (before == after && (after & 1U) == 0) {
+            *snapshot = current;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool client_contract_ready(const ClientTelemetrySnapshot& snapshot) {
+    return (snapshot.state == ALVR_CLIENT_STATE_CONNECTED
+            || snapshot.state == ALVR_CLIENT_STATE_STREAMING)
+        && snapshot.contract_valid != 0 && snapshot.stream_epoch != 0;
+}
+
 bool wait_for_bridge_ready(AlvrSharedMemory* shm, int timeout_ms) {
     double start = now_ms();
     do {
@@ -680,7 +721,14 @@ public:
     SharedMemorySubmitWriter()
         : m_inner_crop_px(env_u32("ALVR_SHIM_INNER_CROP_PX", 0)),
           m_scale_divisor(env_divisor("ALVR_SHIM_SCALE_DIVISOR", 1)),
-          m_synthetic_frame(env_enabled("ALVR_SHIM_SYNTHETIC_FRAME")) {
+          m_synthetic_frame(env_enabled("ALVR_SHIM_SYNTHETIC_FRAME")),
+          m_require_client(env_enabled("ALVR_IOSURFACE_REQUIRE_CLIENT")) {
+        if (m_require_client) {
+            m_iosurface_proof.setClientReadyFunction(
+                &SharedMemorySubmitWriter::pool_client_ready_callback,
+                this);
+            log_line("iosurface pool client readiness gate enabled");
+        }
         if (m_inner_crop_px != 0) {
             log_line("using inner-eye packing crop=%u px", m_inner_crop_px);
         }
@@ -692,7 +740,10 @@ public:
         }
     }
 
-    ~SharedMemorySubmitWriter() { close(); }
+    ~SharedMemorySubmitWriter() {
+        m_iosurface_proof.shutdown();
+        close();
+    }
 
     void capture_submit(
         vr::EVREye eye,
@@ -770,6 +821,48 @@ public:
     }
 
 private:
+    static bool pool_client_ready_callback(void* context) {
+        return static_cast<SharedMemorySubmitWriter*>(context)
+            ->pool_client_ready();
+    }
+
+    bool pool_client_ready() {
+        if (!m_require_client) {
+            return true;
+        }
+        ClientTelemetrySnapshot snapshot;
+        bool ready = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            ready = ensure_mapped_locked(
+                0, 0, sizeof(AlvrSharedMemory))
+                && read_client_telemetry(m_shm, &snapshot)
+                && client_contract_ready(snapshot);
+        }
+
+        const bool paused = !ready;
+        const bool wasPaused = m_pool_client_paused.exchange(
+            paused, std::memory_order_relaxed);
+        if (paused != wasPaused) {
+            if (paused) {
+                log_line(
+                    "iosurface pool client unavailable state=%u contract=%u "
+                    "stream_epoch=%llu",
+                    snapshot.state,
+                    snapshot.contract_valid,
+                    static_cast<unsigned long long>(snapshot.stream_epoch));
+            } else {
+                log_line(
+                    "iosurface pool client available state=%u contract=%u "
+                    "stream_epoch=%llu",
+                    snapshot.state,
+                    snapshot.contract_valid,
+                    static_cast<unsigned long long>(snapshot.stream_epoch));
+            }
+        }
+        return ready;
+    }
+
     bool submit_bounds_cover_full_texture(
         const vr::VRTextureBounds_t* bounds
     ) const {
@@ -854,6 +947,11 @@ private:
             log_submit_diagnostic(diagnostic, "d3d11-desc", &desc);
         }
         if (!is_bgra_format(desc.Format) && !is_rgba_format(desc.Format)) {
+            return;
+        }
+        if (m_iosurface_proof.started() && !pool_client_ready()) {
+            std::lock_guard<std::mutex> lock(m_pool_pair_mutex);
+            m_pool_pending_left = {};
             return;
         }
 
@@ -1768,11 +1866,13 @@ private:
     uint32_t m_inner_crop_px = 0;
     uint32_t m_scale_divisor = 1;
     bool m_synthetic_frame = false;
+    bool m_require_client = false;
     bool m_logged_pose_contract_sample = false;
     uint64_t m_submit_counter = 0;
     std::atomic<uint64_t> m_submit_diagnostic_counter { 0 };
     std::atomic<uint64_t> m_missing_pool_pose_count { 0 };
     std::atomic<uint64_t> m_pool_pair_drops { 0 };
+    std::atomic<bool> m_pool_client_paused { false };
     uint64_t m_pool_pose_session_id = 0;
     uint64_t m_last_pool_source_pose_generation = 0;
     uint64_t m_pool_pose_generation = 0;

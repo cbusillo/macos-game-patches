@@ -20,6 +20,8 @@ legacy_probe_argument=${ALVR_NATIVE_PROBE_ARGUMENT:-}
 probe_extra_env=${ALVR_NATIVE_PROBE_EXTRA_ENV:-}
 probe_launcher_source=${ALVR_NATIVE_PROBE_LAUNCHER_SOURCE:-}
 runtime_artifact=${ALVR_NATIVE_RUNTIME_ARTIFACT:-}
+external_native_bridge_bundle=${ALVR_NATIVE_BRIDGE_BUNDLE_SOURCE:-}
+windows_source_overlay=${ALVR_NATIVE_PROBE_WINDOWS_SOURCE_OVERLAY:-false}
 runtime_artifact_seal=
 profile_id=${ALVR_NATIVE_PROBE_PROFILE_ID:-}
 profile_sha256=${ALVR_NATIVE_PROBE_PROFILE_SHA256:-}
@@ -43,14 +45,33 @@ dxvk_dxgi="$dxvk_dir/dxgi/dxgi.dll"
 fake_runtime_source="$repo/tools/fake_openvr_real.cpp"
 native_bridge="$alvr_checkout/target/release/alvr_macos_bridge"
 artifact_native_bridge_info=
+artifact_native_bridge_bundle=
+native_bridge_bundle_input=
+native_bridge_bundle_input_kind='source-built'
 artifact_mode=0
 if [[ -n $runtime_artifact ]]; then
+	[[ -z $external_native_bridge_bundle ]] || {
+		echo "ALVR_NATIVE_RUNTIME_ARTIFACT and ALVR_NATIVE_BRIDGE_BUNDLE_SOURCE are mutually exclusive" >&2
+		exit 1
+	}
 	artifact_mode=1
 	patched_moltenvk="$runtime_artifact/payload/macos/libMoltenVK.dylib"
 	dxvk_d3d11="$runtime_artifact/payload/windows/d3d11.dll"
 	dxvk_dxgi="$runtime_artifact/payload/windows/dxgi.dll"
-	native_bridge="$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/MacOS/alvr_macos_bridge"
-	artifact_native_bridge_info="$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/Info.plist"
+	artifact_native_bridge_bundle="$runtime_artifact/payload/macos/ALVRMacOSBridge.app"
+	native_bridge_bundle_input="$artifact_native_bridge_bundle"
+	native_bridge_bundle_input_kind='artifact-preserved'
+	native_bridge="$artifact_native_bridge_bundle/Contents/MacOS/alvr_macos_bridge"
+	artifact_native_bridge_info="$artifact_native_bridge_bundle/Contents/Info.plist"
+elif [[ -n $external_native_bridge_bundle ]]; then
+	[[ $external_native_bridge_bundle == /* ]] || {
+		echo "ALVR_NATIVE_BRIDGE_BUNDLE_SOURCE must be an absolute path" >&2
+		exit 1
+	}
+	native_bridge_bundle_input="$external_native_bridge_bundle"
+	native_bridge_bundle_input_kind='external-preserved'
+	native_bridge="$external_native_bridge_bundle/Contents/MacOS/alvr_macos_bridge"
+	artifact_native_bridge_info="$external_native_bridge_bundle/Contents/Info.plist"
 fi
 native_bridge_codesign_identity='Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)'
 native_bridge_bundle_id=com.alvr.macos-bridge.iosurface
@@ -86,6 +107,8 @@ native_bridge_program="$native_bridge_bundle/Contents/MacOS/alvr_macos_bridge"
 native_bridge_signature_identifier=
 native_bridge_signature_team=
 native_bridge_signature_cdhash=
+artifact_native_bridge_signature_cdhash=
+native_bridge_bundle_reused=0
 oversize_probe="$build_dir/mach_service_oversize_probe"
 wine_bridge_backup="$backup_dir/wine-alvr-iosurface-bridge"
 launch_agent_label=com.alvr.macos-bridge.iosurface
@@ -278,6 +301,17 @@ true | false) ;;
 	exit 1
 	;;
 esac
+case "$windows_source_overlay" in
+true | false) ;;
+*)
+	echo "ALVR_NATIVE_PROBE_WINDOWS_SOURCE_OVERLAY must be true or false" >&2
+	exit 1
+	;;
+esac
+if [[ $windows_source_overlay == true && $artifact_mode -ne 1 ]]; then
+	echo "ALVR_NATIVE_PROBE_WINDOWS_SOURCE_OVERLAY requires ALVR_NATIVE_RUNTIME_ARTIFACT" >&2
+	exit 1
+fi
 [[ $pressure_pause_ms =~ ^[0-9]+$ ]] || {
 	echo "ALVR_NATIVE_PROBE_PRESSURE_PAUSE_MS must be a nonnegative integer" >&2
 	exit 1
@@ -1350,6 +1384,108 @@ remove_owned_native_bridge_bundle() {
 	return 1
 }
 
+stage_native_bridge_install_tree() {
+	local bundle_input=${native_bridge_bundle_input:-}
+	local bundle_input_kind=${native_bridge_bundle_input_kind:-}
+
+	rm -rf "$native_bridge_install_staging"
+	if [[ -z $bundle_input && ${artifact_mode:-0} -eq 1 ]]; then
+		bundle_input=$artifact_native_bridge_bundle
+		bundle_input_kind='artifact-preserved'
+	fi
+	if [[ -n $bundle_input ]]; then
+		mkdir -p "$native_bridge_install_staging"
+		rsync -a "$bundle_input/" "$native_bridge_install_staging/"
+		{
+			printf 'mode=%s\n' "$bundle_input_kind"
+			printf 'source=%s\n' "$bundle_input"
+		} >"$run_dir/native-bridge-codesign.log"
+		return 0
+	fi
+
+	mkdir -p "$native_bridge_install_staging/Contents/MacOS"
+	cp -p "$native_bridge" "$native_bridge_install_program"
+	/usr/bin/plutil -create xml1 "$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleIdentifier -string "$native_bridge_bundle_id" \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleName -string ALVRMacOSBridge \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleDisplayName -string 'ALVR macOS Bridge' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleExecutable -string alvr_macos_bridge \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundlePackageType -string APPL \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleVersion -string 1 \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert LSBackgroundOnly -bool true \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
+		'Connect to the ALVR client on the local network.' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	/usr/bin/plutil -insert NSBonjourServices -json '["_alvr._tcp"]' \
+		"$native_bridge_install_staging/Contents/Info.plist"
+	mkdir -p "$native_bridge_install_staging/Contents/Resources"
+	jq -n --arg bundle "$native_bridge_bundle_id" '
+		{
+			ownershipSchemaVersion: 1,
+			artifactId: "mac-alvr-runtime",
+			bundleId: $bundle
+		}
+	' >"$native_bridge_install_staging/Contents/Resources/runtime-owner.json"
+	chmod u+w "$native_bridge_install_program"
+	codesign --force --deep \
+		--sign "$native_bridge_codesign_identity" \
+		--identifier "$native_bridge_bundle_id" \
+		--timestamp=none \
+		"$native_bridge_install_staging" \
+		>"$run_dir/native-bridge-codesign.log" 2>&1
+}
+
+move_staged_native_bridge_bundle() {
+	local staging_mode
+
+	staging_mode=$(stat -f '%Lp' "$native_bridge_install_staging") || {
+		echo "failed to inspect staged native bridge bundle mode" >&2
+		return 1
+	}
+	chmod u+w "$native_bridge_install_staging" || {
+		echo "failed to make staged native bridge bundle movable" >&2
+		return 1
+	}
+	if ! mv "$native_bridge_install_staging" "$native_bridge_bundle"; then
+		chmod "$staging_mode" "$native_bridge_install_staging" || true
+		echo "failed to move staged native bridge bundle into place" >&2
+		return 1
+	fi
+	chmod "$staging_mode" "$native_bridge_bundle" || {
+		echo "failed to restore installed native bridge bundle mode" >&2
+		return 1
+	}
+}
+
+native_bridge_bundle_matches_staging() {
+	local actual_cdhash
+	local actual_identifier
+	local actual_team
+	local actual_program="$native_bridge_bundle/Contents/MacOS/alvr_macos_bridge"
+
+	[[ -d $native_bridge_bundle && ! -L $native_bridge_bundle ]] || return 1
+	codesign --verify --strict --deep "$native_bridge_bundle" || return 1
+	actual_identifier=$(codesign -dv --verbose=4 "$actual_program" 2>&1 |
+		sed -n 's/^Identifier=//p')
+	actual_team=$(codesign -dv --verbose=4 "$actual_program" 2>&1 |
+		sed -n 's/^TeamIdentifier=//p')
+	actual_cdhash=$(codesign -dv --verbose=4 "$actual_program" 2>&1 |
+		sed -n 's/^CDHash=//p')
+	[[ $actual_identifier == "$native_bridge_signature_identifier" &&
+		$actual_team == "$native_bridge_signature_team" &&
+		$actual_cdhash == "$native_bridge_signature_cdhash" ]] || return 1
+	diff -qr "$native_bridge_install_staging" "$native_bridge_bundle"
+}
+
 probe_owns_stale_launch_agent_state() {
 	local state_file=$1
 	local legacy_native_bridge_bundle
@@ -1850,6 +1986,13 @@ required_paths=(
 	"$wineserver"
 	"$game_executable"
 )
+if [[ -n $native_bridge_bundle_input ]]; then
+	required_paths+=(
+		"$native_bridge_bundle_input"
+		"$native_bridge"
+		"$artifact_native_bridge_info"
+	)
+fi
 if [[ $artifact_mode -eq 1 ]]; then
 	required_paths+=(
 		"$runtime_artifact/provenance/artifact.json"
@@ -1857,8 +2000,6 @@ if [[ $artifact_mode -eq 1 ]]; then
 		"$runtime_artifact/payload/windows/openvr_api.real.dll"
 		"$runtime_artifact/payload/windows/alvr_iosurface_bridge.dll"
 		"$runtime_artifact/payload/unix/alvr_iosurface_bridge.so"
-		"$native_bridge"
-		"$artifact_native_bridge_info"
 	)
 else
 	required_paths+=(
@@ -1969,15 +2110,20 @@ elif [[ -d $alvr_bridge_root ]]; then
 	rsync -a "$alvr_bridge_root/" "$alvr_runtime_root/"
 fi
 
-if [[ $artifact_mode -eq 0 ]]; then
+if [[ $artifact_mode -eq 0 && -z $native_bridge_bundle_input ]]; then
 	cargo build \
 		--manifest-path "$alvr_checkout/Cargo.toml" \
 		-p alvr_macos_bridge \
 		--release \
 		>"$run_dir/alvr-build.log" 2>&1
 else
-	printf 'artifact=%s\nseal=%s\n' "$runtime_artifact" "$runtime_artifact_seal" \
-		>"$run_dir/alvr-build.log"
+	{
+		printf 'mode=%s\n' "$native_bridge_bundle_input_kind"
+		printf 'source=%s\n' "$native_bridge_bundle_input"
+		if [[ $artifact_mode -eq 1 ]]; then
+			printf 'artifact=%s\nseal=%s\n' "$runtime_artifact" "$runtime_artifact_seal"
+		fi
+	} >"$run_dir/alvr-build.log"
 fi
 for legacy_native_bridge_bundle in "${legacy_native_bridge_bundles[@]}"; do
 	if [[ -d $legacy_native_bridge_bundle ]]; then
@@ -1986,55 +2132,7 @@ for legacy_native_bridge_bundle in "${legacy_native_bridge_bundles[@]}"; do
 		rm -rf "$legacy_native_bridge_bundle"
 	fi
 done
-rm -rf "$native_bridge_install_staging"
-mkdir -p "$native_bridge_install_staging/Contents/MacOS"
-cp -p "$native_bridge" "$native_bridge_install_program"
-if [[ $artifact_mode -eq 1 ]]; then
-	cp -p "$artifact_native_bridge_info" \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	mkdir -p "$native_bridge_install_staging/Contents/Resources"
-	cp -p \
-		"$runtime_artifact/payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json" \
-		"$native_bridge_install_staging/Contents/Resources/runtime-owner.json"
-else
-	/usr/bin/plutil -create xml1 "$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleIdentifier -string "$native_bridge_bundle_id" \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleName -string ALVRMacOSBridge \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleDisplayName -string 'ALVR macOS Bridge' \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleExecutable -string alvr_macos_bridge \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundlePackageType -string APPL \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleVersion -string 1 \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert LSBackgroundOnly -bool true \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
-		'Connect to the ALVR client on the local network.' \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert NSBonjourServices -json '["_alvr._tcp"]' \
-		"$native_bridge_install_staging/Contents/Info.plist"
-	mkdir -p "$native_bridge_install_staging/Contents/Resources"
-	jq -n --arg bundle "$native_bridge_bundle_id" '
-		{
-			ownershipSchemaVersion: 1,
-			artifactId: "mac-alvr-runtime",
-			bundleId: $bundle
-		}
-	' >"$native_bridge_install_staging/Contents/Resources/runtime-owner.json"
-fi
-chmod u+w "$native_bridge_install_program"
-codesign --force --deep \
-	--sign "$native_bridge_codesign_identity" \
-	--identifier "$native_bridge_bundle_id" \
-	--timestamp=none \
-	"$native_bridge_install_staging" \
-	>"$run_dir/native-bridge-codesign.log" 2>&1
+stage_native_bridge_install_tree
 codesign --verify --strict --deep "$native_bridge_install_staging"
 native_bridge_signature_identifier=$(codesign -dv --verbose=4 "$native_bridge_install_program" 2>&1 |
 	sed -n 's/^Identifier=//p')
@@ -2048,11 +2146,36 @@ native_bridge_signature_cdhash=$(codesign -dv --verbose=4 "$native_bridge_instal
 	echo "native bridge stable code-signing identity is incomplete" >&2
 	exit 1
 }
-remove_owned_native_bridge_bundle "$native_bridge_bundle"
-mv "$native_bridge_install_staging" "$native_bridge_bundle"
+if [[ -n $native_bridge_bundle_input ]]; then
+	artifact_native_bridge_signature_cdhash=$(codesign -dv --verbose=4 \
+		"$native_bridge_bundle_input" 2>&1 | sed -n 's/^CDHash=//p')
+	[[ -n $artifact_native_bridge_signature_cdhash &&
+		$native_bridge_signature_cdhash == "$artifact_native_bridge_signature_cdhash" ]] || {
+		echo "staged native bridge changed the preserved code identity" >&2
+		exit 1
+	}
+	diff -qr "$native_bridge_bundle_input" "$native_bridge_install_staging" \
+		>"$run_dir/native-bridge-artifact-diff.txt" || {
+		echo "staged native bridge differs from the preserved source bundle" >&2
+		exit 1
+	}
+fi
+if native_bridge_bundle_matches_staging \
+	>"$run_dir/native-bridge-existing-diff.txt" 2>&1; then
+	native_bridge_bundle_reused=1
+	remove_owned_native_bridge_bundle "$native_bridge_install_staging"
+else
+	remove_owned_native_bridge_bundle "$native_bridge_bundle"
+	move_staged_native_bridge_bundle
+fi
 codesign --verify --strict --deep "$native_bridge_bundle"
-"$launch_services_register" -f "$native_bridge_bundle" \
-	>"$run_dir/native-bridge-register.log" 2>&1
+if [[ $native_bridge_bundle_reused -eq 1 ]]; then
+	printf 'mode=reused-existing-registration\n' \
+		>"$run_dir/native-bridge-register.log"
+else
+	"$launch_services_register" -f "$native_bridge_bundle" \
+		>"$run_dir/native-bridge-register.log" 2>&1
+fi
 "$launch_services_register" -dump 2>/dev/null | awk \
 	-v identifier="$native_bridge_bundle_id" '
 		/^--------------------------------------------------------------------------------$/ {
@@ -2098,9 +2221,33 @@ if [[ $artifact_mode -eq 1 ]]; then
 		"$bridge_root/x86_64-windows/alvr_iosurface_bridge.dll"
 	cp -p "$runtime_artifact/payload/unix/alvr_iosurface_bridge.so" \
 		"$bridge_root/x86_64-unix/alvr_iosurface_bridge.so"
+	if [[ $windows_source_overlay == true ]]; then
+		x86_64-w64-mingw32-g++ \
+			-O2 -g -std=c++20 -static -static-libgcc -static-libstdc++ -shared \
+			"$repo/tools/openvr_submit_shim.cpp" \
+			"$repo/tools/dxvk_iosurface_submit_proof.cpp" \
+			-I"$alvr_checkout/openvr/headers" \
+			-I"$alvr_checkout/alvr/server_openvr/cpp" \
+			-I/opt/homebrew/include \
+			-ld3d11 -ld3d10 -ldxgi -lole32 \
+			-Wl,--out-implib,"$build_dir/openvr_api_shim.lib" \
+			-o "$shim" \
+			>"$run_dir/shim-build.log" 2>&1
+		x86_64-w64-mingw32-g++ \
+			-O2 -std=c++17 -static -static-libgcc -static-libstdc++ -shared \
+			"$fake_runtime_source" \
+			-I"$alvr_checkout/openvr/headers" \
+			-I"$alvr_checkout/alvr/server_openvr/cpp" \
+			-o "$fake_runtime" \
+			>"$run_dir/fake-runtime-build.log" 2>&1
+	else
+		printf 'artifact payload; no source build\n' >"$run_dir/shim-build.log"
+		printf 'artifact payload; no source build\n' >"$run_dir/fake-runtime-build.log"
+	fi
 	{
 		printf 'artifact=%s\n' "$runtime_artifact"
 		printf 'seal=%s\n' "$runtime_artifact_seal"
+		printf 'windows_source_overlay=%s\n' "$windows_source_overlay"
 		for file in \
 			"$patched_moltenvk" \
 			"$dxvk_d3d11" \
@@ -2113,8 +2260,6 @@ if [[ $artifact_mode -eq 1 ]]; then
 			printf '%s  %s\n' "$(hash_file "$file")" "$file"
 		done
 	} >"$run_dir/artifact-payload.txt"
-	printf 'artifact payload; no source build\n' >"$run_dir/shim-build.log"
-	printf 'artifact payload; no source build\n' >"$run_dir/fake-runtime-build.log"
 	printf 'artifact payload; no source build\n' >"$run_dir/bridge-build.log"
 else
 	x86_64-w64-mingw32-g++ \
@@ -2215,6 +2360,9 @@ if [[ $native_connect == true ]]; then
 fi
 
 cx_env="CX_GRAPHICS_BACKEND=dxvk WINEDLLPATH=$bridge_root WINEDLLOVERRIDES=d3d11,dxgi=n DXVK_LOG_LEVEL=debug DXVK_STATE_CACHE=0 MVK_CONFIG_LOG_LEVEL=3 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 MVK_CONFIG_SHADER_DUMP_DIR=$run_dir/mvk-shaders ALVR_IOSURFACE_POOL_SERVICE=$service_name ALVR_IOSURFACE_POOL_NONCE=$nonce ALVR_IOSURFACE_SOURCE_WIDTH=$source_width ALVR_IOSURFACE_SOURCE_HEIGHT=$source_height ALVR_MOLTENVK_PATH=$moltenvk WINEDEBUG=-all,+loaddll"
+if [[ $native_connect == true ]]; then
+	cx_env+=" ALVR_IOSURFACE_REQUIRE_CLIENT=1 ALVR_IOSURFACE_CLIENT_TIMEOUT_MS=$((startup_timeout_seconds * 1000))"
+fi
 if [[ -n $probe_extra_env ]]; then
 	cx_env+=" $probe_extra_env"
 fi
@@ -2261,11 +2409,16 @@ write_launch_agent_plist
 	printf 'launch_agent_evidence=%s\n' "$launch_agent_evidence"
 	printf 'nonce=%s\n' "$nonce"
 	printf 'native_bridge_codesign_identity=%s\n' "$native_bridge_codesign_identity"
+	printf 'native_bridge_bundle_input=%s\n' "$native_bridge_bundle_input"
+	printf 'native_bridge_bundle_input_kind=%s\n' "$native_bridge_bundle_input_kind"
 	printf 'native_bridge_bundle=%s\n' "$native_bridge_bundle"
 	printf 'native_bridge_program=%s\n' "$native_bridge_program"
 	printf 'native_bridge_signature_identifier=%s\n' "$native_bridge_signature_identifier"
 	printf 'native_bridge_signature_team=%s\n' "$native_bridge_signature_team"
 	printf 'native_bridge_signature_cdhash=%s\n' "$native_bridge_signature_cdhash"
+	printf 'artifact_native_bridge_signature_cdhash=%s\n' \
+		"$artifact_native_bridge_signature_cdhash"
+	printf 'native_bridge_bundle_reused=%s\n' "$native_bridge_bundle_reused"
 	printf 'moltenvk_signature_identifier=%s\n' "$moltenvk_signature_identifier"
 	printf 'moltenvk_signature_cdhash=%s\n' "$moltenvk_signature_cdhash"
 	printf 'moltenvk_prewarm_seconds=%s\n' "$moltenvk_prewarm_seconds"
@@ -2273,6 +2426,7 @@ write_launch_agent_plist
 	printf 'desktop_explorer_pid=%s\n' "$desktop_explorer_pid"
 	printf 'native_frames=%s\n' "$native_frames"
 	printf 'native_connect=%s\n' "$native_connect"
+	printf 'windows_source_overlay=%s\n' "$windows_source_overlay"
 	printf 'require_visible_content=%s\n' "$require_visible_content"
 	printf 'pressure_pause_ms=%s\n' "$pressure_pause_ms"
 	printf 'fake_pacing_mode=%s\n' "$fake_pacing_mode"
