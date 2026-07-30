@@ -364,6 +364,34 @@ def mutable_state_item(manifest: dict[str, Any], item_id: str) -> dict[str, Any]
     raise ControlError("repository.contract", "Runtime manifest is missing mutable state", itemId=item_id)
 
 
+def native_bundle_owner_content(manifest: dict[str, Any]) -> dict[str, Any]:
+    owner_item = next(
+        (item for item in manifest["generatedFiles"] if item["id"] == "native_bundle_owner"),
+        None,
+    )
+    if owner_item is not None and isinstance(owner_item.get("content"), dict):
+        return owner_item["content"]
+
+    sealing = manifest.get("sealing")
+    artifact = manifest.get("artifact")
+    if (
+        not isinstance(sealing, dict)
+        or sealing.get("mode") != "preserved-bundle"
+        or not isinstance(sealing.get("bundleId"), str)
+        or not isinstance(artifact, dict)
+        or not isinstance(artifact.get("id"), str)
+    ):
+        raise ControlError(
+            "repository.contract",
+            "Runtime manifest is missing the native bundle ownership marker",
+        )
+    return {
+        "artifactId": artifact["id"],
+        "bundleId": sealing["bundleId"],
+        "ownershipSchemaVersion": 1,
+    }
+
+
 def resolve_runtime_paths(manifest: dict[str, Any], bindings: dict[str, str]) -> RuntimePaths:
     def path_for(item_id: str) -> pathlib.Path:
         item = mutable_state_item(manifest, item_id)
@@ -394,15 +422,7 @@ def resolve_runtime_paths(manifest: dict[str, Any], bindings: dict[str, str]) ->
             launchdLabel=service_label,
             machService=mach_service,
         )
-    owner_item = next(
-        (item for item in manifest["generatedFiles"] if item["id"] == "native_bundle_owner"),
-        None,
-    )
-    if owner_item is None or not isinstance(owner_item.get("content"), dict):
-        raise ControlError(
-            "repository.contract",
-            "Runtime manifest is missing the native bundle ownership marker",
-        )
+    owner_content = native_bundle_owner_content(manifest)
     paths = RuntimePaths(
         state_root=state_root,
         lock_path=lock_path,
@@ -411,7 +431,7 @@ def resolve_runtime_paths(manifest: dict[str, Any], bindings: dict[str, str]) ->
         bridge_bundle=bridge_bundle,
         bridge_program=bridge_bundle / "Contents" / "MacOS" / "alvr_macos_bridge",
         bridge_owner_marker=bridge_bundle / "Contents" / "Resources" / "runtime-owner.json",
-        bridge_owner_content=owner_item["content"],
+        bridge_owner_content=owner_content,
         service_domain=service_domain,
         service_label=service_label,
         service_target=target,

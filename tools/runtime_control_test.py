@@ -306,6 +306,16 @@ class LifecycleTests(unittest.TestCase):
         self.repo_root_patch.stop()
         self.temp.cleanup()
 
+    def test_preserved_bundle_owner_content_is_derived_from_contract(self) -> None:
+        self.assertEqual(
+            self.paths.bridge_owner_content,
+            {
+                "artifactId": "mac-alvr-runtime",
+                "bundleId": "com.alvr.macos-bridge.iosurface",
+                "ownershipSchemaVersion": 1,
+            },
+        )
+
     def create_bridge(self) -> None:
         self.paths.bridge_program.parent.mkdir(parents=True, exist_ok=True)
         self.paths.bridge_program.write_bytes(b"fixture bridge")
