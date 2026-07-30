@@ -1276,6 +1276,20 @@ def ordered_targets(profile: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(targets, key=lambda target: target["id"] != entrypoint)
 
 
+def probe_validation_environment(profile: dict[str, Any], mode: str) -> dict[str, str]:
+    validation = profile["validation"]
+    frame_counts = validation["frameCounts"]
+    cadence = validation["cadence"]
+    drops = validation["drops"]
+    return {
+        "ALVR_NATIVE_PROBE_FRAMES": str(frame_counts[mode]),
+        "ALVR_NATIVE_PROBE_MAX_NATIVE_DROPS": str(drops["native"]),
+        "ALVR_NATIVE_PROBE_MAX_PRODUCER_DROPS": str(drops["producer"]),
+        "ALVR_NATIVE_PROBE_MAX_PRODUCER_FPS": str(cadence["maximumFps"]),
+        "ALVR_NATIVE_PROBE_MIN_PRODUCER_FPS": str(cadence["minimumFps"]),
+    }
+
+
 def preflight(
     loaded: LoadedProfile,
     artifact: pathlib.Path,
@@ -1383,7 +1397,7 @@ def preflight(
             {
                 path
                 for directory in log_directories
-                for pattern in ("*_d3d11.log", "*_dxgi.log")
+                for pattern in ("*_d3d9.log", "*_d3d11.log", "*_dxgi.log")
                 for path in directory.glob(pattern)
             }
         )
@@ -1440,8 +1454,6 @@ def preflight(
 
     entrypoint = resolved_targets[0]
     geometry = profile["geometry"]
-    frame_counts = profile["validation"]["frameCounts"]
-    cadence = profile["validation"]["cadence"]
     environment = {
         "ALVR_NATIVE_RUNTIME_ARTIFACT": str(artifact_path),
         "ALVR_NATIVE_PROBE_APP_NAME": profile["name"],
@@ -1456,12 +1468,9 @@ def preflight(
         "ALVR_NATIVE_PROBE_EXTRA_ENV": " ".join(
             f"{name}={value}" for name, value in sorted(profile["launch"]["environment"].items())
         ),
-        "ALVR_NATIVE_PROBE_FRAMES": str(frame_counts[mode]),
         "ALVR_NATIVE_PROBE_GAME_DIR": entrypoint["graphicsDirectory"],
         "ALVR_NATIVE_PROBE_GAME_DIRS": ":".join(target["graphicsDirectory"] for target in resolved_targets),
         "ALVR_NATIVE_PROBE_LAUNCHER_SOURCE": str(loaded.path.relative_to(REPO_ROOT)),
-        "ALVR_NATIVE_PROBE_MAX_PRODUCER_FPS": str(cadence["maximumFps"]),
-        "ALVR_NATIVE_PROBE_MIN_PRODUCER_FPS": str(cadence["minimumFps"]),
         "ALVR_NATIVE_PROBE_OPENVR_DIR": entrypoint["openvrDirectory"],
         "ALVR_NATIVE_PROBE_OPENVR_DIRS": ":".join(target["openvrDirectory"] for target in resolved_targets),
         "ALVR_NATIVE_PROBE_OUTPUT_HEIGHT": str(geometry["targetStereo"]["height"]),
@@ -1489,6 +1498,7 @@ def preflight(
         "ALVR_NATIVE_PROBE_TRANSITION_TIMEOUT_SECONDS": str(profile["launch"]["transitionTimeoutSeconds"]),
         "ALVR_NATIVE_PROBE_WORKDIR": entrypoint["workingDirectory"],
     }
+    environment.update(probe_validation_environment(profile, mode))
     environment["ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITIONS"] = ""
 
     return {
