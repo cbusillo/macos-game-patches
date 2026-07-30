@@ -225,3 +225,51 @@ limits into the real runner, and the runner includes them in its common verdict
 gate. The earlier connected runs therefore remain useful compatibility evidence
 but cannot pass the physical admission gate with their startup `not_ready`
 drops.
+
+### Identity-Preserved Windows Candidate
+
+The follow-up kept the already-authorized bridge bundle byte-for-byte at
+Developer ID CDHash `1731a67fa327ca7c1576f63a084cc3b39f095b41` and rebuilt
+only the Windows OpenVR sidecar from the current source. This separated the shared
+startup/controller repairs from macOS Local Network consent and proved that a
+runtime payload update does not require a bridge identity change.
+
+- Physical run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T195747Z`
+  passed with `5,400/5,400` submitted, encoded, and transported frames,
+  `89.682` FPS in the steady tail, zero producer/native drops, zero pose gaps,
+  no decoder errors or resets, exact client stop, and exact host/game cleanup.
+  The producer waited for a valid connected stream contract before releasing
+  production frames, eliminating all startup `not_ready` drops.
+- Worn controller run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T202919Z`
+  proved both PS VR2 Sense controller poses and live Aircar actions. Both
+  thumbsticks produced two-axis values, both triggers produced analog values,
+  and the menu, pause-music, Turbo, and menu-interaction actions produced
+  digital transitions through the exact stable handles recorded in the Aircar
+  profile. The user confirmed the controls reached the game. Bilateral haptic
+  handles resolved, but the title did not issue a haptic command during this
+  interval.
+
+The worn run also supplied a recovery boundary: visionOS backgrounded the
+client after a system-level button press while Aircar continued running. The
+client re-entered on stream epoch `3`. The startup-only candidate sent `34`
+frames while the client was unavailable; the ongoing producer gate reduced the
+same forced terminate/relaunch case to one boundary `not_ready` frame, zero
+producer steady-state drops, and automatic resume on epoch `3` in
+`.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T205938Z`.
+The remaining boundary frame is the event that lets the retained bridge observe
+the disconnect; eliminating it would require a bridge-side protocol change and
+therefore a new consent-qualified code identity.
+
+The user-induced replacement client PID was intentionally not terminated by
+cleanup because it no longer matched the runner-owned PID. Host/game files,
+launchd state, shared memory, and stock DLLs still restored exactly. This is a
+safe identity refusal, not leaked host state.
+
+Current verdict: physical video, cadence, startup, controller pose, steering,
+thrust, menu, Turbo, reconnect, and exact host/game restoration are proven on
+the retained authorized bridge. Production admission still requires packaging
+the retained signed bundle as a frozen artifact input, then repeating the full
+`81,000`-frame physical profile from that self-contained artifact. Haptic output
+remains unobserved rather than failed.

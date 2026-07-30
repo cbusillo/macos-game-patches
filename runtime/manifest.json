@@ -13,26 +13,12 @@
       "--bindings",
       ".code/runtime-bindings.json"
     ],
-    "description": "Deterministic payload with a separate Developer ID final-sealing phase for the owner-operated Mac ALVR runtime",
+    "description": "Deterministic payload with a preserved Developer ID bridge bundle for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev10"
+    "version": "1.0.0-dev11"
   },
   "artifacts": [
-    {
-      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/MacOS/alvr_macos_bridge",
-      "binary": {
-        "architectures": ["arm64"],
-        "format": "mach-o",
-        "kind": "executable"
-      },
-      "id": "native_bridge",
-      "mode": "0555",
-      "path": "${ALVR_CHECKOUT}/target/release/alvr_macos_bridge",
-      "recipe": "cargo build --manifest-path ../alvr/Cargo.toml -p alvr_macos_bridge --release",
-      "signature": "require-lock",
-      "supplyClass": "pinned-git-build"
-    },
     {
       "artifactPath": "payload/macos/libMoltenVK.dylib",
       "binary": {
@@ -139,12 +125,6 @@
   ],
   "bindings": [
     {
-      "default": "${REPO_ROOT}/../alvr",
-      "name": "ALVR_CHECKOUT",
-      "phases": ["validate", "build"],
-      "required": true
-    },
-    {
       "default": "${REPO_ROOT}/../alvr-visionos",
       "name": "ALVR_VISIONOS_CHECKOUT",
       "phases": ["validate", "build"],
@@ -203,24 +183,6 @@
     }
   ],
   "generatedFiles": [
-    {
-      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Info.plist",
-      "content": {
-        "CFBundleDisplayName": "ALVR macOS Bridge",
-        "CFBundleExecutable": "alvr_macos_bridge",
-        "CFBundleIdentifier": "com.alvr.macos-bridge.iosurface",
-        "CFBundleName": "ALVRMacOSBridge",
-        "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "1.0",
-        "CFBundleVersion": "1",
-        "LSBackgroundOnly": true,
-        "NSBonjourServices": ["_alvr._tcp"],
-        "NSLocalNetworkUsageDescription": "Connect to the ALVR client on the local network."
-      },
-      "format": "plist",
-      "id": "bridge_info_plist",
-      "mode": "0444"
-    },
     {
       "artifactPath": "config/runtime-defaults.json",
       "content": {
@@ -289,25 +251,14 @@
         "bundleId": "com.alvr.macos-bridge.iosurface",
         "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
         "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
-        "mode": "separate-step",
-        "performedBy": "macOS integration issue #62",
+        "mode": "preserved-bundle",
+        "performedBy": "Aircar compatibility issue #101",
         "signedAttestationPath": "Contents/Resources/runtime-sealing.json",
         "teamId": "MM5YXC7T6E",
         "timestamp": false
       },
       "format": "json",
       "id": "sealing_boundary",
-      "mode": "0444"
-    },
-    {
-      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json",
-      "content": {
-        "artifactId": "mac-alvr-runtime",
-        "bundleId": "com.alvr.macos-bridge.iosurface",
-        "ownershipSchemaVersion": 1
-      },
-      "format": "json",
-      "id": "native_bundle_owner",
       "mode": "0444"
     }
   ],
@@ -318,13 +269,6 @@
       "path": "${REPO_ROOT}",
       "remote": "https://github.com/cbusillo/macos-game-patches.git",
       "revision": "self"
-    },
-    {
-      "cleanPolicy": "all",
-      "id": "alvr_host",
-      "path": "${ALVR_CHECKOUT}",
-      "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "c798cdd30cd4ae6ba83bc97e977f420e53e740a4"
     },
     {
       "cleanPolicy": "all",
@@ -738,12 +682,23 @@
   "schemaVersion": 1,
   "sealing": {
     "attestationPath": "Contents/Resources/runtime-sealing.json",
+    "attestationSha256": "9a2bd92ddbb4fa40cb52bb38902a9a8829e286e59064fa82b033f3bc7ec0e11d",
     "bundlePath": "payload/macos/ALVRMacOSBridge.app",
     "bundleId": "com.alvr.macos-bridge.iosurface",
+    "bundleTreeSha256": "2f42d727ba5e8588a0c6434761a2460887bb09e728c5b30492e4dc88c691ca24",
     "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
-    "executableArtifactId": "native_bridge",
+    "executablePath": "Contents/MacOS/alvr_macos_bridge",
     "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
-    "mode": "separate-step",
+    "mode": "preserved-bundle",
+    "sealedExecutableSha256": "c456a91b8d4d352e1d3e37e4fd894ef59b96cfa1c68cdb6dbf4e5479728151b4",
+    "signature": {
+      "authority": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
+      "cdhash": "1731a67fa327ca7c1576f63a084cc3b39f095b41",
+      "identifier": "com.alvr.macos-bridge.iosurface",
+      "kind": "developer-id",
+      "teamIdentifier": "MM5YXC7T6E",
+      "timestamp": false
+    },
     "teamId": "MM5YXC7T6E",
     "timestamp": false
   },
@@ -757,7 +712,7 @@
     {
       "id": "openvr_shim_source",
       "path": "${REPO_ROOT}/tools/openvr_submit_shim.cpp",
-      "sha256": "39dcb706b74cedca784549eca4a32766ec28b154b8769c678f424d38f8803ebb",
+      "sha256": "8fa93ceb64799e56a6c54d782cec1c70b7f72868074c1b410b60b876b04ffc18",
       "supplyClass": "repo-source"
     },
     {
@@ -769,13 +724,13 @@
     {
       "id": "dxvk_submit_source",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.cpp",
-      "sha256": "7d8bfb4ec43eafd30ed2fa70f11ae3663cab451d55af45d05bec243ac7dc4edf",
+      "sha256": "63e239b862b711875ef294e1986a8f5ec03742a6c3ad5cca970c855a7ffbdbfd",
       "supplyClass": "repo-source"
     },
     {
       "id": "dxvk_submit_header",
       "path": "${REPO_ROOT}/tools/dxvk_iosurface_submit_proof.h",
-      "sha256": "e1e53889c25d16b6f04a2a50f4c4a0c68bebd4f994e3b033ab4bcb032dd6bff9",
+      "sha256": "67140b8ece0b51b4dbfeb7d75d5cebdd4fa23193d7d4b723c0bbfe1e0b32cab4",
       "supplyClass": "repo-source"
     },
     {
@@ -847,13 +802,13 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "04aad1bd10605ee7ba1efe5c7c6a11515bb39630e3d4413e0ea650164810b964",
+      "sha256": "b7afa4e04622c8558dffc6b555662c4e31215efddcb75b17f64a5597b6c184c2",
       "supplyClass": "repo-source"
     },
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "ec0e022aa4a4ca19f3f3c4b8150eed0da59fb0341818b0eeec992582c8bba503",
+      "sha256": "6124ad9132c892973dafffe4d7791c0de3fe0d90c299ea4443c40e062621b605",
       "supplyClass": "repo-source"
     },
     {

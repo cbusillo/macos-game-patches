@@ -15,6 +15,7 @@
 namespace alvr_probe {
 
 using SubmitProofLogFunction = void (*)(const char *, ...);
+using SubmitProofClientReadyFunction = bool (*)(void *);
 
 struct SubmitProofSample {
     uint32_t x = 0;
@@ -54,6 +55,10 @@ class DxvkIosurfaceSubmitProof {
 
     bool pending();
     bool usesPool();
+    bool started();
+    void setClientReadyFunction(
+        SubmitProofClientReadyFunction function,
+        void *context);
     void shutdown();
 
     void capturePoolFrame(ID3D11Texture2D *sourceTexture,
@@ -122,6 +127,8 @@ class DxvkIosurfaceSubmitProof {
     uint32_t poolWidth_ = 0;
     uint32_t poolHeight_ = 0;
     std::string poolService_;
+    SubmitProofClientReadyFunction clientReadyFunction_ = nullptr;
+    void *clientReadyContext_ = nullptr;
     std::shared_ptr<PoolState> poolState_;
     std::shared_ptr<PoolInitializationState> poolInitialization_;
 };

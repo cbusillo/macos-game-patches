@@ -32,7 +32,13 @@ ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 VERSION_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+){2}(?:-[a-z0-9][a-z0-9.-]*)?$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CDHASH_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MODE_PATTERN = re.compile(r"^0[0-7]{3}$")
+IMMUTABLE_FILE_FLAGS = getattr(stat, "UF_IMMUTABLE", 0) | getattr(
+    stat,
+    "SF_IMMUTABLE",
+    0,
+)
 SOURCE_SUPPLY_CLASSES = {"repo-patch", "repo-source"}
 ARTIFACT_SUPPLY_CLASSES = {
     "opaque-local-build",
@@ -96,6 +102,7 @@ SELF_REFERENTIAL_PROVENANCE = {
 }
 SEALING_PROVENANCE_PATH = pathlib.PurePosixPath("provenance/sealing.json")
 ARTIFACT_STAGES = {"unsealed", "sealed"}
+SEALING_MODES = {"separate-step", "preserved-bundle"}
 
 
 class ArtifactError(Exception):
@@ -137,7 +144,7 @@ def sha256_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def canonical_tree_sha256(root: pathlib.Path) -> str:
+def canonical_tree_records(root: pathlib.Path) -> list[dict[str, Any]]:
     reject_symlink_components(root)
     if not root.is_dir():
         raise ArtifactError(
@@ -145,16 +152,33 @@ def canonical_tree_sha256(root: pathlib.Path) -> str:
             "Tree digest requires a directory",
             path=str(root),
         )
+    root_metadata = root.lstat()
+    root_immutable_flags = getattr(root_metadata, "st_flags", 0) & IMMUTABLE_FILE_FLAGS
+    if root_immutable_flags:
+        raise ArtifactError(
+            "path.flags",
+            "Tree contains an immutable filesystem entry",
+            path=str(root),
+            flags=root_immutable_flags,
+        )
     entries: list[dict[str, Any]] = [
         {
             "path": ".",
             "type": "directory",
-            "mode": stat.S_IMODE(root.lstat().st_mode),
+            "mode": stat.S_IMODE(root_metadata.st_mode),
         }
     ]
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         metadata = path.lstat()
         relative = path.relative_to(root).as_posix()
+        immutable_flags = getattr(metadata, "st_flags", 0) & IMMUTABLE_FILE_FLAGS
+        if immutable_flags:
+            raise ArtifactError(
+                "path.flags",
+                "Tree contains an immutable filesystem entry",
+                path=str(path),
+                flags=immutable_flags,
+            )
         if stat.S_ISLNK(metadata.st_mode):
             raise ArtifactError("path.symlink", "Tree contains a symlink", path=str(path))
         if stat.S_ISDIR(metadata.st_mode):
@@ -181,6 +205,11 @@ def canonical_tree_sha256(root: pathlib.Path) -> str:
                 "Tree contains an unsupported filesystem entry",
                 path=str(path),
             )
+    return entries
+
+
+def canonical_tree_sha256(root: pathlib.Path) -> str:
+    entries = canonical_tree_records(root)
     return sha256_bytes(canonical_json_bytes(entries))
 
 
@@ -284,6 +313,13 @@ def require_sha256(value: Any, location: str) -> str:
     digest = require_string(value, location)
     if not SHA256_PATTERN.fullmatch(digest):
         raise ArtifactError("manifest.invalid", "Expected a lowercase SHA-256 digest", location=location, value=digest)
+    return digest
+
+
+def require_cdhash(value: Any, location: str) -> str:
+    digest = require_string(value, location)
+    if not CDHASH_PATTERN.fullmatch(digest):
+        raise ArtifactError("manifest.invalid", "Expected a lowercase CDHash digest", location=location, value=digest)
     return digest
 
 
@@ -866,22 +902,29 @@ def validate_stable_bundle_contract(
     marker_path = pathlib.PurePosixPath(bundle_path) / pathlib.PurePosixPath(
         STABLE_BUNDLE_MARKER
     )
-    owner_files = [
-        item
-        for item in manifest["generatedFiles"]
-        if pathlib.PurePosixPath(item["artifactPath"]) == marker_path
-    ]
-    if len(owner_files) != 1:
-        raise ArtifactError(
-            "manifest.invalid",
-            "Stable bundle must generate exactly one signed ownership marker",
-        )
-    owner_content = owner_files[0].get("content")
-    if not isinstance(owner_content, dict) or owner_content.get("bundleId") != sealing["bundleId"]:
-        raise ArtifactError(
-            "manifest.invalid",
-            "Stable-bundle ownership marker must bind the sealed bundle identifier",
-        )
+    if sealing.get("mode") == "preserved-bundle":
+        if not path_is_within(marker_path, pathlib.PurePosixPath(bundle_path)):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Stable-bundle ownership marker must be inside the preserved bundle",
+            )
+    else:
+        owner_files = [
+            item
+            for item in manifest["generatedFiles"]
+            if pathlib.PurePosixPath(item["artifactPath"]) == marker_path
+        ]
+        if len(owner_files) != 1:
+            raise ArtifactError(
+                "manifest.invalid",
+                "Stable bundle must generate exactly one signed ownership marker",
+            )
+        owner_content = owner_files[0].get("content")
+        if not isinstance(owner_content, dict) or owner_content.get("bundleId") != sealing["bundleId"]:
+            raise ArtifactError(
+                "manifest.invalid",
+                "Stable-bundle ownership marker must bind the sealed bundle identifier",
+            )
     stable_state = [
         item for item in manifest["mutableState"] if item["location"] == STABLE_BUNDLE_TARGET
     ]
@@ -921,6 +964,258 @@ def validate_template_tokens(value: str, binding_names: set[str], location: str)
     unknown = sorted(set(TOKEN_PATTERN.findall(value)) - known)
     if unknown:
         raise ArtifactError("manifest.invalid", "Template contains unknown bindings", location=location, bindings=unknown)
+
+
+def validate_developer_id_policy(sealing: dict[str, Any], *, required: bool) -> None:
+    team_id = require_string(sealing["teamId"], "sealing.teamId")
+    identity = require_string(sealing["identity"], "sealing.identity")
+    if not required:
+        return
+    if not re.fullmatch(r"[A-Z0-9]{10}", team_id):
+        raise ArtifactError("manifest.invalid", "Developer ID Team ID is invalid")
+    if not re.fullmatch(
+        rf"Developer ID Application: .+ \({re.escape(team_id)}\)",
+        identity,
+    ):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealing identity must be a Developer ID Application identity for the Team ID",
+        )
+
+
+def validate_signature_pin(value: Any, sealing: dict[str, Any], location: str) -> dict[str, Any]:
+    signature = require_object(
+        value,
+        location,
+        required={
+            "kind",
+            "identifier",
+            "teamIdentifier",
+            "cdhash",
+            "authority",
+            "timestamp",
+        },
+        allowed={
+            "kind",
+            "identifier",
+            "teamIdentifier",
+            "cdhash",
+            "authority",
+            "timestamp",
+        },
+    )
+    if signature["kind"] != "developer-id":
+        raise ArtifactError("manifest.invalid", "Preserved bundle signature kind must be Developer ID")
+    require_string(signature["identifier"], f"{location}.identifier")
+    require_string(signature["teamIdentifier"], f"{location}.teamIdentifier")
+    require_cdhash(signature["cdhash"], f"{location}.cdhash")
+    require_string(signature["authority"], f"{location}.authority")
+    require_bool(signature["timestamp"], f"{location}.timestamp")
+    expected = {
+        "kind": "developer-id",
+        "identifier": sealing["bundleId"],
+        "teamIdentifier": sealing["teamId"],
+        "authority": sealing["identity"],
+        "timestamp": sealing["timestamp"],
+    }
+    actual = {key: signature[key] for key in expected}
+    if actual != expected:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Preserved bundle signature pin differs from the sealing policy",
+            expected=expected,
+            actual=actual,
+        )
+    return signature
+
+
+def path_is_within(path: pathlib.PurePosixPath, root: pathlib.PurePosixPath) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_payload_bundle_path(value: Any, location: str) -> pathlib.PurePosixPath:
+    bundle_path = safe_relative_path(value, location)
+    if bundle_path.suffix != ".app" or bundle_path.parts[0] != "payload":
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealed bundle path must identify a payload app bundle",
+        )
+    return bundle_path
+
+
+def validate_separate_step_sealing(
+    manifest: dict[str, Any],
+    artifact_ids: set[str],
+    artifact_paths: set[pathlib.PurePosixPath],
+    generated_paths: set[pathlib.PurePosixPath],
+) -> None:
+    sealing = manifest["sealing"]
+    separate_step_fields = {
+        "bundlePath",
+        "executableArtifactId",
+        "attestationPath",
+        "codeResourcesPath",
+    }
+    present_output_fields = separate_step_fields & sealing.keys()
+    if present_output_fields and present_output_fields != separate_step_fields:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Post-build sealing fields must be declared together",
+            missing=sorted(separate_step_fields - present_output_fields),
+        )
+    if not present_output_fields:
+        return
+    bundle_path = validate_payload_bundle_path(sealing["bundlePath"], "sealing.bundlePath")
+    executable_artifact_id = require_id(
+        sealing["executableArtifactId"],
+        "sealing.executableArtifactId",
+    )
+    if executable_artifact_id not in artifact_ids:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealed executable artifact is not declared",
+            id=executable_artifact_id,
+        )
+    executable_item = next(
+        item for item in manifest["artifacts"] if item["id"] == executable_artifact_id
+    )
+    executable_path = pathlib.PurePosixPath(executable_item["artifactPath"])
+    try:
+        executable_relative = executable_path.relative_to(bundle_path)
+    except ValueError as error:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealed executable must be staged inside the declared bundle",
+            id=executable_artifact_id,
+        ) from error
+    if executable_relative.parts[:2] != ("Contents", "MacOS"):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealed executable must be staged below Contents/MacOS",
+            id=executable_artifact_id,
+        )
+    if executable_item["binary"]["format"] != "mach-o":
+        raise ArtifactError("manifest.invalid", "Sealed executable must be Mach-O")
+    for item in manifest["artifacts"]:
+        if item["id"] == executable_artifact_id:
+            continue
+        item_path = pathlib.PurePosixPath(item["artifactPath"])
+        if path_is_within(item_path, bundle_path):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Nested bundle code is not supported by the sealing contract",
+                id=item["id"],
+            )
+    bundle_generated_paths: set[pathlib.PurePosixPath] = set()
+    for item in manifest["generatedFiles"]:
+        item_path = pathlib.PurePosixPath(item["artifactPath"])
+        if not path_is_within(item_path, bundle_path):
+            continue
+        item_relative = item_path.relative_to(bundle_path)
+        bundle_generated_paths.add(item_relative)
+        if item_relative != pathlib.PurePosixPath("Contents/Info.plist") and item_relative.parts[
+            :2
+        ] != ("Contents", "Resources"):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Generated bundle files must be Info.plist or resources",
+                id=item["id"],
+            )
+    if pathlib.PurePosixPath("Contents/Info.plist") not in bundle_generated_paths:
+        raise ArtifactError("manifest.invalid", "Sealed bundle must declare Info.plist")
+    attestation_relative = safe_relative_path(
+        sealing["attestationPath"],
+        "sealing.attestationPath",
+    )
+    code_resources_relative = safe_relative_path(
+        sealing["codeResourcesPath"],
+        "sealing.codeResourcesPath",
+    )
+    if attestation_relative.parts[:2] != ("Contents", "Resources"):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealing attestation must be staged below Contents/Resources",
+        )
+    if code_resources_relative != pathlib.PurePosixPath(
+        "Contents/_CodeSignature/CodeResources"
+    ):
+        raise ArtifactError(
+            "manifest.invalid",
+            "CodeResources must use the canonical app-bundle location",
+        )
+    sealing_paths = {
+        bundle_path / attestation_relative,
+        bundle_path / code_resources_relative,
+        SEALING_PROVENANCE_PATH,
+    }
+    overlaps = sorted(str(path) for path in sealing_paths & (artifact_paths | generated_paths))
+    if overlaps:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Sealing outputs overlap declared artifact files",
+            paths=overlaps,
+        )
+    validate_destination_set(artifact_paths | generated_paths | sealing_paths)
+
+
+def validate_preserved_bundle_sealing(
+    manifest: dict[str, Any],
+    artifact_paths: set[pathlib.PurePosixPath],
+    generated_paths: set[pathlib.PurePosixPath],
+) -> None:
+    sealing = manifest["sealing"]
+    bundle_path = validate_payload_bundle_path(sealing["bundlePath"], "sealing.bundlePath")
+    executable_relative = safe_relative_path(sealing["executablePath"], "sealing.executablePath")
+    attestation_relative = safe_relative_path(sealing["attestationPath"], "sealing.attestationPath")
+    code_resources_relative = safe_relative_path(
+        sealing["codeResourcesPath"],
+        "sealing.codeResourcesPath",
+    )
+    if executable_relative.parts[:2] != ("Contents", "MacOS"):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Preserved bundle executable must be below Contents/MacOS",
+        )
+    if attestation_relative.parts[:2] != ("Contents", "Resources"):
+        raise ArtifactError(
+            "manifest.invalid",
+            "Preserved bundle attestation must be below Contents/Resources",
+        )
+    if code_resources_relative != pathlib.PurePosixPath(
+        "Contents/_CodeSignature/CodeResources"
+    ):
+        raise ArtifactError(
+            "manifest.invalid",
+            "CodeResources must use the canonical app-bundle location",
+        )
+    for key in ("bundleTreeSha256", "sealedExecutableSha256", "attestationSha256"):
+        require_sha256(sealing[key], f"sealing.{key}")
+    validate_signature_pin(sealing["signature"], sealing, "sealing.signature")
+    nested_declared = sorted(
+        str(path)
+        for path in artifact_paths | generated_paths
+        if path_is_within(path, bundle_path)
+    )
+    if nested_declared:
+        raise ArtifactError(
+            "manifest.invalid",
+            "Preserved bundles must not contain separately declared artifact files",
+            paths=nested_declared,
+        )
+    validate_destination_set(
+        artifact_paths
+        | generated_paths
+        | {
+            bundle_path / executable_relative,
+            bundle_path / attestation_relative,
+            bundle_path / code_resources_relative,
+            SEALING_PROVENANCE_PATH,
+        }
+    )
 
 
 def validate_manifest_structure(manifest: Any) -> dict[str, Any]:
@@ -1002,144 +1297,48 @@ def validate_manifest_structure(manifest: Any) -> dict[str, Any]:
     uninstall_plan = validate_plan(manifest["uninstallPlan"], "uninstallPlan", binding_names)
     validate_plan_inverses(install_plan, uninstall_plan)
     sealing_base_fields = {"mode", "bundleId", "teamId", "identity", "timestamp"}
-    sealing_output_fields = {
+    separate_step_fields = {
         "bundlePath",
         "executableArtifactId",
         "attestationPath",
         "codeResourcesPath",
     }
-    sealing = require_object(
-        manifest["sealing"],
-        "sealing",
-        required=sealing_base_fields,
-        allowed=sealing_base_fields | sealing_output_fields,
-    )
-    if sealing["mode"] != "separate-step":
-        raise ArtifactError("manifest.invalid", "Only separate-step sealing is supported")
-    present_output_fields = sealing_output_fields & sealing.keys()
-    if present_output_fields and present_output_fields != sealing_output_fields:
-        raise ArtifactError(
-            "manifest.invalid",
-            "Post-build sealing fields must be declared together",
-            missing=sorted(sealing_output_fields - present_output_fields),
+    preserved_bundle_fields = {
+        "bundlePath",
+        "executablePath",
+        "attestationPath",
+        "codeResourcesPath",
+        "bundleTreeSha256",
+        "sealedExecutableSha256",
+        "attestationSha256",
+        "signature",
+    }
+    raw_sealing = manifest["sealing"]
+    mode = raw_sealing.get("mode") if isinstance(raw_sealing, dict) else None
+    if mode not in SEALING_MODES:
+        raise ArtifactError("manifest.invalid", "Sealing mode is unsupported", mode=mode)
+    if mode == "separate-step":
+        sealing = require_object(
+            raw_sealing,
+            "sealing",
+            required=sealing_base_fields,
+            allowed=sealing_base_fields | separate_step_fields,
         )
-    if present_output_fields:
-        bundle_path = safe_relative_path(sealing["bundlePath"], "sealing.bundlePath")
-        if bundle_path.suffix != ".app" or bundle_path.parts[0] != "payload":
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealed bundle path must identify a payload app bundle",
-            )
-        executable_artifact_id = require_id(
-            sealing["executableArtifactId"],
-            "sealing.executableArtifactId",
+        require_bool(sealing["timestamp"], "sealing.timestamp")
+        has_developer_id_outputs = bool(separate_step_fields & sealing.keys())
+        validate_separate_step_sealing(manifest, artifact_ids, artifact_paths, generated_paths)
+        validate_developer_id_policy(sealing, required=has_developer_id_outputs)
+    else:
+        sealing = require_object(
+            raw_sealing,
+            "sealing",
+            required=sealing_base_fields | preserved_bundle_fields,
+            allowed=sealing_base_fields | preserved_bundle_fields,
         )
-        if executable_artifact_id not in artifact_ids:
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealed executable artifact is not declared",
-                id=executable_artifact_id,
-            )
-        executable_item = next(
-            item for item in manifest["artifacts"] if item["id"] == executable_artifact_id
-        )
-        executable_path = pathlib.PurePosixPath(executable_item["artifactPath"])
-        try:
-            executable_relative = executable_path.relative_to(bundle_path)
-        except ValueError as error:
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealed executable must be staged inside the declared bundle",
-                id=executable_artifact_id,
-            ) from error
-        if executable_relative.parts[:2] != ("Contents", "MacOS"):
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealed executable must be staged below Contents/MacOS",
-                id=executable_artifact_id,
-            )
-        if executable_item["binary"]["format"] != "mach-o":
-            raise ArtifactError("manifest.invalid", "Sealed executable must be Mach-O")
-        for item in manifest["artifacts"]:
-            if item["id"] == executable_artifact_id:
-                continue
-            item_path = pathlib.PurePosixPath(item["artifactPath"])
-            try:
-                item_path.relative_to(bundle_path)
-            except ValueError:
-                continue
-            raise ArtifactError(
-                "manifest.invalid",
-                "Nested bundle code is not supported by the sealing contract",
-                id=item["id"],
-            )
-        bundle_generated_paths: set[pathlib.PurePosixPath] = set()
-        for item in manifest["generatedFiles"]:
-            item_path = pathlib.PurePosixPath(item["artifactPath"])
-            try:
-                item_relative = item_path.relative_to(bundle_path)
-            except ValueError:
-                continue
-            bundle_generated_paths.add(item_relative)
-            if item_relative != pathlib.PurePosixPath("Contents/Info.plist") and item_relative.parts[
-                :2
-            ] != ("Contents", "Resources"):
-                raise ArtifactError(
-                    "manifest.invalid",
-                    "Generated bundle files must be Info.plist or resources",
-                    id=item["id"],
-                )
-        if pathlib.PurePosixPath("Contents/Info.plist") not in bundle_generated_paths:
-            raise ArtifactError("manifest.invalid", "Sealed bundle must declare Info.plist")
-        attestation_relative = safe_relative_path(
-            sealing["attestationPath"],
-            "sealing.attestationPath",
-        )
-        code_resources_relative = safe_relative_path(
-            sealing["codeResourcesPath"],
-            "sealing.codeResourcesPath",
-        )
-        if attestation_relative.parts[:2] != ("Contents", "Resources"):
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealing attestation must be staged below Contents/Resources",
-            )
-        if code_resources_relative != pathlib.PurePosixPath(
-            "Contents/_CodeSignature/CodeResources"
-        ):
-            raise ArtifactError(
-                "manifest.invalid",
-                "CodeResources must use the canonical app-bundle location",
-            )
-        sealing_paths = {
-            bundle_path / attestation_relative,
-            bundle_path / code_resources_relative,
-            SEALING_PROVENANCE_PATH,
-        }
-        overlaps = sorted(str(path) for path in sealing_paths & (artifact_paths | generated_paths))
-        if overlaps:
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealing outputs overlap declared artifact files",
-                paths=overlaps,
-            )
-        validate_destination_set(artifact_paths | generated_paths | sealing_paths)
-    require_string(sealing["bundleId"], "sealing.bundleId")
-    team_id = require_string(sealing["teamId"], "sealing.teamId")
-    identity = require_string(sealing["identity"], "sealing.identity")
-    if present_output_fields:
-        if not re.fullmatch(r"[A-Z0-9]{10}", team_id):
-            raise ArtifactError("manifest.invalid", "Developer ID Team ID is invalid")
-        if not re.fullmatch(
-            rf"Developer ID Application: .+ \({re.escape(team_id)}\)",
-            identity,
-        ):
-            raise ArtifactError(
-                "manifest.invalid",
-                "Sealing identity must be a Developer ID Application identity for the Team ID",
-            )
-    require_bool(sealing["timestamp"], "sealing.timestamp")
-    if sealing["timestamp"]:
+        require_bool(sealing["timestamp"], "sealing.timestamp")
+        validate_developer_id_policy(sealing, required=True)
+        validate_preserved_bundle_sealing(manifest, artifact_paths, generated_paths)
+    if sealing["mode"] == "separate-step" and sealing["timestamp"]:
         raise ArtifactError(
             "manifest.invalid",
             "Content-addressed Developer ID sealing cannot use a timestamp",
@@ -1529,6 +1728,8 @@ def codesign_info(
 
 
 def sealing_artifact_item(manifest: dict[str, Any]) -> dict[str, Any]:
+    if "executableArtifactId" not in manifest["sealing"]:
+        raise ArtifactError("sealing.source_mismatch", "Sealing mode does not use a declared executable input")
     identifier = manifest["sealing"]["executableArtifactId"]
     return next(item for item in manifest["artifacts"] if item["id"] == identifier)
 
@@ -1538,7 +1739,10 @@ def sealing_paths(
 ) -> tuple[pathlib.PurePosixPath, pathlib.PurePosixPath, pathlib.PurePosixPath, pathlib.PurePosixPath]:
     sealing = manifest["sealing"]
     bundle = pathlib.PurePosixPath(sealing["bundlePath"])
-    executable = pathlib.PurePosixPath(sealing_artifact_item(manifest)["artifactPath"])
+    if sealing["mode"] == "preserved-bundle":
+        executable = bundle / pathlib.PurePosixPath(sealing["executablePath"])
+    else:
+        executable = pathlib.PurePosixPath(sealing_artifact_item(manifest)["artifactPath"])
     attestation = bundle / pathlib.PurePosixPath(sealing["attestationPath"])
     code_resources = bundle / pathlib.PurePosixPath(sealing["codeResourcesPath"])
     return bundle, executable, attestation, code_resources
@@ -1589,15 +1793,16 @@ def inspect_signed_bundle(bundle: pathlib.Path, manifest: dict[str, Any]) -> dic
     executable_within_bundle = executable_relative.relative_to(bundle_relative)
     executable = bundle.joinpath(*executable_within_bundle.parts)
     canonical_tree_sha256(bundle)
-    executable_item = sealing_artifact_item(manifest)
-    binary = inspect_binary(executable, executable_item["binary"]["format"])
-    if binary != executable_item["binary"]:
-        raise ArtifactError(
-            "sealing.signature",
-            "Signed executable has the wrong file type or architecture",
-            expected=executable_item["binary"],
-            actual=binary,
-        )
+    if sealing["mode"] != "preserved-bundle":
+        executable_item = sealing_artifact_item(manifest)
+        binary = inspect_binary(executable, executable_item["binary"]["format"])
+        if binary != executable_item["binary"]:
+            raise ArtifactError(
+                "sealing.signature",
+                "Signed executable has the wrong file type or architecture",
+                expected=executable_item["binary"],
+                actual=binary,
+            )
     codesign = pathlib.Path("/usr/bin/codesign")
     if not codesign.is_file():
         raise ArtifactError("sealing.signature", "codesign is unavailable", path=str(codesign))
@@ -1974,19 +2179,69 @@ def compute_seal(manifest_hash: str, lock_hash: str, records: list[dict[str, Any
 def make_tree_writable(root: pathlib.Path) -> None:
     if not root.exists():
         return
+
+    def make_path_writable(path: pathlib.Path) -> None:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            return
+        immutable_flags = getattr(metadata, "st_flags", 0) & IMMUTABLE_FILE_FLAGS
+        if immutable_flags:
+            if not hasattr(os, "chflags") or os.chflags not in os.supports_follow_symlinks:
+                raise ArtifactError(
+                    "artifact.publish",
+                    "Cannot safely clear immutable filesystem flags",
+                    path=str(path),
+                )
+            os.chflags(
+                path,
+                getattr(metadata, "st_flags", 0) & ~IMMUTABLE_FILE_FLAGS,
+                follow_symlinks=False,
+            )
+            metadata = path.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISDIR(metadata.st_mode):
+            mode |= stat.S_IWUSR | stat.S_IXUSR
+        elif stat.S_ISREG(metadata.st_mode):
+            mode |= stat.S_IWUSR
+        else:
+            return
+        os.chmod(path, mode, follow_symlinks=False)
+
     for path in sorted(root.rglob("*"), reverse=True):
         try:
-            path.chmod(path.stat().st_mode | stat.S_IWUSR)
+            make_path_writable(path)
         except FileNotFoundError:
             pass
     try:
-        root.chmod(root.stat().st_mode | stat.S_IWUSR)
+        make_path_writable(root)
     except FileNotFoundError:
         pass
 
 
 def make_tree_read_only(root: pathlib.Path) -> None:
     for path in sorted(root.rglob("*")):
+        if path.is_file():
+            current = stat.S_IMODE(path.stat().st_mode)
+            path.chmod(current & ~0o222)
+        elif path.is_dir():
+            path.chmod(0o555)
+    root.chmod(0o555)
+
+
+def make_tree_read_only_except(root: pathlib.Path, preserved_roots: set[pathlib.Path]) -> None:
+    preserved = {path.resolve(strict=False) for path in preserved_roots}
+    for path in sorted(root.rglob("*")):
+        resolved = path.resolve(strict=False)
+        skip = False
+        for preserved_root in preserved:
+            try:
+                if os.path.commonpath([str(resolved), str(preserved_root)]) == str(preserved_root):
+                    skip = True
+                    break
+            except ValueError:
+                continue
+        if skip:
+            continue
         if path.is_file():
             current = stat.S_IMODE(path.stat().st_mode)
             path.chmod(current & ~0o222)
@@ -2014,9 +2269,14 @@ def remove_stale_sealing_paths(output_root: pathlib.Path) -> list[str]:
                 path=str(path),
                 owner=metadata.st_uid,
             )
-        canonical_tree_sha256(path)
         make_tree_writable(path)
         shutil.rmtree(path)
+        if os.path.lexists(path):
+            raise ArtifactError(
+                "artifact.publish",
+                "Stale sealing path removal was incomplete",
+                path=str(path),
+            )
         removed.append(path.name)
     if removed:
         fsync_directory(output_root)
@@ -2182,7 +2442,7 @@ def validate_sealing_attestation(
 def validate_sealing_record(
     value: Any,
     manifest: dict[str, Any],
-    attestation: dict[str, Any],
+    attestation: dict[str, Any] | None,
 ) -> dict[str, Any]:
     record = require_object(
         value,
@@ -2236,14 +2496,19 @@ def validate_sealing_record(
             expected=expected_paths,
             actual=actual_paths,
         )
-    if (
-        record["sourceSealId"] != attestation["sourceSealId"]
-        or record["sourceTreeSha256"] != attestation["sourceTreeSha256"]
-    ):
-        raise ArtifactError(
-            "artifact.verify",
-            "Sealing provenance differs from the signed attestation",
-        )
+    if manifest["sealing"]["mode"] == "separate-step":
+        if attestation is None:
+            raise ArtifactError("artifact.verify", "Signed sealing attestation is missing")
+        if (
+            record["sourceSealId"] != attestation["sourceSealId"]
+            or record["sourceTreeSha256"] != attestation["sourceTreeSha256"]
+        ):
+            raise ArtifactError(
+                "artifact.verify",
+                "Sealing provenance differs from the signed attestation",
+            )
+    else:
+        require_sha256(record["sourceSealId"], "artifact.sealing.sourceSealId")
     signature = require_object(
         record["signature"],
         "artifact.sealing.signature",
@@ -2289,7 +2554,116 @@ def validate_sealing_record(
             expected=expected_signature,
             actual=actual_signature,
         )
+    if sealing["mode"] == "preserved-bundle":
+        preserved_expected = {
+            "attestationSha256": sealing["attestationSha256"],
+            "sourceTreeSha256": sealing["bundleTreeSha256"],
+            "sealedTreeSha256": sealing["bundleTreeSha256"],
+            "sealedExecutableSha256": sealing["sealedExecutableSha256"],
+            "signature": sealing["signature"],
+        }
+        preserved_actual = {key: record[key] for key in preserved_expected}
+        if preserved_actual != preserved_expected:
+            raise ArtifactError(
+                "artifact.verify",
+                "Preserved bundle provenance differs from the manifest pins",
+                expected=preserved_expected,
+                actual=preserved_actual,
+            )
     return record
+
+
+def preserved_bundle_records(
+    artifact_root: pathlib.Path,
+    bundle_relative: pathlib.PurePosixPath,
+) -> tuple[
+    dict[pathlib.PurePosixPath, tuple[int, bytes | None]],
+    dict[pathlib.PurePosixPath, int],
+]:
+    bundle = artifact_root / bundle_relative
+    file_modes: dict[pathlib.PurePosixPath, tuple[int, bytes | None]] = {}
+    directory_modes: dict[pathlib.PurePosixPath, int] = {}
+    for entry in canonical_tree_records(bundle):
+        relative = pathlib.PurePosixPath(entry["path"])
+        artifact_relative = bundle_relative if relative == pathlib.PurePosixPath(".") else bundle_relative / relative
+        if entry["type"] == "directory":
+            directory_modes[artifact_relative] = entry["mode"]
+        elif entry["type"] == "file":
+            file_modes[artifact_relative] = (entry["mode"], None)
+    return file_modes, directory_modes
+
+
+def validate_preserved_bundle(
+    bundle: pathlib.Path,
+    manifest: dict[str, Any],
+    *,
+    bundle_inspector: Callable[[pathlib.Path, dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
+    sealing = manifest["sealing"]
+    bundle_relative, executable_relative, attestation_relative, code_resources_relative = sealing_paths(
+        manifest
+    )
+    executable = bundle / executable_relative.relative_to(bundle_relative)
+    attestation = bundle / attestation_relative.relative_to(bundle_relative)
+    code_resources = bundle / code_resources_relative.relative_to(bundle_relative)
+    if not bundle.is_dir():
+        raise ArtifactError("sealing.preserved_mismatch", "Preserved bundle source is missing", path=str(bundle))
+    for path, label in [
+        (executable, "executable"),
+        (attestation, "attestation"),
+        (code_resources, "CodeResources"),
+    ]:
+        require_regular_file(path, "sealing.preserved_mismatch", label)
+    records = canonical_tree_records(bundle)
+    writable_paths = [entry["path"] for entry in records if entry["mode"] & 0o222]
+    if writable_paths:
+        raise ArtifactError(
+            "sealing.preserved_mismatch",
+            "Preserved bundle must already be read-only",
+            paths=writable_paths,
+        )
+    stable_bundle_guards = [
+        item
+        for item in manifest["installPlan"]
+        if item["action"] == "assert_absent_or_owned"
+        and item.get("source") == bundle_relative.as_posix()
+        and item.get("marker") == STABLE_BUNDLE_MARKER
+    ]
+    if stable_bundle_guards:
+        marker = bundle / STABLE_BUNDLE_MARKER
+        require_regular_file(marker, "sealing.preserved_mismatch", "ownership marker")
+        expected_marker = {
+            "artifactId": manifest["artifact"]["id"],
+            "bundleId": sealing["bundleId"],
+            "ownershipSchemaVersion": 1,
+        }
+        if load_json(marker) != expected_marker or marker.read_bytes() != canonical_json_bytes(
+            expected_marker
+        ):
+            raise ArtifactError(
+                "sealing.preserved_mismatch",
+                "Preserved bundle ownership marker differs from the stable-bundle contract",
+            )
+    actual = {
+        "bundleTreeSha256": sha256_bytes(canonical_json_bytes(records)),
+        "sealedExecutableSha256": sha256_file(executable),
+        "attestationSha256": sha256_file(attestation),
+        "signature": bundle_inspector(bundle, manifest),
+    }
+    expected = {
+        "bundleTreeSha256": sealing["bundleTreeSha256"],
+        "sealedExecutableSha256": sealing["sealedExecutableSha256"],
+        "attestationSha256": sealing["attestationSha256"],
+        "signature": sealing["signature"],
+    }
+    if actual != expected:
+        raise ArtifactError(
+            "sealing.preserved_mismatch",
+            "Preserved bundle does not match the manifest pins",
+            expected=expected,
+            actual=actual,
+        )
+    return actual
 
 
 def expected_artifact_files(
@@ -2302,6 +2676,7 @@ def expected_artifact_files(
     stage: str,
     sealing_record: dict[str, Any] | None = None,
     sealing_attestation: dict[str, Any] | None = None,
+    preserved_files: dict[pathlib.PurePosixPath, tuple[int, bytes | None]] | None = None,
 ) -> dict[pathlib.PurePosixPath, tuple[int, bytes | None]]:
     expected: dict[pathlib.PurePosixPath, tuple[int, bytes | None]] = {}
     for item in manifest["artifacts"]:
@@ -2328,11 +2703,18 @@ def expected_artifact_files(
     expected[pathlib.PurePosixPath("provenance/artifact.json")] = (0o444, canonical_json_bytes(metadata))
     expected[pathlib.PurePosixPath("provenance/files.sha256")] = (0o444, checksums.encode("utf-8"))
     if stage == "sealed":
-        if sealing_record is None or sealing_attestation is None:
+        if sealing_record is None:
             raise ArtifactError("artifact.verify", "Sealed artifact provenance is incomplete")
         _, _, attestation_path, code_resources = sealing_paths(manifest)
-        expected[attestation_path] = (0o444, canonical_json_bytes(sealing_attestation))
-        expected[code_resources] = (0o444, None)
+        if manifest["sealing"]["mode"] == "preserved-bundle":
+            if preserved_files is None:
+                raise ArtifactError("artifact.verify", "Preserved bundle file records are incomplete")
+            expected.update(preserved_files)
+        else:
+            if sealing_attestation is None:
+                raise ArtifactError("artifact.verify", "Sealed artifact attestation is incomplete")
+            expected[attestation_path] = (0o444, canonical_json_bytes(sealing_attestation))
+            expected[code_resources] = (0o444, None)
         expected[SEALING_PROVENANCE_PATH] = (0o444, canonical_json_bytes(sealing_record))
     return expected
 
@@ -2509,6 +2891,8 @@ def verify_artifact(
             )
     sealing_record: dict[str, Any] | None = None
     sealing_attestation: dict[str, Any] | None = None
+    preserved_files: dict[pathlib.PurePosixPath, tuple[int, bytes | None]] | None = None
+    preserved_directories: dict[pathlib.PurePosixPath, int] = {}
     if stage == "sealed":
         if "bundlePath" not in manifest["sealing"]:
             raise ArtifactError("artifact.verify", "Legacy artifact contracts cannot be sealed")
@@ -2529,19 +2913,27 @@ def verify_artifact(
                 "Sealed artifact files are incomplete",
                 path=str(artifact_root),
             )
-        sealing_attestation = validate_sealing_attestation(
-            load_json(attestation_path),
-            manifest,
-            lock_data,
-            manifest_hash,
-            lock_hash,
-        )
-        sealing_record = validate_sealing_record(
-            load_json(sealing_path),
-            manifest,
-            sealing_attestation,
-        )
-        require_canonical_json(attestation_path, sealing_attestation)
+        if manifest["sealing"]["mode"] == "preserved-bundle":
+            validate_preserved_bundle(bundle, manifest, bundle_inspector=bundle_inspector)
+            sealing_record = validate_sealing_record(load_json(sealing_path), manifest, None)
+            preserved_files, preserved_directories = preserved_bundle_records(
+                artifact_root,
+                bundle_relative,
+            )
+        else:
+            sealing_attestation = validate_sealing_attestation(
+                load_json(attestation_path),
+                manifest,
+                lock_data,
+                manifest_hash,
+                lock_hash,
+            )
+            sealing_record = validate_sealing_record(
+                load_json(sealing_path),
+                manifest,
+                sealing_attestation,
+            )
+            require_canonical_json(attestation_path, sealing_attestation)
         require_canonical_json(sealing_path, sealing_record)
         if sha256_file(attestation_path) != sealing_record["attestationSha256"]:
             raise ArtifactError("artifact.verify", "Signed sealing attestation hash differs")
@@ -2591,6 +2983,7 @@ def verify_artifact(
         stage=stage,
         sealing_record=sealing_record,
         sealing_attestation=sealing_attestation,
+        preserved_files=preserved_files,
     )
     record_paths = {pathlib.PurePosixPath(record["path"]) for record in records}
     expected_record_paths = set(expected_files) - SELF_REFERENTIAL_PROVENANCE
@@ -2630,7 +3023,9 @@ def verify_artifact(
                 "Artifact generated file differs from the sealed contract",
                 path=str(relative),
             )
-    expected_directories = expected_artifact_directories(set(expected_files))
+    expected_directories = expected_artifact_directories(set(expected_files)) | set(
+        preserved_directories
+    )
     actual_directories = {
         pathlib.PurePosixPath(entry.relative_to(artifact_root).as_posix())
         for entry in artifact_root.rglob("*")
@@ -2645,12 +3040,18 @@ def verify_artifact(
         )
     for directory in [artifact_root, *(artifact_root / path for path in expected_directories)]:
         mode = stat.S_IMODE(directory.lstat().st_mode)
-        if mode != 0o555:
+        expected_mode = preserved_directories.get(
+            pathlib.PurePosixPath(directory.relative_to(artifact_root).as_posix())
+            if directory != artifact_root
+            else pathlib.PurePosixPath("."),
+            0o555,
+        )
+        if mode != expected_mode:
             raise ArtifactError(
                 "artifact.verify",
                 "Artifact directory mode differs from the contract",
                 path=str(directory.relative_to(artifact_root)) if directory != artifact_root else ".",
-                expected="0555",
+                expected=f"{expected_mode:04o}",
                 actual=f"{mode:04o}",
             )
     return {**metadata, "stage": stage}
@@ -2768,7 +3169,7 @@ def build_artifact(
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
-def seal_artifact(
+def seal_separate_step_artifact(
     manifest: dict[str, Any],
     lock_data: dict[str, Any],
     manifest_hash: str,
@@ -2782,6 +3183,8 @@ def seal_artifact(
         [dict[str, Any], dict[str, Any], pathlib.Path], dict[str, Any]
     ] = inspect_artifact_file,
 ) -> dict[str, Any]:
+    if manifest["sealing"]["mode"] != "separate-step":
+        raise ArtifactError("sealing.source_mismatch", "Sealing mode does not use separate-step signing")
     if "bundlePath" not in manifest["sealing"]:
         raise ArtifactError("sealing.source_mismatch", "Legacy artifact contracts cannot be sealed")
     source_root = pathlib.Path(os.path.abspath(artifact.expanduser()))
@@ -3002,6 +3405,284 @@ def seal_artifact(
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
+def seal_preserved_bundle_artifact(
+    manifest: dict[str, Any],
+    lock_data: dict[str, Any],
+    manifest_hash: str,
+    lock_hash: str,
+    artifact: pathlib.Path,
+    output_root: pathlib.Path,
+    bundle_source: pathlib.Path,
+    *,
+    bundle_inspector: Callable[[pathlib.Path, dict[str, Any]], dict[str, Any]] = inspect_signed_bundle,
+    artifact_inspector: Callable[
+        [dict[str, Any], dict[str, Any], pathlib.Path], dict[str, Any]
+    ] = inspect_artifact_file,
+) -> dict[str, Any]:
+    if manifest["sealing"]["mode"] != "preserved-bundle":
+        raise ArtifactError("sealing.source_mismatch", "Sealing mode does not use a preserved bundle")
+    source_root = pathlib.Path(os.path.abspath(artifact.expanduser()))
+    source_metadata = verify_artifact(
+        source_root,
+        bundle_inspector=bundle_inspector,
+        artifact_inspector=artifact_inspector,
+    )
+    if source_metadata["stage"] != "unsealed":
+        raise ArtifactError(
+            "sealing.source_mismatch",
+            "Only an unsealed immutable artifact can be sealed",
+            stage=source_metadata["stage"],
+        )
+    if (
+        source_metadata["manifestSha256"] != manifest_hash
+        or source_metadata["lockSha256"] != lock_hash
+    ):
+        raise ArtifactError(
+            "sealing.source_mismatch",
+            "Source artifact belongs to another manifest or lockfile",
+        )
+    bundle_source = pathlib.Path(os.path.abspath(bundle_source.expanduser()))
+    reject_symlink_components(bundle_source)
+    validate_preserved_bundle(bundle_source, manifest, bundle_inspector=bundle_inspector)
+    output_root = pathlib.Path(os.path.abspath(output_root.expanduser()))
+    resolved_without_symlinks(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    lock_path = output_root / ".build.lock"
+    with lock_path.open("a+") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ArtifactError("artifact.publish", "Another artifact build owns the output lock") from error
+        remove_stale_sealing_paths(output_root)
+        temporary_parent = pathlib.Path(tempfile.mkdtemp(prefix=".seal-", dir=output_root))
+        published_root: pathlib.Path | None = None
+        publication_staging: pathlib.Path | None = None
+        try:
+            staged_source = temporary_parent / source_root.name
+            shutil.copytree(source_root, staged_source, copy_function=shutil.copy2)
+            staged_metadata = verify_artifact(
+                staged_source,
+                bundle_inspector=bundle_inspector,
+                artifact_inspector=artifact_inspector,
+            )
+            if staged_metadata["sealId"] != source_metadata["sealId"]:
+                raise ArtifactError(
+                    "sealing.source_mismatch",
+                    "Copied source artifact differs from the verified source",
+                )
+            make_tree_writable(staged_source)
+            bundle_relative, executable_relative, attestation_relative, code_resources_relative = sealing_paths(
+                manifest
+            )
+            staged_bundle = staged_source / bundle_relative
+            if os.path.lexists(staged_bundle):
+                raise ArtifactError(
+                    "sealing.source_mismatch",
+                    "Preserved bundle destination already exists in the unsealed artifact",
+                    path=str(staged_bundle),
+                )
+            staged_bundle.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(bundle_source, staged_bundle, copy_function=shutil.copy2)
+            copied_pins = validate_preserved_bundle(
+                staged_bundle,
+                manifest,
+                bundle_inspector=bundle_inspector,
+            )
+            executable = staged_source / executable_relative
+            attestation_path = staged_source / attestation_relative
+            sealing_record = {
+                "schemaVersion": 1,
+                "sourceSealId": source_metadata["sealId"],
+                "bundlePath": bundle_relative.as_posix(),
+                "attestationPath": attestation_relative.as_posix(),
+                "codeResourcesPath": code_resources_relative.as_posix(),
+                "attestationSha256": copied_pins["attestationSha256"],
+                "sourceTreeSha256": copied_pins["bundleTreeSha256"],
+                "sealedTreeSha256": copied_pins["bundleTreeSha256"],
+                "sealedExecutableSha256": sha256_file(executable),
+                "signature": copied_pins["signature"],
+            }
+            if sealing_record["sealedExecutableSha256"] != copied_pins["sealedExecutableSha256"]:
+                raise ArtifactError(
+                    "sealing.preserved_mismatch",
+                    "Copied preserved executable hash differs from the source validation",
+                )
+            if sha256_file(attestation_path) != sealing_record["attestationSha256"]:
+                raise ArtifactError(
+                    "sealing.preserved_mismatch",
+                    "Copied preserved attestation hash differs from the source validation",
+                )
+            write_json(staged_source / SEALING_PROVENANCE_PATH, sealing_record, 0o444)
+            make_tree_read_only_except(staged_source, {staged_bundle})
+            records = content_records(staged_source)
+            seal = compute_seal(manifest_hash, lock_hash, records)
+            build_inputs = load_json(staged_source / "provenance" / "build-inputs.json")
+            metadata = {
+                "schemaVersion": 2,
+                "stage": "sealed",
+                "artifact": manifest["artifact"],
+                "sealId": seal,
+                "manifestSha256": manifest_hash,
+                "lockSha256": lock_hash,
+                "buildInputsSha256": sha256_bytes(canonical_json_bytes(build_inputs)),
+                "files": records,
+            }
+            provenance = staged_source / "provenance"
+            metadata_path = provenance / "artifact.json"
+            checksums_path = provenance / "files.sha256"
+            staged_source.chmod(0o755)
+            provenance.chmod(0o755)
+            metadata_path.chmod(0o644)
+            checksums_path.chmod(0o644)
+            write_json(metadata_path, metadata, 0o444)
+            checksums = "".join(f"{record['sha256']}  {record['path']}\n" for record in records)
+            checksums_path.write_bytes(checksums.encode("utf-8"))
+            checksums_path.chmod(0o444)
+            provenance.chmod(0o555)
+            staged_source.chmod(0o555)
+            artifact_name = f"{manifest['artifact']['id']}-{manifest['artifact']['version']}-{seal}"
+            staged_final = temporary_parent / artifact_name
+            os.replace(staged_source, staged_final)
+            fsync_tree(staged_final)
+            verified = verify_artifact(
+                staged_final,
+                bundle_inspector=bundle_inspector,
+                artifact_inspector=artifact_inspector,
+            )
+            destination_root = output_root / artifact_name
+            if destination_root.exists():
+                existing = verify_artifact(
+                    destination_root,
+                    bundle_inspector=bundle_inspector,
+                    artifact_inspector=artifact_inspector,
+                )
+                if existing["sealId"] != seal or existing["files"] != records:
+                    raise ArtifactError(
+                        "artifact.publish",
+                        "Existing content-addressed sealed artifact differs",
+                        path=str(destination_root),
+                    )
+                make_tree_writable(temporary_parent)
+                shutil.rmtree(temporary_parent)
+                return {
+                    "path": str(destination_root),
+                    "reused": True,
+                    "sealId": seal,
+                    "sourceSealId": source_metadata["sealId"],
+                    "stage": "sealed",
+                    "preservedBundleTreeSha256": copied_pins["bundleTreeSha256"],
+                    "preservedBundleCDHash": copied_pins["signature"]["cdhash"],
+                }
+            publication_staging = output_root / f".publish-{temporary_parent.name.removeprefix('.seal-')}"
+            if os.path.lexists(publication_staging):
+                raise ArtifactError(
+                    "artifact.publish",
+                    "Sealed artifact publication staging path already exists",
+                    path=str(publication_staging),
+                )
+            staged_final.chmod(0o755)
+            try:
+                os.replace(staged_final, publication_staging)
+            except PermissionError as error:
+                raise ArtifactError(
+                    "artifact.publish",
+                    "Sealed artifact could not enter publication staging",
+                    source=str(staged_final),
+                    sourceParentMode=f"{stat.S_IMODE(staged_final.parent.lstat().st_mode):04o}",
+                    destination=str(publication_staging),
+                    destinationParentMode=f"{stat.S_IMODE(output_root.lstat().st_mode):04o}",
+                ) from error
+            publication_staging.chmod(0o555)
+            temporary_parent.rmdir()
+            fsync_tree(publication_staging)
+            fsync_directory(output_root)
+            os.replace(publication_staging, destination_root)
+            publication_staging = None
+            published_root = destination_root
+            fsync_directory(output_root)
+            verified = verify_artifact(
+                destination_root,
+                bundle_inspector=bundle_inspector,
+                artifact_inspector=artifact_inspector,
+            )
+            return {
+                "path": str(destination_root),
+                "reused": False,
+                "sealId": verified["sealId"],
+                "sourceSealId": source_metadata["sealId"],
+                "stage": verified["stage"],
+                "preservedBundleTreeSha256": copied_pins["bundleTreeSha256"],
+                "preservedBundleCDHash": copied_pins["signature"]["cdhash"],
+            }
+        except Exception:
+            if published_root is not None:
+                cleanup_root = published_root
+            elif publication_staging is not None and os.path.lexists(publication_staging):
+                cleanup_root = publication_staging
+            else:
+                cleanup_root = temporary_parent
+            make_tree_writable(cleanup_root)
+            shutil.rmtree(cleanup_root, ignore_errors=True)
+            if os.path.lexists(temporary_parent):
+                make_tree_writable(temporary_parent)
+                shutil.rmtree(temporary_parent, ignore_errors=True)
+            if published_root is not None:
+                fsync_directory(output_root)
+            raise
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def seal_artifact(
+    manifest: dict[str, Any],
+    lock_data: dict[str, Any],
+    manifest_hash: str,
+    lock_hash: str,
+    artifact: pathlib.Path,
+    output_root: pathlib.Path,
+    *,
+    bundle_source: pathlib.Path | None = None,
+    signer: Callable[[pathlib.Path, dict[str, Any]], None] = sign_bundle_with_codesign,
+    bundle_inspector: Callable[[pathlib.Path, dict[str, Any]], dict[str, Any]] = inspect_signed_bundle,
+    artifact_inspector: Callable[
+        [dict[str, Any], dict[str, Any], pathlib.Path], dict[str, Any]
+    ] = inspect_artifact_file,
+) -> dict[str, Any]:
+    if manifest["sealing"]["mode"] == "preserved-bundle":
+        if bundle_source is None:
+            raise ArtifactError(
+                "sealing.bundle_source",
+                "Preserved-bundle sealing requires --bundle-source",
+            )
+        return seal_preserved_bundle_artifact(
+            manifest,
+            lock_data,
+            manifest_hash,
+            lock_hash,
+            artifact,
+            output_root,
+            bundle_source,
+            bundle_inspector=bundle_inspector,
+            artifact_inspector=artifact_inspector,
+        )
+    if bundle_source is not None:
+        raise ArtifactError(
+            "sealing.bundle_source",
+            "--bundle-source is only valid for preserved-bundle sealing",
+        )
+    return seal_separate_step_artifact(
+        manifest,
+        lock_data,
+        manifest_hash,
+        lock_hash,
+        artifact,
+        output_root,
+        signer=signer,
+        bundle_inspector=bundle_inspector,
+        artifact_inspector=artifact_inspector,
+    )
+
+
 def ensure_target_allowed(path: pathlib.Path, allowed_roots: list[pathlib.Path], operation: str) -> None:
     resolved = resolved_without_symlinks(path)
     for root in allowed_roots:
@@ -3019,6 +3700,8 @@ def resolve_plan_operation(
     artifact_root: pathlib.Path,
     bindings: dict[str, str],
     allowed_roots: list[pathlib.Path],
+    *,
+    allow_missing_sources: bool = False,
 ) -> dict[str, Any]:
     target = resolve_path(item["target"], bindings, f"plan.{item['id']}.target")
     ensure_target_allowed(target, allowed_roots, item["id"])
@@ -3034,6 +3717,7 @@ def resolve_plan_operation(
     source_marker: pathlib.Path | None = None
     target_marker: pathlib.Path | None = None
     backup: pathlib.Path | None = None
+    source_missing = False
     if "atomic" in item:
         result["atomic"] = item["atomic"]
     if "ownershipPolicy" in item:
@@ -3046,14 +3730,30 @@ def resolve_plan_operation(
         if os.path.commonpath([str(source), str(artifact_root)]) != str(artifact_root):
             raise ArtifactError("path.unsafe", "Plan source escapes the artifact", operation=item["id"])
         if not source.exists():
-            raise ArtifactError("plan.unresolved", "Plan source is missing from the artifact", operation=item["id"])
+            if not allow_missing_sources:
+                raise ArtifactError("plan.unresolved", "Plan source is missing from the artifact", operation=item["id"])
+            source_missing = True
+            ready = False
+            reason = "source is unavailable until artifact sealing completes"
         result["source"] = str(source)
-        if source.is_file():
+        if source_missing:
+            pass
+        elif source.is_file():
             result["sourceSha256"] = sha256_file(source)
         else:
             result["sourceFiles"] = sum(1 for path in source.rglob("*") if path.is_file())
             result["sourceTreeSha256"] = canonical_tree_sha256(source)
     if "marker" in item:
+        if source_missing:
+            result["marker"] = safe_relative_path(
+                item["marker"],
+                f"plan.{item['id']}.marker",
+            ).as_posix()
+            result["exists"] = target.exists()
+            result["ready"] = ready
+            if reason is not None:
+                result["blockedReason"] = reason
+            return result
         if source is None or not source.is_dir():
             raise ArtifactError("plan.unresolved", "Tree ownership marker requires a directory source", operation=item["id"])
         marker_relative = safe_relative_path(item["marker"], f"plan.{item['id']}.marker")
@@ -3270,16 +3970,28 @@ def build_plan(
         resolve_path(template, bindings, f"allowedTargetRoots[{index}]")
         for index, template in enumerate(manifest["allowedTargetRoots"])
     ]
+    requires_sealing = metadata["stage"] != "sealed"
     mutable_state = resolve_mutable_state(manifest, bindings, allowed_roots)
     install = [
-        resolve_plan_operation(item, artifact_root, bindings, allowed_roots)
+        resolve_plan_operation(
+            item,
+            artifact_root,
+            bindings,
+            allowed_roots,
+            allow_missing_sources=requires_sealing,
+        )
         for item in manifest["installPlan"]
     ]
     uninstall = [
-        resolve_plan_operation(item, artifact_root, bindings, allowed_roots)
+        resolve_plan_operation(
+            item,
+            artifact_root,
+            bindings,
+            allowed_roots,
+            allow_missing_sources=requires_sealing,
+        )
         for item in manifest["uninstallPlan"]
     ]
-    requires_sealing = metadata["stage"] != "sealed"
     sealing_blockers = ["artifact.sealing_required"] if requires_sealing else []
     return {
         "schemaVersion": 1,
@@ -3359,6 +4071,163 @@ def write_minimal_pe(path: pathlib.Path) -> None:
     struct.pack_into("<H", image, 0x98, 0x20B)
     struct.pack_into("<I", image, 0x98 + 108, 16)
     path.write_bytes(image)
+
+
+def create_preserved_bundle_fixture(root: pathlib.Path) -> pathlib.Path:
+    executable = root / "Contents" / "MacOS" / "fixture_bridge"
+    info = root / "Contents" / "Info.plist"
+    owner = root / "Contents" / "Resources" / "runtime-owner.json"
+    attestation = root / "Contents" / "Resources" / "runtime-sealing.json"
+    resources = root / "Contents" / "_CodeSignature" / "CodeResources"
+    executable.parent.mkdir(parents=True)
+    owner.parent.mkdir(parents=True)
+    resources.parent.mkdir(parents=True)
+    executable.write_bytes(b"preserved bridge executable\nCMS:P\n")
+    info.write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleExecutable": "fixture_bridge",
+                "CFBundleIdentifier": "example.fixture.preserved",
+                "CFBundlePackageType": "APPL",
+            },
+            fmt=plistlib.FMT_XML,
+            sort_keys=True,
+        )
+    )
+    owner.write_bytes(
+        canonical_json_bytes(
+            {
+                "artifactId": "fixture-preserved-runtime",
+                "bundleId": "example.fixture.preserved",
+                "ownershipSchemaVersion": 1,
+            }
+        )
+    )
+    attestation.write_bytes(b"opaque old runtime-sealing provenance\n")
+    resources.write_bytes(preserved_fixture_code_resources(root))
+    for directory in root.rglob("*"):
+        if directory.is_dir():
+            directory.chmod(0o555)
+    root.chmod(0o555)
+    executable.chmod(0o555)
+    for file_path in [info, owner, attestation, resources]:
+        file_path.chmod(0o444)
+    return root
+
+
+def preserved_fixture_code_resources(bundle: pathlib.Path) -> bytes:
+    return canonical_json_bytes(
+        {
+            "attestation": sha256_file(
+                bundle / "Contents" / "Resources" / "runtime-sealing.json"
+            ),
+            "executable": sha256_file(bundle / "Contents" / "MacOS" / "fixture_bridge"),
+            "info": sha256_file(bundle / "Contents" / "Info.plist"),
+            "owner": sha256_file(bundle / "Contents" / "Resources" / "runtime-owner.json"),
+        }
+    )
+
+
+def preserved_fixture_manifest(
+    input_path: pathlib.Path,
+    description: str,
+    target_root: pathlib.Path,
+    sealing: dict[str, Any],
+) -> dict[str, Any]:
+    target = target_root / f"{description}.dll"
+    bundle_target = target_root / f"{description}.app"
+    return {
+        "schemaVersion": 1,
+        "artifact": {
+            "id": "fixture-preserved-runtime",
+            "version": "1.0.0",
+            "description": description,
+            "supportMatrix": "docs/fixture.md",
+            "buildCommand": ["python3", "tools/build_runtime_artifact.py", "build"],
+        },
+        "bindings": [],
+        "gitSources": [],
+        "prerequisites": [],
+        "sourceFiles": [],
+        "artifacts": [
+            {
+                "id": "outer_payload",
+                "path": str(input_path),
+                "artifactPath": "payload/windows/outer.dll",
+                "mode": "0444",
+                "supplyClass": "opaque-local-build",
+                "recipe": "fixture",
+                "binary": {
+                    "format": "pe",
+                    "kind": "dll",
+                    "architectures": ["x86_64"],
+                    "authenticode": "absent",
+                },
+                "signature": "none",
+            }
+        ],
+        "generatedFiles": [
+            {
+                "id": "outer_config",
+                "artifactPath": "config/outer.json",
+                "mode": "0444",
+                "format": "json",
+                "content": {"description": description},
+            }
+        ],
+        "mutableState": [],
+        "allowedTargetRoots": ["${REPO_ROOT}/.code"],
+        "installPlan": [
+            {
+                "id": "verify_outer_absent",
+                "resource": "outer_payload",
+                "action": "assert_absent",
+                "target": str(target),
+            },
+            {
+                "id": "create_outer_payload",
+                "resource": "outer_payload",
+                "action": "create_file",
+                "source": "payload/windows/outer.dll",
+                "target": str(target),
+                "atomic": True,
+            },
+            {
+                "id": "verify_preserved_bundle_absent_or_owned",
+                "resource": "preserved_bundle",
+                "action": "assert_absent_or_owned",
+                "source": "payload/macos/ALVRMacOSBridge.app",
+                "target": str(bundle_target),
+                "marker": "Contents/Resources/runtime-owner.json",
+            },
+            {
+                "id": "install_preserved_bundle",
+                "resource": "preserved_bundle",
+                "action": "replace_tree",
+                "source": "payload/macos/ALVRMacOSBridge.app",
+                "target": str(bundle_target),
+                "atomic": True,
+            },
+        ],
+        "uninstallPlan": [
+            {
+                "id": "remove_outer_payload",
+                "resource": "outer_payload",
+                "action": "remove",
+                "source": "payload/windows/outer.dll",
+                "target": str(target),
+            },
+            {
+                "id": "remove_preserved_bundle",
+                "resource": "preserved_bundle",
+                "action": "remove_tree",
+                "source": "payload/macos/ALVRMacOSBridge.app",
+                "target": str(bundle_target),
+                "marker": "Contents/Resources/runtime-owner.json",
+            }
+        ],
+        "sealing": sealing,
+    }
 
 
 def self_test() -> dict[str, Any]:
@@ -3828,6 +4697,22 @@ def self_test() -> dict[str, Any]:
         stale_seal.mkdir(parents=True)
         stale_publish.mkdir()
         (stale_seal / "partial").write_bytes(b"partial\n")
+        outside_stale_root = temp_root / "outside-stale-root"
+        outside_stale_root.mkdir()
+        (stale_seal / "outside-link").symlink_to(outside_stale_root)
+        stale_immutable_supported = bool(
+            getattr(stat, "UF_IMMUTABLE", 0)
+            and hasattr(os, "chflags")
+            and os.chflags in os.supports_follow_symlinks
+        )
+        if stale_immutable_supported:
+            immutable_partial = stale_publish / "immutable-partial"
+            immutable_partial.write_bytes(b"immutable partial\n")
+            os.chflags(
+                immutable_partial,
+                immutable_partial.lstat().st_flags | stat.UF_IMMUTABLE,
+                follow_symlinks=False,
+            )
         sealed_artifact_a = pathlib.Path(
             seal_artifact(
                 loaded_sealing_manifest,
@@ -3926,11 +4811,317 @@ def self_test() -> dict[str, Any]:
                 "unsealed-gate",
                 "post-build-seal",
                 "stale-seal-cleanup",
+                "stale-seal-symlink-cleanup",
+                *(
+                    ["stale-seal-immutable-cleanup"]
+                    if stale_immutable_supported
+                    else []
+                ),
                 "sealed-cms-variance",
                 "sealed-plan",
                 "sealed-relocation",
                 "sealed-source-refusal",
                 "sealed-tamper",
+            ]
+        )
+
+        preserved_source = create_preserved_bundle_fixture(temp_root / "ALVRMacOSBridge.app")
+        preserved_executable = preserved_source / "Contents" / "MacOS" / "fixture_bridge"
+        preserved_attestation = preserved_source / "Contents" / "Resources" / "runtime-sealing.json"
+        preserved_policy = {
+            "mode": "preserved-bundle",
+            "bundlePath": "payload/macos/ALVRMacOSBridge.app",
+            "executablePath": "Contents/MacOS/fixture_bridge",
+            "attestationPath": "Contents/Resources/runtime-sealing.json",
+            "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
+            "bundleId": "example.fixture.preserved",
+            "teamId": "PRESRV0001",
+            "identity": "Developer ID Application: Runtime Fixture (PRESRV0001)",
+            "timestamp": False,
+        }
+
+        def fake_preserved_bundle_inspector(
+            bundle: pathlib.Path,
+            manifest_value: dict[str, Any],
+        ) -> dict[str, Any]:
+            resources = bundle / "Contents" / "_CodeSignature" / "CodeResources"
+            if resources.read_bytes() != preserved_fixture_code_resources(bundle):
+                raise ArtifactError("sealing.signature", "Fixture preserved resources differ")
+            executable = bundle / "Contents" / "MacOS" / "fixture_bridge"
+            info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+            policy = manifest_value["sealing"]
+            if info.get("CFBundleIdentifier") != policy["bundleId"]:
+                raise ArtifactError("sealing.signature", "Fixture preserved bundle id differs")
+            if info.get("CFBundleExecutable") != executable.name:
+                raise ArtifactError("sealing.signature", "Fixture preserved executable differs")
+            return {
+                "kind": "developer-id",
+                "identifier": policy["bundleId"],
+                "teamIdentifier": policy["teamId"],
+                "cdhash": hashlib.sha1(
+                    executable.read_bytes(),
+                    usedforsecurity=False,
+                ).hexdigest(),
+                "authority": policy["identity"],
+                "timestamp": policy["timestamp"],
+            }
+
+        preserved_signature = fake_preserved_bundle_inspector(
+            preserved_source,
+            {"sealing": preserved_policy},
+        )
+        preserved_policy = {
+            **preserved_policy,
+            "bundleTreeSha256": canonical_tree_sha256(preserved_source),
+            "sealedExecutableSha256": sha256_file(preserved_executable),
+            "attestationSha256": sha256_file(preserved_attestation),
+            "signature": preserved_signature,
+        }
+        preserved_source_tree_before = canonical_tree_sha256(preserved_source)
+        preserved_source_attestation_before = preserved_attestation.read_bytes()
+
+        preserved_inputs = [temp_root / "outer-a.dll", temp_root / "outer-b.dll"]
+        for index, preserved_input in enumerate(preserved_inputs):
+            write_minimal_pe(preserved_input)
+            preserved_input.write_bytes(
+                preserved_input.read_bytes() + f"outer-{index}\n".encode()
+            )
+
+        preserved_artifacts: list[pathlib.Path] = []
+        preserved_records: list[dict[str, Any]] = []
+        signer_calls = 0
+
+        def forbidden_signer(_: pathlib.Path, __: dict[str, Any]) -> None:
+            nonlocal signer_calls
+            signer_calls += 1
+            raise ArtifactError("self-test.failed", "Preserved mode called the signer")
+
+        for index, preserved_input in enumerate(preserved_inputs):
+            preserved_manifest = preserved_fixture_manifest(
+                preserved_input,
+                f"outer-{index}",
+                target_root,
+                preserved_policy,
+            )
+            preserved_manifest_path = temp_root / f"preserved-{index}.json"
+            preserved_lock_path = temp_root / f"preserved-{index}.lock.json"
+            preserved_bindings_path = temp_root / f"preserved-{index}.bindings.json"
+            preserved_lock = {
+                "schemaVersion": 1,
+                "manifestSha256": sha256_bytes(canonical_json_bytes(preserved_manifest)),
+                "artifacts": [
+                    {"id": "outer_payload", "sha256": sha256_file(preserved_input)}
+                ],
+            }
+            write_json(preserved_manifest_path, preserved_manifest)
+            write_json(preserved_lock_path, preserved_lock)
+            write_json(preserved_bindings_path, {})
+            (
+                loaded_preserved_manifest,
+                loaded_preserved_lock,
+                preserved_manifest_hash,
+                preserved_lock_hash,
+            ) = load_contract(preserved_manifest_path, preserved_lock_path)
+            preserved_validation = {
+                "gitSources": [],
+                "sourceFiles": [],
+                "prerequisites": [],
+                "artifacts": [
+                    locked_input_record(
+                        loaded_preserved_manifest["artifacts"][0],
+                        loaded_preserved_lock["artifacts"][0],
+                    )
+                ],
+                "artifactPaths": {"outer_payload": preserved_input},
+            }
+            unsealed_preserved = pathlib.Path(
+                build_artifact(
+                    loaded_preserved_manifest,
+                    loaded_preserved_lock,
+                    preserved_manifest_hash,
+                    preserved_lock_hash,
+                    preserved_validation,
+                    temp_root / f"preserved-unsealed-{index}",
+                    artifact_inspector=fake_artifact_inspector,
+                )["path"]
+            )
+            unsealed_preserved_plan = build_plan(
+                loaded_preserved_manifest,
+                unsealed_preserved,
+                preserved_bindings_path,
+                bundle_inspector=fake_preserved_bundle_inspector,
+                artifact_inspector=fake_artifact_inspector,
+            )
+            if (
+                not unsealed_preserved_plan["requiresSealing"]
+                or unsealed_preserved_plan["installBlockers"][0] != "artifact.sealing_required"
+            ):
+                raise ArtifactError("self-test.failed", "Unsealed preserved plan was not sealing-gated")
+            sealed_preserved = pathlib.Path(
+                seal_artifact(
+                    loaded_preserved_manifest,
+                    loaded_preserved_lock,
+                    preserved_manifest_hash,
+                    preserved_lock_hash,
+                    unsealed_preserved,
+                    temp_root / f"preserved-output-{index}",
+                    bundle_source=preserved_source,
+                    signer=forbidden_signer,
+                    bundle_inspector=fake_preserved_bundle_inspector,
+                    artifact_inspector=fake_artifact_inspector,
+                )["path"]
+            )
+            verify_artifact(
+                sealed_preserved,
+                bundle_inspector=fake_preserved_bundle_inspector,
+                artifact_inspector=fake_artifact_inspector,
+            )
+            preserved_plan = build_plan(
+                loaded_preserved_manifest,
+                sealed_preserved,
+                preserved_bindings_path,
+                bundle_inspector=fake_preserved_bundle_inspector,
+                artifact_inspector=fake_artifact_inspector,
+            )
+            if preserved_plan["requiresSealing"] or not preserved_plan["installReady"]:
+                raise ArtifactError("self-test.failed", "Preserved sealed artifact did not plan")
+            planned_bundle = next(
+                item for item in preserved_plan["install"] if item["id"] == "install_preserved_bundle"
+            )
+            if planned_bundle["sourceTreeSha256"] != preserved_source_tree_before:
+                raise ArtifactError("self-test.failed", "Preserved bundle plan tree hash changed")
+            preserved_artifacts.append(sealed_preserved)
+            preserved_records.append(load_json(sealed_preserved / SEALING_PROVENANCE_PATH))
+
+        if signer_calls:
+            raise ArtifactError("self-test.failed", "Preserved mode invoked the signer")
+        if canonical_tree_sha256(preserved_source) != preserved_source_tree_before:
+            raise ArtifactError("self-test.failed", "Preserved source bundle tree was mutated")
+        if preserved_attestation.read_bytes() != preserved_source_attestation_before:
+            raise ArtifactError("self-test.failed", "Preserved in-bundle attestation was rewritten")
+        if preserved_artifacts[0].name == preserved_artifacts[1].name:
+            raise ArtifactError("self-test.failed", "Different outer payloads produced one artifact")
+        if (
+            {record["sealedTreeSha256"] for record in preserved_records}
+            != {preserved_source_tree_before}
+            or {record["signature"]["cdhash"] for record in preserved_records}
+            != {preserved_signature["cdhash"]}
+        ):
+            raise ArtifactError("self-test.failed", "Preserved bundle identity changed across payloads")
+
+        mismatched_preserved = preserved_fixture_manifest(
+            preserved_inputs[0],
+            "mismatch",
+            target_root,
+            {**preserved_policy, "bundleTreeSha256": "0" * 64},
+        )
+        expect_error(
+            "sealing.preserved_mismatch",
+            lambda: validate_preserved_bundle(
+                preserved_source,
+                mismatched_preserved,
+                bundle_inspector=fake_preserved_bundle_inspector,
+            ),
+        )
+        preserved_validation_manifest = preserved_fixture_manifest(
+            preserved_inputs[0],
+            "validation",
+            target_root,
+            preserved_policy,
+        )
+        writable_preserved = temp_root / "preserved-writable.app"
+        shutil.copytree(preserved_source, writable_preserved, copy_function=shutil.copy2)
+        make_tree_writable(writable_preserved)
+        expect_error(
+            "sealing.preserved_mismatch",
+            lambda: validate_preserved_bundle(
+                writable_preserved,
+                preserved_validation_manifest,
+                bundle_inspector=fake_preserved_bundle_inspector,
+            ),
+        )
+        invalid_owner_preserved = temp_root / "preserved-invalid-owner.app"
+        shutil.copytree(preserved_source, invalid_owner_preserved, copy_function=shutil.copy2)
+        make_tree_writable(invalid_owner_preserved)
+        (
+            invalid_owner_preserved
+            / "Contents/Resources/runtime-owner.json"
+        ).write_bytes(b'{"bundleId":"wrong"}\n')
+        make_tree_read_only(invalid_owner_preserved)
+        expect_error(
+            "sealing.preserved_mismatch",
+            lambda: validate_preserved_bundle(
+                invalid_owner_preserved,
+                preserved_validation_manifest,
+                bundle_inspector=fake_preserved_bundle_inspector,
+            ),
+        )
+        immutable_preserved_supported = bool(
+            getattr(stat, "UF_IMMUTABLE", 0)
+            and hasattr(os, "chflags")
+            and os.chflags in os.supports_follow_symlinks
+        )
+        if immutable_preserved_supported:
+            immutable_preserved = temp_root / "preserved-immutable.app"
+            shutil.copytree(preserved_source, immutable_preserved, copy_function=shutil.copy2)
+            immutable_executable = immutable_preserved / "Contents/MacOS/fixture_bridge"
+            os.chflags(
+                immutable_executable,
+                immutable_executable.lstat().st_flags | stat.UF_IMMUTABLE,
+                follow_symlinks=False,
+            )
+            expect_error(
+                "path.flags",
+                lambda: validate_preserved_bundle(
+                    immutable_preserved,
+                    preserved_validation_manifest,
+                    bundle_inspector=fake_preserved_bundle_inspector,
+                ),
+            )
+            make_tree_writable(immutable_preserved)
+            shutil.rmtree(immutable_preserved)
+        preserved_relocated = temp_root / "preserved-relocated" / preserved_artifacts[0].name
+        preserved_relocated.parent.mkdir()
+        shutil.copytree(preserved_artifacts[0], preserved_relocated, copy_function=shutil.copy2)
+        verify_artifact(
+            preserved_relocated,
+            bundle_inspector=fake_preserved_bundle_inspector,
+            artifact_inspector=fake_artifact_inspector,
+        )
+        make_tree_writable(preserved_relocated)
+        (
+            preserved_relocated
+            / "payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json"
+        ).write_bytes(b"tampered owner\n")
+        make_tree_read_only_except(
+            preserved_relocated,
+            {preserved_relocated / "payload/macos/ALVRMacOSBridge.app"},
+        )
+        expect_error(
+            "sealing.preserved_mismatch",
+            lambda: verify_artifact(
+                preserved_relocated,
+                bundle_inspector=fake_preserved_bundle_inspector,
+                artifact_inspector=fake_artifact_inspector,
+            ),
+        )
+        completed.extend(
+            [
+                "preserved-bundle-seal",
+                "preserved-bundle-zero-signer",
+                "preserved-bundle-opaque-attestation",
+                "preserved-bundle-outer-variance",
+                "preserved-bundle-plan",
+                "preserved-bundle-relocation",
+                "preserved-bundle-pin-mismatch",
+                "preserved-bundle-read-only",
+                "preserved-bundle-owner-marker",
+                *(
+                    ["preserved-bundle-immutable-flags"]
+                    if immutable_preserved_supported
+                    else []
+                ),
+                "preserved-bundle-tamper",
             ]
         )
 
@@ -4050,6 +5241,7 @@ def command_seal(args: argparse.Namespace) -> dict[str, Any]:
         lock_hash,
         args.artifact,
         output_root,
+        bundle_source=args.bundle_source,
     )
     return {"ok": True, **result}
 
@@ -4119,10 +5311,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     seal_parser = subparsers.add_parser(
         "seal",
-        help="Developer ID sign an immutable artifact and publish its final content address",
+        help="Seal an immutable artifact and publish its final content address",
     )
     add_contract_arguments(seal_parser)
     seal_parser.add_argument("--artifact", type=pathlib.Path, required=True)
+    seal_parser.add_argument(
+        "--bundle-source",
+        type=pathlib.Path,
+        help="Already signed .app to copy byte-for-byte for preserved-bundle sealing",
+    )
     seal_parser.add_argument("--output-root", type=pathlib.Path)
     seal_parser.set_defaults(handler=command_seal)
 

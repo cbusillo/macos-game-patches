@@ -27,8 +27,9 @@ trees automatically.
 - Treat sibling Git checkouts as source identities pinned by remote and commit.
 - Classify every staged binary as a pinned-Git, repo-source, or opaque-local
   build output; pin each by content hash and link it to its build recipe.
-- Produce an immutable deterministic unsealed artifact, then Developer ID sign
-  only a verified private copy and publish a second immutable final artifact.
+- Produce an immutable deterministic unsealed artifact, then either Developer
+  ID sign only a verified private copy or attach an already signed, independently
+  pinned bridge bundle without changing its bytes or modes.
 - Bind the source seal, contract hashes, pre-sign tree, final signed tree,
   Developer ID authority, Team ID, bundle identifier, CDHash, and no-timestamp
   policy into canonical final-sealing provenance.
@@ -113,11 +114,11 @@ mac-alvr-runtime-<version>-<full-seal>/
   payload/
     macos/
       ALVRMacOSBridge.app/
-        Contents/_CodeSignature/CodeResources  # sealed stage only
+        Contents/_CodeSignature/CodeResources  # generated or preserved at seal
         Contents/Info.plist
         Contents/MacOS/alvr_macos_bridge
         Contents/Resources/runtime-owner.json
-        Contents/Resources/runtime-sealing.json # sealed stage only
+        Contents/Resources/runtime-sealing.json # generated or preserved at seal
       libMoltenVK.dylib
     unix/
       alvr_iosurface_bridge.so
@@ -151,15 +152,17 @@ self-reference. Absolute source paths, timestamps, usernames, and hostnames are
 excluded.
 
 An unsealed artifact is already immutable and content-addressed; its metadata
-stage is `unsealed`. `seal` verifies and copies that artifact into a private
-publication directory, writes a source-seal attestation inside the app bundle,
-signs the copy, verifies the complete bundle, and computes a new final content
-address with stage `sealed`. It never edits the source artifact or an installed
-tree.
+stage is `unsealed`. In `separate-step` mode, `seal` verifies and copies that
+artifact into a private publication directory, writes a source-seal attestation
+inside the app bundle, signs the copy, verifies the complete bundle, and
+computes a new final content address with stage `sealed`. In `preserved-bundle`
+mode, it instead copies a contract-pinned, already signed, read-only app tree
+without invoking the signer or rewriting its signed attestation. It never edits
+the source artifact, preserved app, or an installed tree.
 
 `build-inputs.json` records the declared build command, actual Git commits and
 trees, tracked source hashes, prerequisite results, normalized binary metadata,
-signatures, and the separate sealing policy. `verify` cross-checks that sealed
+signatures, and the selected sealing policy. `verify` cross-checks that sealed
 record against the contract and payload rather than trusting metadata alone. It
 also rejects undeclared files or directories, generated configuration or plans
 that differ from the contract, noncanonical JSON, and incorrect published
@@ -170,12 +173,17 @@ envelope with `codesign --verify --strict --deep --all-architectures`, the
 Mach-O architecture, exact Developer ID leaf authority, Team ID, bundle and
 executable identifiers, CDHash, absent timestamp, signed source attestation,
 final executable hash, and canonical final bundle-tree digest. The only
-signing-created file admitted by contract is the canonical
-`Contents/_CodeSignature/CodeResources` path.
+signing-created file admitted by the `separate-step` contract is the canonical
+`Contents/_CodeSignature/CodeResources` path. A `preserved-bundle` contract
+instead pins the complete app tree, executable, opaque in-bundle attestation,
+Developer ID authority, Team ID, bundle identifier, CDHash, timestamp policy,
+and canonical signed ownership marker before copying it.
 
 Artifact files are published as `0444` or `0555` without copied timestamps. All
-directories become `0555`; files and directories are flushed before atomic
-publication. A repeated build may reuse an existing content-addressed directory
+outer directories become `0555`; a preserved bundle must already have no write
+bits or immutable filesystem flags, and its exact safe modes remain part of the
+tree pin. Files and directories are flushed before atomic publication. A
+repeated build may reuse an existing content-addressed directory
 only when full verification succeeds.
 
 ## Mutable Boundary
@@ -249,7 +257,7 @@ Stages into a locked temporary directory, computes the unsealed content address,
 writes canonical provenance, makes the artifact read-only, and atomically
 publishes it.
 
-### Developer ID Seal
+### Final Seal
 
 ```bash
 python3 tools/build_runtime_artifact.py seal \
@@ -257,13 +265,29 @@ python3 tools/build_runtime_artifact.py seal \
   --output-root .code/runtime-artifacts
 ```
 
-The identity, Team ID, bundle ID, output paths, and no-timestamp policy come
-only from the checked-in contract; callers cannot override them. The command
-requires the checked-in manifest and lock to match the source artifact, copies
-the verified source under the same publication lock used by `build`, writes the
-signed attestation, runs Developer ID signing, verifies the resulting bundle,
-and publishes a new read-only `sealed` content address. Re-sealing a final-stage
-artifact and in-place mutation are refused.
+`separate-step` mode uses the command above. The identity, Team ID, bundle ID,
+output paths, and no-timestamp policy come only from the checked-in contract;
+callers cannot override them. The command requires the checked-in manifest and
+lock to match the source artifact, copies the verified source under the same
+publication lock used by `build`, writes the signed attestation, runs Developer
+ID signing, verifies the resulting bundle, and publishes a new read-only
+`sealed` content address.
+
+`preserved-bundle` mode adds the already signed app source explicitly:
+
+```bash
+python3 tools/build_runtime_artifact.py seal \
+  --artifact .code/runtime-artifacts/<unsealed-artifact> \
+  --bundle-source /path/to/ALVRMacOSBridge.app \
+  --output-root .code/runtime-artifacts
+```
+
+The source path is local-only and never enters the immutable contract. Its full
+tree hash, executable and attestation hashes, signature metadata, read-only
+modes, absence of symlinks and immutable flags, and canonical ownership marker
+must match the manifest pins. The app is copied exactly, the signer is never
+called, and only outer `provenance/sealing.json` is generated. Re-sealing a
+final-stage artifact and in-place mutation are refused in either mode.
 
 ### Dry-Run Ownership Plan
 
@@ -305,7 +329,9 @@ per-filesystem capacity, and passes planner operations unchanged to the durable
 executor. Matching committed work is an idempotent success; interrupted work is
 rolled back and archived before the operator retries the requested direction.
 
-The dev8 manifest retains separate-step signing without weakening admission.
+The dev11 manifest uses preserved-bundle sealing to retain the already
+authorized bridge identity while independently updating the Windows runtime
+payload. This does not weaken admission.
 Both lifecycle commands return `artifact.sealing_required` before creating
 directories, stopping services, writing journals, or changing targets when the
 verified artifact stage is `unsealed`. A verified `sealed` artifact carries its
@@ -383,10 +409,13 @@ python3 tools/build_runtime_artifact.py compare \
 Developer ID evidence when the stage is `sealed`. `compare` requires two
 independent artifacts at the same stage to have identical seals and file
 records. Unsealed builds are deterministic and must compare equal. Developer ID
-CMS bytes can vary between valid no-timestamp signing operations even when the
-source seal, signed attestation, CodeResources, and CDHash remain identical, so
-each final tree receives its own exact content address and an exact sealed-stage
-`compare` intentionally reports those byte-level differences.
+CMS bytes can vary between valid no-timestamp `separate-step` signing operations
+even when the source seal, signed attestation, CodeResources, and CDHash remain
+identical, so each final tree receives its own exact content address and an
+exact sealed-stage `compare` intentionally reports those byte-level differences.
+Preserved-bundle builds instead require the same pinned app tree and CDHash to
+remain byte-for-byte and mode-for-mode identical across different outer
+payloads.
 
 ### Self-Test
 
@@ -428,12 +457,13 @@ classes include:
 
 - `manifest.invalid` and `lock.invalid`;
 - `binding.missing` and `binding.unknown`;
-- `path.unsafe` and `path.symlink`;
+- `path.unsafe`, `path.symlink`, and `path.flags`;
 - `git.revision`, `git.remote`, and `git.dirty`;
 - `source.hash`, `source.untracked`, `input.missing`, `input.hash`, and
   `input.type`;
 - `input.signature` and `prerequisite.mismatch`;
-- `sealing.identity`, `sealing.signature`, and `sealing.source_mismatch`;
+- `sealing.identity`, `sealing.signature`, `sealing.source_mismatch`, and
+  `sealing.preserved_mismatch`;
 - `artifact.publish`, `artifact.verify`, and `artifact.compare`;
 - `plan.unresolved` for incomplete or unsafe dry-run plans; and
 - `artifact.sealing_required`, `transaction.descriptor_unsupported`,

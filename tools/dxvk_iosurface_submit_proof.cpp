@@ -5,6 +5,7 @@
 #include <vulkan/vulkan.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cerrno>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "alvr_iosurface_bridge/iosurface_handoff_protocol.h"
+#include "shared/alvr_shm_protocol.h"
 
 namespace alvr_probe {
 namespace {
@@ -171,6 +173,9 @@ constexpr uint32_t kVisibleColorThreshold = 96;
 constexpr uint64_t kPoolFenceTimeoutNanoseconds = UINT64_C(5000000000);
 constexpr auto kPoolAcquireTimeout = std::chrono::milliseconds(100);
 constexpr auto kPoolWorkerOrderTimeout = std::chrono::seconds(40);
+constexpr uint32_t kDefaultClientConnectTimeoutMilliseconds = 600000;
+constexpr uint32_t kMaximumClientConnectTimeoutMilliseconds = 900000;
+constexpr auto kClientConnectPollInterval = std::chrono::milliseconds(10);
 constexpr DWORD kPoolShutdownTimeoutMilliseconds = 40000;
 const int kModuleAnchor = 0;
 
@@ -228,6 +233,177 @@ bool parseEnvironmentDimension(const std::string &value, uint32_t *dimension) {
     }
     *dimension = static_cast<uint32_t>(parsed);
     return true;
+}
+
+bool environmentEnabled(const char *name) {
+    const std::string value = environmentValue(name);
+    return value == "1" || value == "true" || value == "TRUE" ||
+           value == "yes" || value == "YES";
+}
+
+bool parseEnvironmentMilliseconds(const std::string &value,
+                                  uint32_t defaultValue,
+                                  uint32_t maximumValue,
+                                  uint32_t *milliseconds) {
+    if (value.empty()) {
+        *milliseconds = defaultValue;
+        return true;
+    }
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+    if (errno != 0 || end == value.c_str() || *end != '\0' || parsed == 0 ||
+        parsed > maximumValue) {
+        return false;
+    }
+    *milliseconds = static_cast<uint32_t>(parsed);
+    return true;
+}
+
+std::string wineSharedMemoryPath() {
+    std::string path = "Z:" ALVR_SHM_PATH;
+    for (char &character : path) {
+        if (character == '/') {
+            character = '\\';
+        }
+    }
+    return path;
+}
+
+bool waitForConnectedClient(SubmitProofLogFunction logFunction) {
+    if (!environmentEnabled("ALVR_IOSURFACE_REQUIRE_CLIENT")) {
+        return true;
+    }
+
+    uint32_t timeoutMilliseconds = 0;
+    const std::string timeoutValue =
+        environmentValue("ALVR_IOSURFACE_CLIENT_TIMEOUT_MS");
+    if (!parseEnvironmentMilliseconds(
+            timeoutValue,
+            kDefaultClientConnectTimeoutMilliseconds,
+            kMaximumClientConnectTimeoutMilliseconds,
+            &timeoutMilliseconds)) {
+        logFunction(
+            "iosurface pool client gate failed reason=invalid-timeout value=%s",
+            timeoutValue.c_str());
+        return false;
+    }
+
+    logFunction(
+        "iosurface pool client gate waiting timeout_ms=%u",
+        timeoutMilliseconds);
+    const std::string path = wineSharedMemoryPath();
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMilliseconds);
+    HANDLE file = INVALID_HANDLE_VALUE;
+    HANDLE mapping = nullptr;
+    AlvrSharedMemory *sharedMemory = nullptr;
+    uint32_t lastState = ALVR_CLIENT_STATE_WAITING;
+    uint32_t lastContractValid = 0;
+    uint64_t lastStreamEpoch = 0;
+
+    auto closeMapping = [&]() {
+        if (sharedMemory) {
+            UnmapViewOfFile(sharedMemory);
+            sharedMemory = nullptr;
+        }
+        if (mapping) {
+            CloseHandle(mapping);
+            mapping = nullptr;
+        }
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            file = INVALID_HANDLE_VALUE;
+        }
+    };
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!sharedMemory) {
+            file = CreateFileA(
+                path.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                mapping = CreateFileMappingA(
+                    file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+                if (mapping) {
+                    sharedMemory = static_cast<AlvrSharedMemory *>(
+                        MapViewOfFile(
+                            mapping,
+                            FILE_MAP_READ,
+                            0,
+                            0,
+                            sizeof(AlvrSharedMemory)));
+                }
+                if (!sharedMemory) {
+                    closeMapping();
+                }
+            }
+        }
+
+        if (sharedMemory && sharedMemory->magic == ALVR_SHM_MAGIC &&
+            sharedMemory->version == ALVR_SHM_VERSION &&
+            sharedMemory->initialized != 0 && sharedMemory->shutdown == 0) {
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                const uint32_t before = sharedMemory->telemetry_sequence;
+                if ((before & 1U) != 0) {
+                    continue;
+                }
+                std::atomic_thread_fence(std::memory_order_acquire);
+                const uint32_t clientState = sharedMemory->client_state;
+                const uint32_t contractValid =
+                    sharedMemory->stream_contract_valid;
+                const uint64_t streamEpoch = sharedMemory->stream_epoch;
+                std::atomic_thread_fence(std::memory_order_acquire);
+                const uint32_t after = sharedMemory->telemetry_sequence;
+                if (before != after || (after & 1U) != 0) {
+                    continue;
+                }
+
+                lastState = clientState;
+                lastContractValid = contractValid;
+                lastStreamEpoch = streamEpoch;
+                if ((clientState == ALVR_CLIENT_STATE_CONNECTED ||
+                     clientState == ALVR_CLIENT_STATE_STREAMING) &&
+                    contractValid != 0 && streamEpoch != 0) {
+                    closeMapping();
+                    logFunction(
+                        "iosurface pool client gate ready state=%u "
+                        "stream_epoch=%llu contract=pass",
+                        clientState,
+                        static_cast<unsigned long long>(streamEpoch));
+                    return true;
+                }
+                if (clientState == ALVR_CLIENT_STATE_CONNECTED &&
+                    contractValid == 0) {
+                    closeMapping();
+                    logFunction(
+                        "iosurface pool client gate failed "
+                        "reason=stream-contract state=%u stream_epoch=%llu",
+                        clientState,
+                        static_cast<unsigned long long>(streamEpoch));
+                    return false;
+                }
+                break;
+            }
+        }
+
+        std::this_thread::sleep_for(kClientConnectPollInterval);
+    }
+
+    closeMapping();
+    logFunction(
+        "iosurface pool client gate failed reason=timeout timeout_ms=%u "
+        "state=%u contract=%u stream_epoch=%llu",
+        timeoutMilliseconds,
+        lastState,
+        lastContractValid,
+        static_cast<unsigned long long>(lastStreamEpoch));
+    return false;
 }
 
 template <typename Function>
@@ -540,6 +716,8 @@ struct DxvkIosurfaceSubmitProof::PoolState {
     PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
     BridgeImportBindFunction importBind = nullptr;
     BridgeFrameReadyFunction frameReady = nullptr;
+    SubmitProofClientReadyFunction clientReadyFunction = nullptr;
+    void *clientReadyContext = nullptr;
 
     bool submitTransfer(ID3D11Texture2D *sourceTexture,
                         const D3D11_TEXTURE2D_DESC &sourceDescription,
@@ -615,6 +793,8 @@ struct DxvkIosurfaceSubmitProof::PoolInitializationContext {
     bool multithreadWasProtected = false;
     std::string serviceName;
     uint64_t sessionNonce = 0;
+    SubmitProofClientReadyFunction clientReadyFunction = nullptr;
+    void *clientReadyContext = nullptr;
     SubmitProofLogFunction logFunction = nullptr;
     HMODULE moduleReference = nullptr;
 };
@@ -1542,6 +1722,33 @@ bool DxvkIosurfaceSubmitProof::pending() {
 bool DxvkIosurfaceSubmitProof::usesPool() {
     std::lock_guard<std::mutex> lock(mutex_);
     return poolConfigured_;
+}
+
+bool DxvkIosurfaceSubmitProof::started() {
+    collectPoolInitialization();
+    std::shared_ptr<PoolState> state;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state = poolState_;
+    }
+    if (!state) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->startupReady && !state->failed && !state->closing;
+}
+
+void DxvkIosurfaceSubmitProof::setClientReadyFunction(
+    SubmitProofClientReadyFunction function,
+    void *context) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clientReadyFunction_ = function;
+    clientReadyContext_ = context;
+    if (poolState_) {
+        std::lock_guard<std::mutex> stateLock(poolState_->mutex);
+        poolState_->clientReadyFunction = function;
+        poolState_->clientReadyContext = context;
+    }
 }
 
 void DxvkIosurfaceSubmitProof::shutdown() {
@@ -2686,6 +2893,8 @@ void DxvkIosurfaceSubmitProof::startPoolInitialization(
     std::string serviceName;
     uint64_t sessionNonce = 0;
     SubmitProofLogFunction logFunction = nullptr;
+    SubmitProofClientReadyFunction clientReadyFunction = nullptr;
+    void *clientReadyContext = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (poolState_ || poolInitialization_ || poolInitializationFailed_ ||
@@ -2697,6 +2906,8 @@ void DxvkIosurfaceSubmitProof::startPoolInitialization(
         serviceName = poolService_;
         sessionNonce = poolNonce_;
         logFunction = logFunction_;
+        clientReadyFunction = clientReadyFunction_;
+        clientReadyContext = clientReadyContext_;
     }
 
     auto fail = [&](const char *reason) {
@@ -2762,6 +2973,8 @@ void DxvkIosurfaceSubmitProof::startPoolInitialization(
     context->initialization = initialization;
     context->serviceName = serviceName;
     context->sessionNonce = sessionNonce;
+    context->clientReadyFunction = clientReadyFunction;
+    context->clientReadyContext = clientReadyContext;
     context->logFunction = logFunction;
     context->moduleReference = moduleReference;
 
@@ -2832,6 +3045,8 @@ void DxvkIosurfaceSubmitProof::runPoolInitialization(
     if (state) {
         state->multithread = context->multithread;
         state->multithreadWasProtected = context->multithreadWasProtected;
+        state->clientReadyFunction = context->clientReadyFunction;
+        state->clientReadyContext = context->clientReadyContext;
         std::lock_guard<std::mutex> stateLock(state->mutex);
         failed = state->failed;
     } else if (context->multithread &&
@@ -2873,6 +3088,10 @@ void DxvkIosurfaceSubmitProof::runPoolInitialization(
                 "release_status=%u",
                 static_cast<unsigned long>(barrierStatus),
                 release.status);
+            std::lock_guard<std::mutex> stateLock(state->mutex);
+            state->failed = true;
+            failed = true;
+        } else if (!waitForConnectedClient(context->logFunction)) {
             std::lock_guard<std::mutex> stateLock(state->mutex);
             state->failed = true;
             failed = true;
@@ -3389,6 +3608,31 @@ void DxvkIosurfaceSubmitProof::runPoolWorker(PoolWorkerContext *context) {
             });
         sendTurn = sendTurn && !state->failed && !state->closing &&
                    state->nextFrameToSend == context->frameId;
+    }
+    bool clientPaused = false;
+    while (sendTurn && state->clientReadyFunction != nullptr &&
+           !state->clientReadyFunction(state->clientReadyContext)) {
+        if (!clientPaused) {
+            context->logFunction(
+                "iosurface pool client pause frame_id=%llu",
+                static_cast<unsigned long long>(context->frameId));
+            clientPaused = true;
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if (state->failed || state->closing ||
+                state->nextFrameToSend != context->frameId) {
+                sendTurn = false;
+            }
+        }
+        if (sendTurn) {
+            Sleep(10);
+        }
+    }
+    if (clientPaused && sendTurn) {
+        context->logFunction(
+            "iosurface pool client resume frame_id=%llu",
+            static_cast<unsigned long long>(context->frameId));
     }
     if (sendTurn) {
         frameStatus = state->frameReady(
