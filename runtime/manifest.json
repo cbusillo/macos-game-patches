@@ -763,7 +763,7 @@
     {
       "id": "custom_openvr_runtime_source",
       "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
-      "sha256": "53a8625f1968718548d180d9aee7ded19aa5d4715612a0c7c9297536d5154a8b",
+      "sha256": "5e586a450f895d7dd3294390e219dcc226ff14f8e5f5c52426ba0b8e8ced4707",
       "supplyClass": "repo-source"
     },
     {
@@ -907,7 +907,7 @@
     {
       "id": "game_profile_aircar",
       "path": "${REPO_ROOT}/runtime/profiles/aircar.json",
-      "sha256": "4d1ad90aafaa4473f115d166a5a7885ddd61471f0df6cb5bc75f08546139ebcc",
+      "sha256": "f0b4f9a056bae9efe274e00531a8eeeb1141f31d15d554d8305ac3ad9f29142e",
       "supplyClass": "repo-source"
     },
     {

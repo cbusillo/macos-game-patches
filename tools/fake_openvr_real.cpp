@@ -221,6 +221,8 @@ enum class FakeActionKind : uint8_t {
     ThumbstickTouch,
     ThumbstickLeft,
     ThumbstickRight,
+    ThumbstickUp,
+    ThumbstickDown,
     GripBinary,
     GripAnalog,
     MenuButton,
@@ -235,9 +237,14 @@ enum class FakeActionKind : uint8_t {
     ExternalCamera,
 };
 
+struct FakeActionBinding {
+    FakeActionKind kind = FakeActionKind::Unknown;
+    int controller_index = -1;
+};
+
 struct FakeActionHandleEntry {
     uint64_t handle;
-    FakeActionKind kind;
+    FakeActionBinding binding;
 };
 
 FakeActionHandleEntry g_fake_action_handles[32] = {};
@@ -3825,6 +3832,10 @@ const char* action_kind_name(FakeActionKind kind) {
         return "thumbstick_left";
     case FakeActionKind::ThumbstickRight:
         return "thumbstick_right";
+    case FakeActionKind::ThumbstickUp:
+        return "thumbstick_up";
+    case FakeActionKind::ThumbstickDown:
+        return "thumbstick_down";
     case FakeActionKind::GripBinary:
         return "grip_binary";
     case FakeActionKind::GripAnalog:
@@ -3853,13 +3864,99 @@ const char* action_kind_name(FakeActionKind kind) {
     return "unknown";
 }
 
-void remember_action_handle(uint64_t handle, FakeActionKind kind) {
-    if (handle == 0 || kind == FakeActionKind::Unknown) {
+const char* action_controller_name(int controller_index) {
+    if (controller_index == 0) {
+        return "left";
+    }
+    if (controller_index == 1) {
+        return "right";
+    }
+    if (controller_index == 2) {
+        return "head";
+    }
+    return "auto";
+}
+
+bool action_source_equals(const char* source, size_t length, const char* expected) {
+    return std::strlen(expected) == length && _strnicmp(source, expected, length) == 0;
+}
+
+FakeActionBinding action_binding_for_source(const char* source, size_t length) {
+    struct SourceBinding {
+        const char* source;
+        FakeActionKind kind;
+        int controller_index;
+    };
+    static constexpr SourceBinding bindings[] = {
+        { "left-trigger", FakeActionKind::Trigger, 0 },
+        { "right-trigger", FakeActionKind::Trigger, 1 },
+        { "left-grip", FakeActionKind::Grip, 0 },
+        { "right-grip", FakeActionKind::Grip, 1 },
+        { "left-thumbstick", FakeActionKind::Thumbstick, 0 },
+        { "right-thumbstick", FakeActionKind::Thumbstick, 1 },
+        { "left-thumbstick-up", FakeActionKind::ThumbstickUp, 0 },
+        { "right-thumbstick-up", FakeActionKind::ThumbstickUp, 1 },
+        { "left-thumbstick-down", FakeActionKind::ThumbstickDown, 0 },
+        { "right-thumbstick-down", FakeActionKind::ThumbstickDown, 1 },
+        { "left-thumbstick-left", FakeActionKind::ThumbstickLeft, 0 },
+        { "right-thumbstick-left", FakeActionKind::ThumbstickLeft, 1 },
+        { "left-thumbstick-right", FakeActionKind::ThumbstickRight, 0 },
+        { "right-thumbstick-right", FakeActionKind::ThumbstickRight, 1 },
+        { "left-menu", FakeActionKind::MenuButton, 0 },
+        { "right-menu", FakeActionKind::MenuButton, 1 },
+        { "left-primary", FakeActionKind::PrimaryButton, 0 },
+        { "right-primary", FakeActionKind::PrimaryButton, 1 },
+        { "left-secondary", FakeActionKind::SecondaryButton, 0 },
+        { "right-secondary", FakeActionKind::SecondaryButton, 1 },
+        { "left-pose", FakeActionKind::Pose, 0 },
+        { "right-pose", FakeActionKind::Pose, 1 },
+        { "head-pose", FakeActionKind::Pose, 2 },
+        { "left-haptic", FakeActionKind::Haptic, 0 },
+        { "right-haptic", FakeActionKind::Haptic, 1 },
+    };
+    for (const SourceBinding& binding : bindings) {
+        if (action_source_equals(source, length, binding.source)) {
+            return { binding.kind, binding.controller_index };
+        }
+    }
+    return {};
+}
+
+FakeActionBinding custom_action_binding_for_handle(uint64_t handle) {
+    char value[4096] = {};
+    DWORD length = GetEnvironmentVariableA("ALVR_FAKE_ACTION_BINDINGS", value, sizeof(value));
+    if (length == 0 || length >= sizeof(value)) {
+        return {};
+    }
+
+    char* cursor = value;
+    while (*cursor) {
+        char* handle_end = nullptr;
+        unsigned long long candidate = std::strtoull(cursor, &handle_end, 10);
+        char* entry_end = std::strchr(cursor, ',');
+        if (!entry_end) {
+            entry_end = cursor + std::strlen(cursor);
+        }
+        if (handle_end != cursor && handle_end < entry_end && *handle_end == '=' &&
+            static_cast<uint64_t>(candidate) == handle) {
+            const char* source = handle_end + 1;
+            return action_binding_for_source(
+                source,
+                static_cast<size_t>(entry_end - source)
+            );
+        }
+        cursor = *entry_end ? entry_end + 1 : entry_end;
+    }
+    return {};
+}
+
+void remember_action_handle(uint64_t handle, FakeActionBinding binding) {
+    if (handle == 0 || binding.kind == FakeActionKind::Unknown) {
         return;
     }
     for (LONG index = 0; index < g_fake_action_handle_count; ++index) {
         if (g_fake_action_handles[index].handle == handle) {
-            g_fake_action_handles[index].kind = kind;
+            g_fake_action_handles[index].binding = binding;
             return;
         }
     }
@@ -3868,16 +3965,20 @@ void remember_action_handle(uint64_t handle, FakeActionKind kind) {
         InterlockedDecrement(&g_fake_action_handle_count);
         return;
     }
-    g_fake_action_handles[index] = { handle, kind };
+    g_fake_action_handles[index] = { handle, binding };
+}
+
+FakeActionBinding action_binding_for_handle(uint64_t handle) {
+    for (LONG index = 0; index < g_fake_action_handle_count; ++index) {
+        if (g_fake_action_handles[index].handle == handle) {
+            return g_fake_action_handles[index].binding;
+        }
+    }
+    return {};
 }
 
 FakeActionKind action_kind_for_handle(uint64_t handle) {
-    for (LONG index = 0; index < g_fake_action_handle_count; ++index) {
-        if (g_fake_action_handles[index].handle == handle) {
-            return g_fake_action_handles[index].kind;
-        }
-    }
-    return FakeActionKind::Unknown;
+    return action_binding_for_handle(handle).kind;
 }
 
 bool is_advance_action(FakeActionKind kind) {
@@ -3954,6 +4055,10 @@ bool digital_action_state(FakeActionKind kind, const SharedControllerSnapshot* c
         return controller->axes[0][0] < -0.5f;
     case FakeActionKind::ThumbstickRight:
         return controller->axes[0][0] > 0.5f;
+    case FakeActionKind::ThumbstickUp:
+        return controller->axes[0][1] > 0.5f;
+    case FakeActionKind::ThumbstickDown:
+        return controller->axes[0][1] < -0.5f;
     case FakeActionKind::PrimaryButtonTouch:
         return button_touched(*controller, vr::k_EButton_A);
     case FakeActionKind::SecondaryButtonTouch:
@@ -4096,15 +4201,23 @@ vr::EVRInputError __stdcall fake_c_input_get_action_set_handle(const char* name,
 vr::EVRInputError __stdcall fake_c_input_get_action_handle(const char* name, vr::VRActionHandle_t* handle) {
     if (handle) {
         *handle = stable_input_handle(name, 0x2000ULL);
-        FakeActionKind kind = action_kind_for_name(name);
-        remember_action_handle(*handle, kind);
+        FakeActionBinding binding { action_kind_for_name(name), -1 };
+        if (binding.kind == FakeActionKind::HeadsetOnHead) {
+            binding.controller_index = 2;
+        }
+        FakeActionBinding custom_binding = custom_action_binding_for_handle(*handle);
+        if (custom_binding.kind != FakeActionKind::Unknown) {
+            binding = custom_binding;
+        }
+        remember_action_handle(*handle, binding);
         char message[640] = {};
         std::snprintf(
             message,
             sizeof(message),
-            "IVRInput::GetActionHandle name=%s kind=%s handle=%llu",
+            "IVRInput::GetActionHandle name=%s kind=%s controller=%s handle=%llu",
             name ? name : "<null>",
-            action_kind_name(kind),
+            action_kind_name(binding.kind),
+            action_controller_name(binding.controller_index),
             static_cast<unsigned long long>(*handle)
         );
         log_line(message);
@@ -4143,9 +4256,17 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
         return vr::VRInputError_InvalidParam;
     }
 
-    log_input_action_query(restrict_to_device);
+    FakeActionBinding binding = action_binding_for_handle(action);
+    vr::VRInputValueHandle_t effective_restriction = restrict_to_device;
+    if (effective_restriction == vr::k_ulInvalidInputValueHandle &&
+        binding.controller_index >= 0) {
+        effective_restriction = static_cast<vr::VRInputValueHandle_t>(
+            binding.controller_index + 1
+        );
+    }
+    log_input_action_query(effective_restriction);
     FakeInputSnapshotState snapshot = fake_input_snapshot_state();
-    FakeActionKind kind = action_kind_for_handle(action);
+    FakeActionKind kind = binding.kind;
     bool active = false;
     bool previous_active = false;
     bool state = false;
@@ -4153,15 +4274,15 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
     vr::VRInputValueHandle_t active_origin = 1;
 
     if (kind == FakeActionKind::HeadsetOnHead &&
-        (restrict_to_device == 3 ||
-         restrict_to_device == vr::k_ulInvalidInputValueHandle)) {
+        (effective_restriction == 3 ||
+         effective_restriction == vr::k_ulInvalidInputValueHandle)) {
         active = true;
         previous_active = true;
         state = true;
         previous_state = true;
         active_origin = 3;
-    } else if (restrict_to_device == 1 || restrict_to_device == 2) {
-        int controller_index = restrict_to_device == 2 ? 1 : 0;
+    } else if (effective_restriction == 1 || effective_restriction == 2) {
+        int controller_index = effective_restriction == 2 ? 1 : 0;
         active = snapshot.current_valid[controller_index]
             || snapshot.current_synthetic_active;
         previous_active = snapshot.previous_valid[controller_index]
@@ -4172,8 +4293,8 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
         previous_state = snapshot.previous_valid[controller_index]
             ? digital_action_state(kind, &snapshot.previous[controller_index])
             : (snapshot.previous_synthetic_pressed && is_advance_action(kind));
-        active_origin = restrict_to_device;
-    } else if (restrict_to_device == vr::k_ulInvalidInputValueHandle) {
+        active_origin = effective_restriction;
+    } else if (effective_restriction == vr::k_ulInvalidInputValueHandle) {
         bool left_state = snapshot.current_valid[0]
             && digital_action_state(kind, &snapshot.current[0]);
         bool right_state = snapshot.current_valid[1]
@@ -4212,7 +4333,7 @@ vr::EVRInputError __stdcall fake_c_input_get_digital_action_data(
             static_cast<unsigned long long>(query),
             static_cast<unsigned long long>(action),
             action_kind_name(kind),
-            static_cast<unsigned long long>(restrict_to_device),
+            static_cast<unsigned long long>(effective_restriction),
             data->bActive ? 1U : 0U,
             data->bState ? 1U : 0U,
             data->bChanged ? 1U : 0U,
@@ -4230,15 +4351,23 @@ vr::EVRInputError __stdcall fake_c_input_get_analog_action_data(
         return vr::VRInputError_InvalidParam;
     }
 
-    log_input_action_query(restrict_to_device);
+    FakeActionBinding binding = action_binding_for_handle(action);
+    vr::VRInputValueHandle_t effective_restriction = restrict_to_device;
+    if (effective_restriction == vr::k_ulInvalidInputValueHandle &&
+        binding.controller_index >= 0) {
+        effective_restriction = static_cast<vr::VRInputValueHandle_t>(
+            binding.controller_index + 1
+        );
+    }
+    log_input_action_query(effective_restriction);
     FakeInputSnapshotState snapshot = fake_input_snapshot_state();
-    FakeActionKind kind = action_kind_for_handle(action);
+    FakeActionKind kind = binding.kind;
     int controller_index = 0;
-    if (restrict_to_device == 2) {
+    if (effective_restriction == 2) {
         controller_index = 1;
-    } else if (restrict_to_device == vr::k_ulInvalidInputValueHandle) {
+    } else if (effective_restriction == vr::k_ulInvalidInputValueHandle) {
         controller_index = select_analog_controller(kind, snapshot);
-    } else if (restrict_to_device != 1) {
+    } else if (effective_restriction != 1) {
         std::memset(data, 0, sizeof(*data));
         return vr::VRInputError_None;
     }
@@ -4293,7 +4422,7 @@ vr::EVRInputError __stdcall fake_c_input_get_analog_action_data(
             static_cast<unsigned long long>(query),
             static_cast<unsigned long long>(action),
             action_kind_name(kind),
-            static_cast<unsigned long long>(restrict_to_device),
+            static_cast<unsigned long long>(effective_restriction),
             data->bActive ? 1U : 0U,
             data->x,
             data->y,
@@ -4309,6 +4438,7 @@ vr::EVRInputError __stdcall fake_c_input_get_analog_action_data(
 }
 
 vr::EVRInputError fill_input_pose_action_data(
+    vr::VRActionHandle_t action,
     vr::InputPoseActionData_t* data,
     uint32_t size,
     vr::VRInputValueHandle_t restrict_to_device
@@ -4317,23 +4447,31 @@ vr::EVRInputError fill_input_pose_action_data(
         return vr::VRInputError_InvalidParam;
     }
 
-    log_input_action_query(restrict_to_device);
+    FakeActionBinding binding = action_binding_for_handle(action);
+    vr::VRInputValueHandle_t effective_restriction = restrict_to_device;
+    if (effective_restriction == vr::k_ulInvalidInputValueHandle &&
+        binding.controller_index >= 0) {
+        effective_restriction = static_cast<vr::VRInputValueHandle_t>(
+            binding.controller_index + 1
+        );
+    }
+    log_input_action_query(effective_restriction);
     FakeInputSnapshotState snapshot = fake_input_snapshot_state();
     std::memset(data, 0, sizeof(*data));
 
-    if (restrict_to_device == 3) {
+    if (effective_restriction == 3) {
         data->bActive = true;
         data->activeOrigin = 3;
         fill_pose(&data->pose, vr::k_unTrackedDeviceIndex_Hmd);
         return vr::VRInputError_None;
     }
 
-    int controller_index = restrict_to_device == 2 ? 1 : 0;
-    if (restrict_to_device == vr::k_ulInvalidInputValueHandle
+    int controller_index = effective_restriction == 2 ? 1 : 0;
+    if (effective_restriction == vr::k_ulInvalidInputValueHandle
         && !snapshot.current_valid[0] && snapshot.current_valid[1]) {
         controller_index = 1;
-    } else if (restrict_to_device != vr::k_ulInvalidInputValueHandle
-        && restrict_to_device != 1 && restrict_to_device != 2) {
+    } else if (effective_restriction != vr::k_ulInvalidInputValueHandle
+        && effective_restriction != 1 && effective_restriction != 2) {
         return vr::VRInputError_None;
     }
 
@@ -4350,24 +4488,24 @@ vr::EVRInputError fill_input_pose_action_data(
 }
 
 vr::EVRInputError __stdcall fake_c_input_get_pose_action_data(
-    vr::VRActionHandle_t,
+    vr::VRActionHandle_t action,
     vr::ETrackingUniverseOrigin,
     float,
     vr::InputPoseActionData_t* data,
     uint32_t size,
     vr::VRInputValueHandle_t restrict_to_device
 ) {
-    return fill_input_pose_action_data(data, size, restrict_to_device);
+    return fill_input_pose_action_data(action, data, size, restrict_to_device);
 }
 
 vr::EVRInputError __stdcall fake_c_input_get_pose_action_data_for_next_frame(
-    vr::VRActionHandle_t,
+    vr::VRActionHandle_t action,
     vr::ETrackingUniverseOrigin,
     vr::InputPoseActionData_t* data,
     uint32_t size,
     vr::VRInputValueHandle_t restrict_to_device
 ) {
-    return fill_input_pose_action_data(data, size, restrict_to_device);
+    return fill_input_pose_action_data(action, data, size, restrict_to_device);
 }
 
 vr::EVRInputError __stdcall fake_c_input_get_skeletal_action_data(
@@ -4479,9 +4617,11 @@ vr::EVRInputError __stdcall fake_c_input_get_action_origins(
     uint32_t count
 ) {
     if (origins && count > 0) {
-        FakeActionKind kind = action_kind_for_handle(action);
-        if (kind == FakeActionKind::HeadsetOnHead) {
-            origins[0] = 3;
+        FakeActionBinding binding = action_binding_for_handle(action);
+        if (binding.controller_index >= 0) {
+            origins[0] = static_cast<vr::VRInputValueHandle_t>(
+                binding.controller_index + 1
+            );
             for (uint32_t index = 1; index < count; ++index) {
                 origins[index] = 0;
             }
