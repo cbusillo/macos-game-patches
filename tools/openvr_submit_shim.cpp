@@ -721,10 +721,14 @@ public:
     SharedMemorySubmitWriter()
         : m_inner_crop_px(env_u32("ALVR_SHIM_INNER_CROP_PX", 0)),
           m_scale_divisor(env_divisor("ALVR_SHIM_SCALE_DIVISOR", 1)),
-          m_synthetic_frame(env_enabled("ALVR_SHIM_SYNTHETIC_FRAME")) {
-        m_iosurface_proof.setClientReadyFunction(
-            &SharedMemorySubmitWriter::pool_client_ready_callback,
-            this);
+          m_synthetic_frame(env_enabled("ALVR_SHIM_SYNTHETIC_FRAME")),
+          m_require_client(env_enabled("ALVR_IOSURFACE_REQUIRE_CLIENT")) {
+        if (m_require_client) {
+            m_iosurface_proof.setClientReadyFunction(
+                &SharedMemorySubmitWriter::pool_client_ready_callback,
+                this);
+            log_line("iosurface pool client readiness gate enabled");
+        }
         if (m_inner_crop_px != 0) {
             log_line("using inner-eye packing crop=%u px", m_inner_crop_px);
         }
@@ -823,6 +827,9 @@ private:
     }
 
     bool pool_client_ready() {
+        if (!m_require_client) {
+            return true;
+        }
         ClientTelemetrySnapshot snapshot;
         bool ready = false;
         {
@@ -1859,6 +1866,7 @@ private:
     uint32_t m_inner_crop_px = 0;
     uint32_t m_scale_divisor = 1;
     bool m_synthetic_frame = false;
+    bool m_require_client = false;
     bool m_logged_pose_contract_sample = false;
     uint64_t m_submit_counter = 0;
     std::atomic<uint64_t> m_submit_diagnostic_counter { 0 };
