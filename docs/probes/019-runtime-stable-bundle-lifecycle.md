@@ -95,6 +95,22 @@ The v1 runtime remains owner-operated. Tree hashes before and after external
 unlink interval, and orchestrated same-UID path swaps remain outside the
 authentication boundary against an intentionally hostile owner process.
 
+## Research Runner Failure Rollback
+
+The physical qualification runner also replaces the exact owned stable bridge
+bundle. Its bounded removal helper snapshots every directory's mode and
+device/inode identity before adding owner write permission. If permission
+normalization or recursive deletion fails, every surviving same-identity
+directory is restored to its exact prior mode in reverse order before the
+helper returns failure. Identity changes or failed restoration remain explicit
+fail-closed errors.
+
+A focused macOS regression uses an ad-hoc signed bundle with `0555` directories
+and an immutable sealed payload. The immutable file forces `rm -rf` to fail
+after permissions are opened; the test requires the bundle root, `Contents`,
+`MacOS`, and `Resources` modes to return to `0555`, then verifies the unchanged
+success path still removes an ordinary signed fixture.
+
 ## Validation
 
 ```bash
@@ -109,6 +125,8 @@ python3 -m py_compile \
   tools/runtime_control_test.py
 python3 tools/runtime_transaction_test.py
 python3 tools/runtime_install_test.py
+PYTHONPATH=tools python3 -m unittest \
+  tools.runtime_install_test.RuntimeInstallTests.test_probe_bundle_removal_restores_modes_after_delete_failure
 python3 tools/runtime_control_test.py
 python3 tools/runtime_descriptor_test.py
 python3 tools/build_runtime_artifact.py check

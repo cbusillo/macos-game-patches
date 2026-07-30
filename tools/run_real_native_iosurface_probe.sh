@@ -1224,9 +1224,19 @@ remove_owned_native_bridge_bundle() {
 	local bundle=$1
 	local actual_identifier
 	local actual_team
+	local current_identity
 	local directory
+	local directory_identity
+	local directory_mode
+	local failure_message=
+	local index
 	local marker="$bundle/Contents/Resources/runtime-owner.json"
+	local opened_directory_count=0
 	local program="$bundle/Contents/MacOS/alvr_macos_bridge"
+	local restore_failed=0
+	local -a directories=()
+	local -a directory_identities=()
+	local -a directory_modes=()
 
 	if [[ ! -e $bundle && ! -L $bundle ]]; then
 		return 0
@@ -1266,13 +1276,61 @@ remove_owned_native_bridge_bundle() {
 		return 1
 	fi
 	while IFS= read -r -d '' directory; do
-		chmod u+w "$directory" || return 1
+		directory_mode=$(stat -f '%Lp' "$directory") || {
+			echo "failed to snapshot native bridge bundle directory mode" >&2
+			return 1
+		}
+		directory_identity=$(stat -f '%d:%i' "$directory") || {
+			echo "failed to snapshot native bridge bundle directory identity" >&2
+			return 1
+		}
+		directories+=("$directory")
+		directory_modes+=("$directory_mode")
+		directory_identities+=("$directory_identity")
 	done < <(find "$bundle" -type d -print0)
-	rm -rf "$bundle"
-	if [[ -e $bundle || -L $bundle ]]; then
-		echo "owned native bridge bundle removal was incomplete" >&2
-		return 1
+	for ((index = 0; index < ${#directories[@]}; index++)); do
+		if ! chmod u+w "${directories[$index]}"; then
+			failure_message="failed to make native bridge bundle writable for removal"
+			break
+		fi
+		opened_directory_count=$((index + 1))
+	done
+	if [[ -z $failure_message ]]; then
+		if rm -rf "$bundle" && [[ ! -e $bundle && ! -L $bundle ]]; then
+			return 0
+		fi
+		failure_message="owned native bridge bundle removal was incomplete"
 	fi
+	for ((index = opened_directory_count - 1; index >= 0; index--)); do
+		directory=${directories[$index]}
+		if [[ ! -e $directory && ! -L $directory ]]; then
+			continue
+		fi
+		if [[ -L $directory || ! -d $directory ]]; then
+			echo "native bridge bundle directory changed during mode restoration" >&2
+			restore_failed=1
+			continue
+		fi
+		current_identity=$(stat -f '%d:%i' "$directory") || {
+			echo "failed to inspect native bridge bundle directory during mode restoration" >&2
+			restore_failed=1
+			continue
+		}
+		if [[ $current_identity != "${directory_identities[$index]}" ]]; then
+			echo "native bridge bundle directory identity changed during mode restoration" >&2
+			restore_failed=1
+			continue
+		fi
+		if ! chmod "${directory_modes[$index]}" "$directory"; then
+			echo "failed to restore native bridge bundle directory mode" >&2
+			restore_failed=1
+		fi
+	done
+	echo "$failure_message" >&2
+	if [[ $restore_failed -ne 0 ]]; then
+		echo "native bridge bundle directory mode restoration was incomplete" >&2
+	fi
+	return 1
 }
 
 probe_owns_stale_launch_agent_state() {
