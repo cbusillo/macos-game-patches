@@ -1129,7 +1129,7 @@ native_bridge_signature_team=$(codesign -dv --verbose=4 \
 native_bridge_signature_cdhash=$(codesign -dv --verbose=4 \
     "$native_bridge_install_program" 2>&1 | sed -n 's/^CDHash=//p')
 native_bridge_bundle_matches_staging
-rg -q '^mode=artifact-preserved$' "$run_dir/native-bridge-codesign.log"
+/usr/bin/grep -q '^mode=artifact-preserved$' "$run_dir/native-bridge-codesign.log"
 '''
         CODE_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="probe-bundle-stage-", dir=CODE_ROOT) as root:
