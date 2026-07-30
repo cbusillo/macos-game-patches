@@ -324,7 +324,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "256940512454ab0dabe07ee90675d4d9188faf5c"
+      "revision": "c798cdd30cd4ae6ba83bc97e977f420e53e740a4"
     },
     {
       "cleanPolicy": "all",
