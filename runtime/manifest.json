@@ -324,7 +324,7 @@
       "id": "alvr_host",
       "path": "${ALVR_CHECKOUT}",
       "remote": "https://github.com/cbusillo/ALVR.git",
-      "revision": "fae5a673792f7b8b3e6de24adc8c0b1be7181f4d"
+      "revision": "256940512454ab0dabe07ee90675d4d9188faf5c"
     },
     {
       "cleanPolicy": "all",
@@ -710,7 +710,7 @@
     },
     {
       "argv": ["/usr/bin/sw_vers", "-buildVersion"],
-      "equals": "26A5378n",
+      "equals": "26A5388g",
       "id": "macos_build",
       "kind": "command"
     },
@@ -763,7 +763,7 @@
     {
       "id": "custom_openvr_runtime_source",
       "path": "${REPO_ROOT}/tools/fake_openvr_real.cpp",
-      "sha256": "56ac781b8cea36e6012d201c197c0cbab21233455e8699b9ec42967b130ba805",
+      "sha256": "53a8625f1968718548d180d9aee7ded19aa5d4715612a0c7c9297536d5154a8b",
       "supplyClass": "repo-source"
     },
     {
@@ -889,7 +889,7 @@
     {
       "id": "runtime_profile",
       "path": "${REPO_ROOT}/tools/runtime_profile.py",
-      "sha256": "f381cd18dd8ba1179f8ee00a0e0e534aa0da2ae109fe7699bafce063a6335d75",
+      "sha256": "9c4077c8fdaf363285e2c6686ef581ce7f8327b90c549ba014d82eae0296344f",
       "supplyClass": "repo-source"
     },
     {
@@ -902,6 +902,12 @@
       "id": "game_profile_freedom_locomotion",
       "path": "${REPO_ROOT}/runtime/profiles/freedom-locomotion.json",
       "sha256": "29cb1738706338344a2c1a44781ab121bb7e45a75df75808a23cc1164faa712e",
+      "supplyClass": "repo-source"
+    },
+    {
+      "id": "game_profile_aircar",
+      "path": "${REPO_ROOT}/runtime/profiles/aircar.json",
+      "sha256": "4d1ad90aafaa4473f115d166a5a7885ddd61471f0df6cb5bc75f08546139ebcc",
       "supplyClass": "repo-source"
     },
     {

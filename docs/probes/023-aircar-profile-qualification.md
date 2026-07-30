@@ -1,0 +1,227 @@
+# Aircar Packaged-Runtime Qualification
+
+## Goal
+
+Determine whether the official unmodified Steam build of Aircar can become the
+third positive OpenVR/D3D11 title using only a curated profile and the existing
+sealed Mac ALVR runtime.
+
+Issue routing: #101, under compatibility tranche #59.
+
+## Hypothesis
+
+Aircar should not require a new graphics or VR architecture. The installed
+payload is a compact Unreal Engine title whose shipping executable imports
+`d3d11.dll`, whose engine tree contains OpenVR 1.0.16, and whose checked-in
+SteamVR action manifest includes Touch, Index, Vive, WMR, and gamepad bindings.
+
+The hypothesis is alive only if the stock OpenVR DLL can be replaced at the
+declared engine path, the shipping process can be owned exactly, visible frames
+reach the existing IOSurface path, PS VR2 Sense actions are usable, and cleanup
+restores the exact Steam payload.
+
+## Environment And Pinned Payload
+
+Recorded July 30, 2026:
+
+- Steam app: `1073390` (`Aircar`)
+- build: `4505210`
+- depot: `1073391`
+- depot manifest: `1310052055377678008`
+- installed bytes: `892980026`
+- files: `38`
+- projected stock tree SHA-256:
+  `d7f8199a4c0649b8acfcec5d859f61373848ab4949b77618c91601c98bb32dbf`
+- launch executable: `Aircar.exe`
+- owned process: `Aircar/Binaries/Win64/AirCar-Win64-Shipping.exe`
+- graphics directory: `Aircar/Binaries/Win64`
+- stock OpenVR directory:
+  `Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_16/Win64`
+- stock OpenVR SHA-256:
+  `040cdd453d8794e1b8b7ee33909b81d9995e8a3ddb82878c0f0c2d3a1daae160`
+
+The second OpenVR SDK copy under the marketplace plugin is payload evidence,
+not the initial substitution target. If the first probe never reaches the
+custom runtime, verify the loaded module path before changing the profile.
+
+## Plan
+
+1. Check the canonical profile and exact Steam payload identity.
+2. Run artifact and profile hardware-free self-tests.
+3. Run a 300-frame local-window smoke probe with no AVP connection.
+4. Run the 5,400-frame disconnected cadence and cleanup gate.
+5. Run the 81,000-frame physical Vision Pro gate and controller checklist.
+6. Repeat from the same sealed runtime and verify exact stock restoration.
+
+Do not add Aircar-specific runtime branches before module-load, frame, or input
+evidence proves a shared contract is insufficient.
+
+## Reproducible Commands
+
+Set the sealed artifact path explicitly:
+
+```bash
+artifact=/absolute/path/to/mac-alvr-runtime-1.0.0-*/
+python3 tools/runtime_profile.py check aircar
+python3 tools/runtime_profile.py preflight \
+  --profile aircar --artifact "$artifact" --mode smoke
+python3 tools/runtime_profile.py probe \
+  --profile aircar --artifact "$artifact" --mode smoke
+```
+
+After the smoke result is recorded:
+
+```bash
+python3 tools/runtime_profile.py probe \
+  --profile aircar --artifact "$artifact" --mode disconnected
+python3 tools/runtime_profile.py probe \
+  --profile aircar --artifact "$artifact" --mode physical
+```
+
+## Expected Artifacts
+
+Each probe writes under:
+
+```text
+.code/probes/013-the-lab-profile-qualification/aircar/
+```
+
+Record the generated preflight JSON and real-native run directory, including
+module-load logs, submitted-frame contracts, cadence, drops, pose pairing,
+client state when connected, exact process identity, and cleanup restoration.
+
+## Physical Controller Checklist
+
+- right trigger applies forward thrust;
+- left trigger applies reverse thrust;
+- right thumbstick controls pitch and roll;
+- left thumbstick controls vertical movement and yaw;
+- turbo, menu interaction, and music pause actions are reachable;
+- recenter/menu behavior does not strand the process;
+- left and right haptics are recorded when the title emits them.
+
+## Cleanup
+
+The probe must finish with:
+
+```bash
+python3 tools/vr_stack_cleanup.py
+python3 tools/runtime_profile.py preflight \
+  --profile aircar --artifact "$artifact" --mode smoke
+```
+
+The second preflight must see the exact stock OpenVR hash, no staged DXVK or
+bridge DLLs, no runtime logs below the projected payload, and no owned process.
+
+## Known Failure Signatures
+
+- `preflight.hash`: wrong or modified stock OpenVR DLL.
+- `preflight.payload`: Steam update, residual runtime file, or incomplete
+  cleanup changed the projected tree.
+- no custom-runtime calls: the marketplace plugin OpenVR copy may be the loaded
+  module; prove the module path before adding a second target.
+- shipping process timeout: the bootstrap executable or process pattern is
+  wrong, or a prerequisite dialog intercepted launch.
+- OpenVR interface error: Aircar requests an interface not yet implemented by
+  the custom runtime.
+- black, flashing, or mono output: source geometry or Unreal texture semantics
+  differ from the existing D3D11 contract.
+- action-manifest or binding failure: the title depends on SteamVR Input
+  behavior beyond the current PS VR2 Sense mapping.
+
+## Current Evidence
+
+The official payload installed successfully on July 29, 2026. Static inventory
+confirms an x86-64 Unreal shipping executable, direct `d3d11.dll` and `dxgi.dll`
+imports, OpenVR 1.0.16, SteamVR Input actions, two tracked controller poses,
+dual thumbsticks, analog forward/reverse thrust, buttons, and bilateral
+haptics. No game binaries have been modified.
+
+### Shared Compatibility Repairs
+
+Aircar exposed two shared runtime assumptions rather than a title-specific
+branch:
+
+- The fake compositor returned length `1` for an empty Vulkan instance or
+  device-extension string. Aircar's Unreal/DXVK path treated that as one blank
+  extension and failed Vulkan instance creation. Returning `0` for no required
+  extensions fixed startup. The corrected x86-64 PE runtime SHA-256 is
+  `57bcf6160d2e94b372ebf399611be2df282c952caaa80f847035a46413985476`.
+- Aircar creates `*_d3d9.log` beside its launcher even though rendering uses
+  D3D11. Profile preflight, log archival, restoration, and final absence checks
+  now cover D3D9 logs alongside D3D11 and DXGI logs.
+
+No Aircar executable, asset, or checked-in binding was patched.
+
+### Automated Qualification
+
+- Smoke run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T014246Z`
+  submitted and encoded `300/300` frames, reached `90.000` FPS in the final
+  window, recorded zero producer/native drops, and restored exact stock state.
+- Disconnected run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T015049Z`
+  submitted and encoded `5,400/5,400` visible frames, reached `90.006` FPS in
+  the final window, recorded zero producer/native drops, and restored exact
+  stock state including D3D9 log cleanup.
+- Connected run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T020657Z`
+  encoded and transported `81,000/81,000` frames, reached `89.979` FPS in the
+  final window, recorded zero producer drops, pool exhaustion, pose-generation
+  gaps, decoder errors, or decoder resets, and restored host/device state. Six
+  frames arrived before the ALVR sink-connected event and were classified as
+  startup `not_ready` drops.
+- Repeat connected run
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T022429Z`
+  encoded and transported `81,000/81,000` frames, reached `90.006` FPS in the
+  final window, paired `80,999` exact poses with one bootstrap fallback,
+  recorded zero producer drops, pool exhaustion, pose-generation gaps, decoder
+  errors, or decoder resets, and restored host/device state. Eleven frames were
+  startup `not_ready` drops before `alvr_sink connected epoch=1`.
+
+The repeated connected evidence establishes the Aircar frame, encode,
+transport, decoder, pose, cadence, client-stop, and cleanup paths. The only
+strict automated-gate miss is the shared host startup race: the native source
+created the ALVR sink only after producer self-tests and immediately released
+the producer barrier.
+
+### Sink-Startup Candidate
+
+ALVR PR #8 merged the sink-startup repair as
+`256940512454ab0dabe07ee90675d4d9188faf5c`. It starts the ALVR sink before
+waiting for the producer handshake, preserving the supported client-absent
+waiting state while giving an already-running Vision Pro client the full game
+startup interval to connect. All `12` upstream CI checks passed, including the
+macOS, Linux, Windows, Android, MSRV, license, test, and artifact-build lanes.
+A clean release rebuild from the exact merge produced bridge SHA-256
+`d0235ae91833c556bed6339fd8c8626603f5c59dd63eabd8d8f9cb54c909aeac`
+and CDHash `c0436a85cc6d4f226e2bfa432a4fa79a3dfc800f`.
+
+The physical ordering run used precursor candidate
+`f5de372eb9c44d6507e0b4b215fec4bc72f7bd8b` in sealed artifact
+`.code/runtime-aircar-patched-bridge-sealed/mac-alvr-runtime-1.0.0-dev10-e0df564915760ed164b5569de21178e0b95d62f1c83cdbc2867346e6c81d3324`.
+
+Physical repeat
+`.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T030646Z-patched-bridge`
+proved the new ordering: `native_source ALVR client telemetry enabled` appears
+before the producer handshake. macOS then rejected the rebuilt bridge's manual
+client route with `No route to host (os error 65)`, so no client or sink
+connection event occurred. The bounded gate stopped the run and restored the
+game, bottle, launchd job, stock DLL, staged files, logs, shared memory, and
+stable qualified bridge exactly. This is consistent with Local Network consent
+being tied to the rebuilt code identity; resetting the known-good bridge's
+consent was intentionally avoided.
+
+Verdict: `automated-compatible`, not yet production-admitted. Aircar runs
+end-to-end through the qualified bridge with no title-specific runtime branch,
+but admission still requires one consent-assisted repeat of the sink-startup
+candidate with zero native drops plus a worn clear/smooth and PS VR2 Sense
+gameplay check.
+
+Curating the Aircar profile in the development artifact makes the candidate
+reproducible; it does not change the production boundary, which remains
+Freedom-only. Profile preflight now passes the global zero producer/native-drop
+limits into the real runner, and the runner includes them in its common verdict
+gate. The earlier connected runs therefore remain useful compatibility evidence
+but cannot pass the physical admission gate with their startup `not_ready`
+drops.

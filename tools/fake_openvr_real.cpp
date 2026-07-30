@@ -3276,14 +3276,16 @@ void __thiscall fake_compositor_dump_images(void*) { log_call("IVRCompositor::Co
 void __stdcall fake_c_compositor_dump_images() { log_call("FnTable:IVRCompositor::CompositorDumpImages"); }
 uint32_t __thiscall fake_compositor_string0(void*, char* buffer, uint32_t size) {
     copy_string("", buffer, size);
-    return 1;
+    log_call("IVRCompositor::GetVulkanInstanceExtensionsRequired -> 0");
+    return 0;
 }
 uint32_t __stdcall fake_c_compositor_string0(char* buffer, uint32_t size) {
     return fake_compositor_string0(nullptr, buffer, size);
 }
 uint32_t __thiscall fake_compositor_device_string0(void*, VkPhysicalDevice_T*, char* buffer, uint32_t size) {
     copy_string("", buffer, size);
-    return 1;
+    log_call("IVRCompositor::GetVulkanDeviceExtensionsRequired -> 0");
+    return 0;
 }
 uint32_t __stdcall fake_c_compositor_device_string0(VkPhysicalDevice_T* device, char* buffer, uint32_t size) {
     return fake_compositor_device_string0(nullptr, device, buffer, size);

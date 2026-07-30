@@ -108,6 +108,8 @@ fake_wait_get_poses_sleep_ms=${ALVR_FAKE_WAIT_GET_POSES_SLEEP_MS:-}
 expected_source_transition=${ALVR_NATIVE_PROBE_EXPECT_SOURCE_TRANSITION:-}
 producer_min_fps=${ALVR_NATIVE_PROBE_MIN_PRODUCER_FPS:-89.5}
 producer_max_fps=${ALVR_NATIVE_PROBE_MAX_PRODUCER_FPS:-90.5}
+max_native_drops=${ALVR_NATIVE_PROBE_MAX_NATIVE_DROPS:-}
+max_producer_drops=${ALVR_NATIVE_PROBE_MAX_PRODUCER_DROPS:-}
 fake_pacing_mode=deadline
 [[ -n $fake_wait_get_poses_sleep_ms ]] && fake_pacing_mode=fixed-sleep
 avp_device_selector=${ALVR_AVP_DEVICE_ID:-}
@@ -247,6 +249,21 @@ fi
 	echo "ALVR_NATIVE_PROBE_FRAMES must be a positive integer" >&2
 	exit 1
 }
+for drop_limit_name in max_native_drops max_producer_drops; do
+	drop_limit_value=${!drop_limit_name}
+	[[ -z $drop_limit_value || $drop_limit_value =~ ^[0-9]+$ ]] || {
+		echo "profile drop limits must be nonnegative integers" >&2
+		exit 1
+	}
+	while [[ $drop_limit_value == 0* && ${#drop_limit_value} -gt 1 ]]; do
+		drop_limit_value=${drop_limit_value#0}
+	done
+	[[ ${#drop_limit_value} -le 10 ]] || {
+		echo "profile drop limits are unreasonably large" >&2
+		exit 1
+	}
+	printf -v "$drop_limit_name" '%s' "$drop_limit_value"
+done
 case "$native_connect" in
 true | false) ;;
 *)
@@ -1659,11 +1676,15 @@ archive_logs() {
 	[[ -f /tmp/fake_openvr_real.log ]] &&
 		cp -p /tmp/fake_openvr_real.log "$run_dir/fake-openvr.log"
 	for ((index = 0; index < ${#game_dirs[@]}; index++)); do
-		for log in "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log; do
+		for log in \
+			"${game_dirs[$index]}"/*_d3d9.log \
+			"${game_dirs[$index]}"/*_d3d11.log \
+			"${game_dirs[$index]}"/*_dxgi.log; do
 			[[ -f $log ]] && cp -p "$log" "$run_dir/${target_ids[$index]}-${log##*/}"
 		done
 		if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
 			for log in \
+				"${target_workdirs[$index]}"/*_d3d9.log \
 				"${target_workdirs[$index]}"/*_d3d11.log \
 				"${target_workdirs[$index]}"/*_dxgi.log; do
 				[[ -f $log ]] &&
@@ -1724,9 +1745,13 @@ restore() {
 				"${game_dirs[$index]}/d3d11.dll" \
 				"${game_dirs[$index]}/dxgi.dll" \
 				"${game_dirs[$index]}/alvr_iosurface_bridge.dll"
-			rm -f "${game_dirs[$index]}"/*_d3d11.log "${game_dirs[$index]}"/*_dxgi.log
+			rm -f \
+				"${game_dirs[$index]}"/*_d3d9.log \
+				"${game_dirs[$index]}"/*_d3d11.log \
+				"${game_dirs[$index]}"/*_dxgi.log
 			if [[ ${target_workdirs[$index]} != "${game_dirs[$index]}" ]]; then
 				rm -f \
+					"${target_workdirs[$index]}"/*_d3d9.log \
 					"${target_workdirs[$index]}"/*_d3d11.log \
 					"${target_workdirs[$index]}"/*_dxgi.log
 			fi
@@ -1744,8 +1769,10 @@ restore() {
 					"${game_dirs[$index]}/d3d11.dll" \
 					"${game_dirs[$index]}/dxgi.dll" \
 					"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
+					"${game_dirs[$index]}"/*_d3d9.log \
 					"${game_dirs[$index]}"/*_d3d11.log \
 					"${game_dirs[$index]}"/*_dxgi.log \
+					"${target_workdirs[$index]}"/*_d3d9.log \
 					"${target_workdirs[$index]}"/*_d3d11.log \
 					"${target_workdirs[$index]}"/*_dxgi.log; do
 					if [[ -e $path ]]; then
@@ -1906,8 +1933,10 @@ for ((index = 0; index < ${#openvr_dirs[@]}; index++)); do
 		"${game_dirs[$index]}/d3d11.dll" \
 		"${game_dirs[$index]}/dxgi.dll" \
 		"${game_dirs[$index]}/alvr_iosurface_bridge.dll" \
+		"${game_dirs[$index]}"/*_d3d9.log \
 		"${game_dirs[$index]}"/*_d3d11.log \
 		"${game_dirs[$index]}"/*_dxgi.log \
+		"${target_workdirs[$index]}"/*_d3d9.log \
 		"${target_workdirs[$index]}"/*_d3d11.log \
 		"${target_workdirs[$index]}"/*_dxgi.log; do
 		[[ ! -e $path ]] || {
@@ -2255,6 +2284,8 @@ write_launch_agent_plist
 	printf 'transition_timeout_seconds=%s\n' "$transition_timeout_seconds"
 	printf 'producer_min_fps=%s\n' "$producer_min_fps"
 	printf 'producer_max_fps=%s\n' "$producer_max_fps"
+	printf 'max_native_drops=%s\n' "$max_native_drops"
+	printf 'max_producer_drops=%s\n' "$max_producer_drops"
 	printf 'source_size=%sx%s\n' "$source_width" "$source_height"
 	printf 'producer_pool_size=%sx%s\n' "$source_width" "$source_height"
 	printf 'output_size=%sx%s\n' "$output_width" "$output_height"
@@ -3016,6 +3047,8 @@ fi
 	printf 'expected_source_transition=%s\n' "$expected_source_transition"
 	printf 'producer_min_fps=%s\n' "$producer_min_fps"
 	printf 'producer_max_fps=%s\n' "$producer_max_fps"
+	printf 'max_native_drops=%s\n' "$max_native_drops"
+	printf 'max_producer_drops=%s\n' "$max_producer_drops"
 	printf 'pressure_applied=%d\n' "$pressure_applied"
 	printf 'self_tests=%s\n' "$self_tests"
 	printf 'producer_resize_self_tests=%s\n' "$producer_resize_self_tests"
@@ -3140,12 +3173,22 @@ fi
 	printf 'pacing_pass=%s\n' "$pacing_pass"
 } >"$run_dir/status.txt"
 
+profile_drop_gate_pass=1
+if [[ -n $max_native_drops && $native_dropped -gt $max_native_drops ]]; then
+	profile_drop_gate_pass=0
+fi
+if [[ -n $max_producer_drops && $producer_drops -gt $max_producer_drops ]]; then
+	profile_drop_gate_pass=0
+fi
+printf 'profile_drop_gate_pass=%s\n' "$profile_drop_gate_pass" >>"$run_dir/summary.txt"
+printf 'profile_drop_gate_pass=%s\n' "$profile_drop_gate_pass" >>"$run_dir/status.txt"
+
 verdict=fail
 common_pass=0
 if [[ $bridge_finished -eq 1 && $bridge_status -eq 0 &&
 	$bridge_summary_seen -eq 1 && $native_bridge_exited -eq 1 &&
 	$native_bridge_exit_status -eq 0 && $restore_status -eq 0 &&
-	$target_transition_gate -eq 1 ]] &&
+	$target_transition_gate -eq 1 && $profile_drop_gate_pass -eq 1 ]] &&
 	[[ $launchd_service_checked_in -eq 1 &&
 		$launchd_oversize_import_rejections -eq 1 &&
 		$launchd_oversize_frame_rejections -eq 1 &&

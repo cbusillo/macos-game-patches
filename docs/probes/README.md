@@ -64,7 +64,7 @@ encoded frame contract view_params ...
 
 Route plan updates to the owning issue before moving on:
 
-- #59 for the second-title packaged-runtime generality gate.
+- #59 for the pre-release OpenVR/D3D11 compatibility tranche.
 - #56 for parent-level runtime direction or product-boundary changes.
 - #38 for submitted-frame contract facts.
 - #39 for native macOS encode surface facts.
@@ -109,3 +109,4 @@ Use this shape:
 - [020 - Runtime start supervisor](020-runtime-start-supervisor.md)
 - [021 - Runtime profile producer ownership](021-runtime-profile-producer-ownership.md)
 - [022 - Runtime client state and recovery](022-runtime-client-state-recovery.md)
+- [023 - Aircar packaged-runtime qualification](023-aircar-profile-qualification.md)
