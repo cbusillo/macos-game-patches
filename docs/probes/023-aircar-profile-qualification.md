@@ -212,11 +212,10 @@ stable qualified bridge exactly. This is consistent with Local Network consent
 being tied to the rebuilt code identity; resetting the known-good bridge's
 consent was intentionally avoided.
 
-Verdict: `automated-compatible`, not yet production-admitted. Aircar runs
-end-to-end through the qualified bridge with no title-specific runtime branch,
-but admission still requires one consent-assisted repeat of the sink-startup
-candidate with zero native drops plus a worn clear/smooth and PS VR2 Sense
-gameplay check.
+At that stage the verdict was `automated-compatible`, not yet
+production-admitted. The rebuilt-identity candidate still required Local
+Network consent plus a worn clear/smooth and PS VR2 Sense gameplay check. The
+identity-preserved candidate below superseded that blocked path.
 
 Curating the Aircar profile in the development artifact makes the candidate
 reproducible; it does not change the production boundary, which remains
@@ -266,6 +265,51 @@ The user-induced replacement client PID was intentionally not terminated by
 cleanup because it no longer matched the runner-owned PID. Host/game files,
 launchd state, shared memory, and stock DLLs still restored exactly. This is a
 safe identity refusal, not leaked host state.
+
+### Preserved-Bundle Dev11 Artifact
+
+Runtime artifact `1.0.0-dev11` now supports `preserved-bundle` sealing. It
+copies the already authorized app tree without invoking the signer or rewriting
+its signed in-bundle attestation, while independently updating the Windows
+runtime payload. The final sealed artifact is:
+
+```text
+.code/runtime-aircar-preserved-dev11-84ccf61/
+  mac-alvr-runtime-1.0.0-dev11-
+  68cb6fdf9fe3544b385c9570a27b4aa4224b17da25172a49e9993b2cdef0d5f2
+```
+
+The artifact preserves bridge tree SHA-256
+`2f42d727ba5e8588a0c6434761a2460887bb09e728c5b30492e4dc88c691ca24`
+and Developer ID CDHash `1731a67fa327ca7c1576f63a084cc3b39f095b41`.
+Independent artifact verification passes, and the dry-run plan is ready with
+`27` install operations, `15` uninstall operations, and no blockers.
+
+The first artifact smoke exposed a compatibility regression: the ongoing
+client-readiness callback was enabled for disconnected runs, so the producer
+correctly waited for a client that smoke mode intentionally does not launch.
+Commit `84ccf616c9e93d71ca740b002dc259c24bc74a2c` scopes both the startup and
+ongoing gate to `ALVR_IOSURFACE_REQUIRE_CLIENT`. The connected recovery path is
+unchanged, while disconnected production no longer maps or waits for client
+telemetry.
+
+- Warm smoke
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T223917Z`
+  passed with `300/300` submitted and encoded frames, `90.000` FPS in the
+  steady tail, zero producer/native drops, clean bridge exit, and exact stock
+  restoration.
+- Disconnected qualification
+  `.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260730T224010Z`
+  passed with `5,400/5,400` submitted and encoded frames, `89.979` FPS in the
+  steady tail, zero producer/native drops, zero pose-generation gaps, clean
+  bridge exit, and exact stock restoration.
+
+Hardware-free qualification is complete for the packaged artifact. The
+remaining Aircar closeout is one connected replay from this exact seal when a
+worn visual check is available. Earlier identity-preserved physical and worn
+controller runs already prove smooth output, both controller poses, both
+thumbsticks, both triggers, menu/pause/Turbo interactions, and client reentry;
+the title did not emit a haptic command during the observed interval.
 
 Current verdict: physical video, cadence, startup, controller pose, steering,
 thrust, menu, Turbo, reconnect, and exact host/game restoration are proven on
