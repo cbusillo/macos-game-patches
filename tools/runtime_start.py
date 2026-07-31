@@ -24,6 +24,7 @@ from typing import Any, Callable, Protocol, Sequence
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
+import runtime_install
 import runtime_profile
 import runtime_transaction
 from runtime_control import (
@@ -803,14 +804,12 @@ def _resolved_state_path(plan: dict[str, Any], item_id: str) -> pathlib.Path:
 
 
 def _install_plan_digest(plan: dict[str, Any]) -> str:
-    operations = plan.get("install")
-    if not isinstance(operations, list):
-        raise ControlError("plan.invalid", "Resolved plan is missing install operations")
-    return artifact_contract.sha256_bytes(
-        artifact_contract.canonical_json_bytes(
-            [runtime_transaction.semantic_operation(operation) for operation in operations]
-        )
-    )
+    try:
+        return runtime_install.resolved_plan_digest(plan, "install")
+    except runtime_install.RuntimeInstallError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    except runtime_transaction.TransactionError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
 
 
 def _require_committed_install_journal(plan: dict[str, Any]) -> None:
@@ -838,22 +837,57 @@ def _require_committed_install_journal(plan: dict[str, Any]) -> None:
         journal = artifact_contract.load_json(journal_path)
     except artifact_contract.ArtifactError as error:
         raise ControlError(error.code, error.message, **error.context) from error
-    expected_digest = _install_plan_digest(plan)
+    try:
+        journal = runtime_install.validate_resolved_plan_journal(
+            plan,
+            "install",
+            journal,
+        )
+    except runtime_install.RuntimeInstallError as error:
+        if error.code == "transaction.journal_mismatch":
+            raise ControlError(
+                "runtime.not_installed",
+                "Active lifecycle journal does not prove an exact committed install",
+                path=str(journal_path),
+                expectedPlanDigest=_install_plan_digest(plan),
+            ) from error
+        raise ControlError(error.code, error.message, **error.context) from error
     if (
-        not isinstance(journal, dict)
-        or journal.get("kind") != "install"
-        or journal.get("state") != "committed"
-        or journal.get("planDigest") != expected_digest
+        journal.get("state") != "committed"
         or journal.get("cleanupFailures") != []
         or journal.get("rollbackFailures") != []
         or journal.get("failure") is not None
+        or journal.get("cleanupInProgress") != {}
     ):
         raise ControlError(
             "runtime.not_installed",
             "Active lifecycle journal does not prove an exact committed install",
             path=str(journal_path),
-            expectedPlanDigest=expected_digest,
+            expectedPlanDigest=_install_plan_digest(plan),
         )
+
+
+def _select_committed_install_plan(
+    candidates: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    attempted_digests: list[str] = []
+    for plan in candidates:
+        digest = _install_plan_digest(plan)
+        if digest in attempted_digests:
+            continue
+        attempted_digests.append(digest)
+        try:
+            _require_committed_install_journal(plan)
+        except ControlError as error:
+            if error.code != "runtime.not_installed":
+                raise
+        else:
+            return plan
+    raise ControlError(
+        "runtime.not_installed",
+        "No committed install journal matches an admitted lifecycle plan",
+        expectedPlanDigests=attempted_digests,
+    )
 
 
 def _require_installed_plan(plan: dict[str, Any]) -> None:
@@ -1059,10 +1093,10 @@ def _inspect_profile_admission(
         installed = runtime_profile.resolve_installed_profile(loaded, bindings)
     except runtime_profile.ProfileError as error:
         raise ControlError(error.code, error.message, **error.context) from error
-    if installed.owned_process is None:
+    if not installed.owned_processes:
         raise ControlError(
             "profile.artifact_mismatch",
-            "Curated runtime profile does not declare one owned producer process",
+            "Curated runtime profile does not declare an owned producer process",
             profile=loaded.data["id"],
         )
 
@@ -1216,18 +1250,29 @@ def inspect_start_admission(
         paths = resolve_runtime_paths(manifest, bindings)
         artifact_summary = verify_artifact_reference(context, artifact, require_sealed=True)
         artifact_path = pathlib.Path(artifact_summary["path"])
-        plan = artifact_contract.build_plan(
+        legacy_plan = artifact_contract.build_plan(
             manifest,
             artifact_path,
             context.bindings_path,
             expected_manifest_hash=manifest_hash,
             expected_lock_hash=lock_hash,
         )
+        profile_plan = runtime_install.build_runtime_plan(
+            context,
+            artifact_path,
+            manifest,
+            manifest_hash,
+            lock_hash,
+            profile_id,
+        )
+        plan = _select_committed_install_plan((profile_plan, legacy_plan))
         allowed_roots = tuple(
             artifact_contract.resolve_path(template, bindings, f"allowedTargetRoots[{index}]")
             for index, template in enumerate(manifest["allowedTargetRoots"])
         )
     except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    except runtime_install.RuntimeInstallError as error:
         raise ControlError(error.code, error.message, **error.context) from error
     admission = StartAdmission(
         manifest,
@@ -1247,7 +1292,6 @@ def inspect_start_admission(
     )
     _require_installed_plan(plan)
     _require_launch_template_state(admission)
-    _require_committed_install_journal(plan)
     _private_directory(paths.state_root)
     return admission
 

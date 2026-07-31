@@ -21,6 +21,7 @@ from unittest import mock
 
 import runtime_profile
 import runtime_start
+import runtime_transaction
 from runtime_control import (
     CommandResult,
     ControlError,
@@ -62,6 +63,7 @@ from runtime_start import (
     _require_installed_plan,
     _require_launch_template_state,
     _resolve_crossover_launcher,
+    _select_committed_install_plan,
     read_client_telemetry,
     start_runtime,
     supervise_runtime,
@@ -1122,32 +1124,38 @@ class RuntimeStartTests(unittest.TestCase):
         )
 
     def exact_profile_plan(self) -> dict[str, object]:
-        target = self.fixture.profile.installed.entrypoint
-        stock_openvr = target.openvr_directory / "openvr_api.dll"
-        created = (
-            target.openvr_directory / "openvr_api.real.dll",
-            target.graphics_directory / "d3d11.dll",
-            target.graphics_directory / "dxgi.dll",
-            target.graphics_directory / "alvr_iosurface_bridge.dll",
-        )
-        install: list[dict[str, object]] = [
-            {
-                "action": "replace_file",
-                "target": str(stock_openvr),
-                "ready": True,
-            }
-        ]
-        uninstall: list[dict[str, object]] = [
-            {
-                "action": "restore",
-                "target": str(stock_openvr),
-                "expectedSha256": target.stock_openvr_sha256,
-                "ready": True,
-            }
-        ]
-        for path in created:
-            install.append({"action": "create_file", "target": str(path), "ready": True})
-            uninstall.append({"action": "remove", "target": str(path), "ready": True})
+        install: list[dict[str, object]] = []
+        uninstall: list[dict[str, object]] = []
+        for target in self.fixture.profile.installed.targets:
+            stock_openvr = target.openvr_directory / "openvr_api.dll"
+            created = (
+                target.openvr_directory / "openvr_api.real.dll",
+                target.graphics_directory / "d3d11.dll",
+                target.graphics_directory / "dxgi.dll",
+                target.graphics_directory / "alvr_iosurface_bridge.dll",
+            )
+            install.append(
+                {
+                    "action": "replace_file",
+                    "target": str(stock_openvr),
+                    "ready": True,
+                }
+            )
+            uninstall.append(
+                {
+                    "action": "restore",
+                    "target": str(stock_openvr),
+                    "expectedSha256": target.stock_openvr_sha256,
+                    "ready": True,
+                }
+            )
+            for path in created:
+                install.append(
+                    {"action": "create_file", "target": str(path), "ready": True}
+                )
+                uninstall.append(
+                    {"action": "remove", "target": str(path), "ready": True}
+                )
         bridge_root = self.fixture.root / "runtime-bridge"
         install.extend(
             [
@@ -1166,6 +1174,69 @@ class RuntimeStartTests(unittest.TestCase):
             ]
         )
         return {"install": install, "uninstall": uninstall}
+
+    def committed_install_plan(
+        self,
+        *,
+        layout_id: str,
+        operation_id: str,
+        profile: tuple[str, str] | None = None,
+    ) -> tuple[dict[str, Any], pathlib.Path]:
+        lifecycle_root = self.fixture.root / f"lifecycle-{layout_id}"
+        transaction_root = lifecycle_root / "transactions"
+        transaction_root.mkdir(parents=True, exist_ok=True)
+        journal = transaction_root / "active.json"
+        operation = {
+            "id": operation_id,
+            "resource": "fixture",
+            "action": "retain",
+            "target": str(self.fixture.root / "fixture"),
+            "ready": True,
+        }
+        plan: dict[str, Any] = {
+            "artifact": str(self.fixture.artifact),
+            "allowedTargetRoots": [str(self.fixture.root)],
+            "mutableState": [
+                {"id": "lifecycle_root", "location": str(lifecycle_root)},
+                {"id": "transaction_root", "location": str(transaction_root)},
+                {
+                    "id": "transaction_history",
+                    "location": str(transaction_root / "history"),
+                },
+                {"id": "transaction_journal", "location": str(journal)},
+                {
+                    "id": "transaction_lock",
+                    "location": str(lifecycle_root / "runtime.lock"),
+                },
+                {
+                    "id": "transaction_journal_lock",
+                    "location": str(journal.with_suffix(".json.lock")),
+                },
+                {
+                    "id": "transaction_undo",
+                    "location": str(journal.with_name("active.json.undo")),
+                },
+            ],
+            "install": [operation],
+        }
+        plan_identity = None
+        if profile is not None:
+            profile_id, profile_sha256 = profile
+            plan["profile"] = {"id": profile_id, "sha256": profile_sha256}
+            plan_identity = {
+                "profileId": profile_id,
+                "profileSha256": profile_sha256,
+            }
+        runtime_transaction.TransactionExecutor(
+            kind="install",
+            operations=[operation],
+            artifact_root=self.fixture.artifact,
+            journal_path=journal,
+            transaction_root=transaction_root,
+            allowed_roots=(self.fixture.root,),
+            plan_identity=plan_identity,
+        ).execute()
+        return plan, journal
 
     def test_deadline_runner_caps_and_refuses_commands(self) -> None:
         runner = mock.Mock()
@@ -1282,8 +1353,24 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
         inspect_plan.assert_not_called()
 
-    def test_multi_target_profile_remains_fenced_from_production_admission(self) -> None:
+    def test_multi_target_profile_admits_every_exact_owned_target(self) -> None:
         fixture = self.use_multi_target_fixture()
+        crossover_app = fixture.root / "CrossOver.app"
+        crossover_launcher = crossover_app / (
+            "Contents/SharedSupport/CrossOver/CrossOver-Hosted Application/cxstart"
+        )
+        crossover_launcher.parent.mkdir(parents=True)
+        crossover_target = crossover_launcher.parent / "wine"
+        crossover_target.write_text("#!/bin/sh\n")
+        crossover_target.chmod(0o755)
+        crossover_launcher.symlink_to("wine")
+        bindings = {
+            "CROSSOVER_APP": str(crossover_app),
+            "HOME": str(fixture.root),
+            "STEAM_BOTTLE": str(
+                fixture.root / "Library/Application Support/CrossOver/Bottles/Steam"
+            ),
+        }
         with mock.patch(
             "runtime_start.runtime_profile.load_curated_profile",
             return_value=fixture.profile.installed.loaded,
@@ -1291,18 +1378,20 @@ class RuntimeStartTests(unittest.TestCase):
             "runtime_start.runtime_profile.resolve_installed_profile",
             return_value=fixture.profile.installed,
         ), mock.patch(
-            "runtime_start._require_plan_operation",
-        ) as inspect_plan:
-            with self.assertRaises(ControlError) as raised:
-                _inspect_profile_admission(
-                    {},
-                    {},
-                    {},
-                    fixture.artifact,
-                    "the-lab",
-                )
-        self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
-        inspect_plan.assert_not_called()
+            "runtime_start.runtime_profile.payload_tree_identity",
+            return_value=(3, "e" * 64),
+        ):
+            admission = _inspect_profile_admission(
+                {},
+                bindings,
+                self.exact_profile_plan(),
+                fixture.artifact,
+                "the-lab",
+            )
+        self.assertEqual(
+            [process.target_id for process in admission.installed.owned_processes],
+            ["hub", "secret-shop", "robot-repair"],
+        )
 
     def test_multi_target_discovery_uses_one_snapshot_and_rejects_ambiguity(self) -> None:
         fixture = self.use_multi_target_fixture()
@@ -3878,40 +3967,145 @@ class RuntimeStartTests(unittest.TestCase):
             )
 
     def test_committed_install_journal_must_match_semantic_plan(self) -> None:
-        journal = self.fixture.root / "transaction.json"
-        plan = {
-            "mutableState": [
-                {"id": "transaction_journal", "location": str(journal)},
-            ],
-            "install": [
-                {
-                    "id": "retain_fixture",
-                    "resource": "fixture",
-                    "action": "retain",
-                    "target": str(self.fixture.root / "fixture"),
-                    "ready": True,
-                }
-            ],
-        }
-        journal.write_text(
-            json.dumps(
-                {
-                    "kind": "install",
-                    "state": "committed",
-                    "planDigest": _install_plan_digest(plan),
-                    "cleanupFailures": [],
-                    "rollbackFailures": [],
-                    "failure": None,
-                }
-            )
+        plan, journal = self.committed_install_plan(
+            layout_id="legacy",
+            operation_id="retain_fixture",
         )
-        journal.chmod(0o600)
         _require_committed_install_journal(plan)
         payload = json.loads(journal.read_text())
         payload["kind"] = "uninstall"
         journal.write_text(json.dumps(payload))
         with self.assertRaisesRegex(Exception, "exact committed install"):
             _require_committed_install_journal(plan)
+
+    def test_profile_install_journal_requires_exact_identity(self) -> None:
+        plan, journal = self.committed_install_plan(
+            layout_id="profile",
+            operation_id="retain_fixture",
+            profile=("the-lab", "a" * 64),
+        )
+        _require_committed_install_journal(plan)
+        payload = json.loads(journal.read_text())
+        payload["planIdentity"]["profileSha256"] = "b" * 64
+        journal.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(Exception, "exact committed install"):
+            _require_committed_install_journal(plan)
+
+    def test_start_rejects_incomplete_or_extended_transaction_journal(self) -> None:
+        plan, journal = self.committed_install_plan(
+            layout_id="invalid",
+            operation_id="retain_fixture",
+        )
+        valid = json.loads(journal.read_text())
+        invalid_payloads = []
+        missing_steps = dict(valid)
+        missing_steps.pop("steps")
+        invalid_payloads.append(missing_steps)
+        extended = dict(valid)
+        extended["untrusted"] = True
+        invalid_payloads.append(extended)
+        cleanup_in_progress = dict(valid)
+        cleanup_in_progress["cleanupInProgress"] = {
+            str(self.fixture.root / "foreign"): {
+                "phase": "intent",
+                "identity": None,
+                "treeEntries": None,
+            }
+        }
+        invalid_payloads.append(cleanup_in_progress)
+
+        for payload in invalid_payloads:
+            with self.subTest(fields=sorted(payload)):
+                journal.write_text(json.dumps(payload))
+                with self.assertRaises(ControlError) as raised:
+                    _require_committed_install_journal(plan)
+                self.assertEqual(raised.exception.code, "transaction.journal_invalid")
+
+    def test_start_selects_profile_plan_and_falls_back_to_legacy_journal(self) -> None:
+        legacy_plan, journal = self.committed_install_plan(
+            layout_id="selected",
+            operation_id="legacy",
+        )
+        legacy_payload = json.loads(journal.read_text())
+        journal.unlink()
+        profile_plan, profile_journal = self.committed_install_plan(
+            layout_id="selected",
+            operation_id="profile",
+            profile=("the-lab", "a" * 64),
+        )
+        self.assertEqual(profile_journal, journal)
+        profile_payload = json.loads(journal.read_text())
+
+        def write_journal(payload: dict[str, Any]) -> None:
+            journal.write_text(json.dumps(payload))
+            journal.chmod(0o600)
+
+        write_journal(legacy_payload)
+        self.assertIs(
+            _select_committed_install_plan((profile_plan, legacy_plan)),
+            legacy_plan,
+        )
+        write_journal(profile_payload)
+        self.assertIs(
+            _select_committed_install_plan((profile_plan, legacy_plan)),
+            profile_plan,
+        )
+
+    def test_start_admission_materializes_the_selected_profile_plan(self) -> None:
+        manifest = {"allowedTargetRoots": [str(self.fixture.root)]}
+        legacy_plan: dict[str, Any] = {"install": []}
+        profile_plan: dict[str, Any] = {
+            "install": [],
+            "profile": {"id": "the-lab"},
+        }
+        artifact_summary = {"path": str(self.fixture.artifact)}
+        with mock.patch(
+            "runtime_start.load_runtime_contract",
+            return_value=(manifest, {}, "a" * 64, "b" * 64),
+        ), mock.patch(
+            "runtime_start.artifact_contract.resolve_bindings",
+            return_value={},
+        ), mock.patch(
+            "runtime_start.resolve_runtime_paths",
+            return_value=self.fixture.paths,
+        ), mock.patch(
+            "runtime_start.verify_artifact_reference",
+            return_value=artifact_summary,
+        ), mock.patch(
+            "runtime_start.artifact_contract.build_plan",
+            return_value=legacy_plan,
+        ), mock.patch(
+            "runtime_start.runtime_install.build_runtime_plan",
+            return_value=profile_plan,
+        ) as build_profile_plan, mock.patch(
+            "runtime_start._select_committed_install_plan",
+            return_value=profile_plan,
+        ) as select_plan, mock.patch(
+            "runtime_start._inspect_profile_admission",
+            return_value=self.fixture.profile,
+        ), mock.patch(
+            "runtime_start._require_installed_plan",
+        ), mock.patch(
+            "runtime_start._require_launch_template_state",
+        ), mock.patch(
+            "runtime_start._private_directory",
+        ):
+            admission = runtime_start.inspect_start_admission(
+                self.fixture.context,
+                self.fixture.artifact,
+                "the-lab",
+            )
+
+        self.assertIs(admission.plan, profile_plan)
+        build_profile_plan.assert_called_once_with(
+            self.fixture.context,
+            self.fixture.artifact,
+            manifest,
+            "a" * 64,
+            "b" * 64,
+            "the-lab",
+        )
+        select_plan.assert_called_once_with((profile_plan, legacy_plan))
 
     def test_foreign_launch_agent_target_is_never_overwritten(self) -> None:
         self.fixture.paths.launch_agent_plist.write_text("foreign plist")

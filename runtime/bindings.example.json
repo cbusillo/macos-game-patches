@@ -1,5 +1,4 @@
 {
-  "ALVR_CHECKOUT": "${REPO_ROOT}/../alvr",
   "ALVR_CLIENT_CORE_CHECKOUT": "${ALVR_VISIONOS_CHECKOUT}/ALVR",
   "ALVR_VISIONOS_CHECKOUT": "${REPO_ROOT}/../alvr-visionos",
   "CROSSOVER_APP": "/Applications/CrossOver.app",

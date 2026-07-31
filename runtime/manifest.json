@@ -16,7 +16,7 @@
     "description": "Deterministic payload with a preserved Developer ID bridge bundle for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev11"
+    "version": "1.0.0-dev12"
   },
   "artifacts": [
     {
@@ -802,7 +802,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "cf78c205778c157beaa2f4ea7db855dcfb7479bf8fbca8434aa20f43d120a07c",
+      "sha256": "f6cdd6c64d5e313aed635281e663ee90fba8036b58b83016947dda16d144e76b",
       "supplyClass": "repo-source"
     },
     {
@@ -820,13 +820,13 @@
     {
       "id": "runtime_transaction",
       "path": "${REPO_ROOT}/tools/runtime_transaction.py",
-      "sha256": "fa5ec3fe92dbf9b5c0f53bd50ef6987e1010122ad2901c33dd9cb12a839f45de",
+      "sha256": "cb5ee5f8cf498f61399834d16dd35f1567a37e858f432ae3f9a0cb23f6aaadc1",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "7f96fd07ce98ca0c83ae20c1e3a4ff27785c607d8735407ce10106c56b62fc22",
+      "sha256": "bb7351d883dc14bd7ff1e352debcc0216989319227f4b2ce578b194bf3dea4b9",
       "supplyClass": "repo-source"
     },
     {
@@ -838,7 +838,7 @@
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "e20f03f6c8570f8b7989845b221a9fdd2862138639bb0e58fc15e79d6442a696",
+      "sha256": "7b095ab39c4b35ae7fc84c7d69f3c5f71145c61858f401ac42ace9b900aaac2e",
       "supplyClass": "repo-source"
     },
     {
@@ -868,7 +868,7 @@
     {
       "id": "game_profile_the_lab",
       "path": "${REPO_ROOT}/runtime/profiles/the-lab.json",
-      "sha256": "16e62dcc88ae46488fe064e6bb2069741d39a6dca36c9714190cdbfee92586af",
+      "sha256": "912c655ea97c55f8a55967c93c78ab3802f443eac6ba5cfbd4cc8726a2858f3a",
       "supplyClass": "repo-source"
     },
     {
