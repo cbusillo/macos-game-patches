@@ -621,3 +621,35 @@ the user-observed visual and PS VR2 Sense interaction evidence. The softer
 resolution remains a #59/#63 quality follow-up. The current profile's fixed
 `1152x1280` per-eye source should be compared with a bounded higher-resolution
 candidate before attributing the softness only to the title.
+
+### Dev13 Disconnected Cadence After PR 119
+
+PR #119 merged on July 31, 2026 as
+`8afef96d92569717b2cf757abf2780963dd8e3d4`. After Factorio was closed, the
+unchanged dev13 artifact and The Lab profile ran two consecutive disconnected
+gates from exact stock state:
+
+- `the-lab/real-native-encode-20260731T201317Z`;
+- `the-lab/real-native-encode-20260731T201624Z`.
+
+The host was materially quieter than the earlier load-contaminated attempt,
+although several Code and Steam helper processes remained active. Both runs
+submitted, released, received, and encoded all `5400/5400` frames, validated
+visible content, and reached `89.979 FPS` over the final 300-frame window. Both
+reported zero producer startup or steady-state drops, zero native drops, zero
+pool-exhaustion drops, zero pose-generation gaps, no post-close submissions,
+three producer and native startup self-tests, and passing pacing/drop gates.
+The second run recorded one bounded producer backpressure wait of `7976 us`
+without a drop.
+
+Whole-run producer/native effective rates were `87.703/86.199 FPS` and
+`86.822/85.336 FPS`; these include startup and teardown overhead and are not the
+profile's steady-tail cadence gate. The disconnected target gate correctly saw
+the hub alone and passed. Secret Shop and Robot Repair selection remains part
+of the worn multi-target transition session.
+
+Both restoration traps returned status zero. Final runtime status was
+`runtime.ready`; the launchd job, owner, plist, lock, shared memory, probe files,
+and created game overlays were absent; default cleanup matched no process; and
+all three stock OpenVR hashes matched. The dev13 disconnected cadence gate is
+qualified. Physical experience transitions remain open under issue #112.

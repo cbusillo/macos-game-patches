@@ -218,11 +218,24 @@ launchd job and all transient owned state were absent, every created overlay was
 absent, default cleanup matched no process, and all three stock OpenVR hashes
 matched.
 
+Two consecutive unchanged dev13 disconnected runs then passed from exact stock
+state:
+
+- `the-lab/real-native-encode-20260731T201317Z`;
+- `the-lab/real-native-encode-20260731T201624Z`.
+
+Each submitted, released, and encoded all 5,400 frames, validated visible
+content, reached `89.979 FPS` over the final 300-frame window, recorded zero
+producer/native drops and pose-generation gaps, passed pacing/drop gates, and
+restored exact state. The second run had one bounded `7976 us` backpressure wait
+without a drop. Final status was `runtime.ready`, default cleanup matched no
+process, all created overlays were absent, and all three stock OpenVR hashes
+matched.
+
 All 15 profile, 74 start, 67 control, 30 install, 31 transaction, and 2 cleanup
-fixtures pass with artifact checks and self-tests. The production hub lifecycle
-and simulated transition contract are qualified. The load-contaminated
-disconnected cadence run is not, and physical Secret Shop and Robot Repair
-transitions remain owner/headset gates.
+fixtures pass with artifact checks and self-tests. The production hub lifecycle,
+simulated transition contract, and disconnected cadence are qualified. Physical
+Secret Shop and Robot Repair transitions remain owner/headset gates.
 
 ## Hardware-Free Fixture Matrix
 
