@@ -226,6 +226,7 @@ class RuntimeProfileTests(unittest.TestCase):
             install_root
             / "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe",
         )
+        self.assertEqual(installed.owned_processes, (installed.owned_process,))
         self.assertEqual(installed.steam_manifest_sha256, runtime_profile.sha256_file(app_manifest))
 
     def test_owned_process_must_be_a_critical_file(self) -> None:
@@ -234,6 +235,57 @@ class RuntimeProfileTests(unittest.TestCase):
         with self.assertRaises(ProfileError) as raised:
             runtime_profile.validate_profile(profile)
         self.assertEqual(raised.exception.code, "profile.invalid")
+
+    def test_owned_targets_resolve_from_runtime_targets(self) -> None:
+        profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
+        profile["launch"]["ownedTargets"] = [
+            "hub",
+            "secret-shop",
+            "robot-repair",
+        ]
+        runtime_profile.validate_profile(profile)
+        loaded = runtime_profile.LoadedProfile(
+            path=self.root / "the-lab.json",
+            data=profile,
+            sha256="f" * 64,
+        )
+        targets = tuple(
+            runtime_profile.ResolvedProfileTarget(
+                id=target["id"],
+                role=target["role"],
+                executable=self.root / target["executable"],
+                working_directory=self.root / target["workingDirectory"],
+                openvr_directory=self.root / target["openvrDirectory"],
+                graphics_directory=self.root / target["graphicsDirectory"],
+                stock_openvr_sha256=target["stockOpenvrSha256"],
+                process_pattern=target["processPattern"],
+            )
+            for target in profile["runtime"]["targets"]
+        )
+        installed = runtime_profile.InstalledProfile(
+            loaded=loaded,
+            install_root=self.root,
+            steam_manifest=self.root / "appmanifest.acf",
+            steam_manifest_sha256="e" * 64,
+            targets=targets,
+            owned_process=None,
+        )
+        self.assertEqual(
+            [owned.target_id for owned in installed.owned_processes],
+            ["hub", "secret-shop", "robot-repair"],
+        )
+        self.assertEqual(
+            [owned.executable for owned in installed.owned_processes],
+            [target.executable for target in targets],
+        )
+
+    def test_owned_targets_reject_unknown_runtime_target(self) -> None:
+        profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
+        profile["launch"]["ownedTargets"] = ["missing"]
+        with self.assertRaises(ProfileError) as raised:
+            runtime_profile.validate_profile(profile)
+        self.assertEqual(raised.exception.code, "profile.invalid")
+        self.assertEqual(raised.exception.context["location"], "launch.ownedTargets")
 
 
 if __name__ == "__main__":
