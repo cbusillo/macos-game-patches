@@ -1,0 +1,155 @@
+{
+  "controller": {
+    "gameplayChecks": [
+      "apply forward and reverse thrust with the triggers",
+      "steer pitch, roll, vertical, and yaw with both thumbsticks",
+      "activate turbo and menu controls"
+    ],
+    "profile": "PSVR2Sense",
+    "requiredInputs": [
+      "button",
+      "grip",
+      "pose",
+      "thumbstick",
+      "trigger"
+    ],
+    "trackedRoles": [
+      "left",
+      "right"
+    ]
+  },
+  "geometry": {
+    "adaptiveViewport": {
+      "enabled": false,
+      "fillRateStepPercent": 0,
+      "maximumDimension": 1800,
+      "maximumScale": 1.0,
+      "minimumScale": 1.0
+    },
+    "allowedStereoTransitions": [],
+    "eyeMappings": [
+      "separate-textures",
+      "side-by-side-left-first"
+    ],
+    "maximumStereo": {
+      "height": 1800,
+      "width": 3240
+    },
+    "recommendedPerEye": {
+      "height": 1600,
+      "width": 1440
+    },
+    "sourceMode": "fixed-with-transitions",
+    "targetStereo": {
+      "height": 1792,
+      "width": 2880
+    }
+  },
+  "id": "aircar-1440x1600",
+  "launch": {
+    "arguments": [],
+    "entrypointTarget": "game",
+    "environment": {
+      "ALVR_FAKE_ACTION_BINDINGS": "262538834811527=left-pose,209800962332600=right-pose,34008938933668=left-menu,203850986618795=left-haptic,159516070558388=right-haptic,66515349687519=left-menu,113207262597773=right-primary,110182827436615=left-secondary,268266921513422=left-primary,113436885131908=right-thumbstick,121814798907413=left-trigger,32522734264677=right-trigger,29131701468356=left-thumbstick",
+      "ALVR_FAKE_RENDER_TARGET_HEIGHT": "1600",
+      "ALVR_FAKE_RENDER_TARGET_WIDTH": "1440"
+    },
+    "installRoot": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/Aircar",
+    "ownedProcess": {
+      "executable": "Aircar/Binaries/Win64/AirCar-Win64-Shipping.exe",
+      "processPattern": "[A]irCar-Win64-Shipping\\.exe"
+    },
+    "processPattern": "[A]irCar-Win64-Shipping",
+    "startupTimeoutSeconds": 100,
+    "transitionTimeoutSeconds": 100
+  },
+  "name": "Aircar 1440x1600 Experiment",
+  "runtime": {
+    "graphicsApi": "d3d11",
+    "openvrRuntime": "custom-openvr-sidecar",
+    "targets": [
+      {
+        "executable": "Aircar.exe",
+        "graphicsDirectory": "Aircar/Binaries/Win64",
+        "id": "game",
+        "openvrDirectory": "Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_16/Win64",
+        "processPattern": "[A]irCar-Win64-Shipping",
+        "role": "game",
+        "stockOpenvrSha256": "040cdd453d8794e1b8b7ee33909b81d9995e8a3ddb82878c0f0c2d3a1daae160",
+        "workingDirectory": "."
+      }
+    ]
+  },
+  "schemaVersion": 1,
+  "source": {
+    "appId": "1073390",
+    "buildId": "4505210",
+    "depots": [
+      {
+        "id": "1073391",
+        "manifest": "1310052055377678008",
+        "sizeBytes": 892980026
+      }
+    ],
+    "installedSizeBytes": 892980026,
+    "officialUnmodified": true,
+    "payload": {
+      "criticalFiles": [
+        {
+          "path": "Aircar.exe",
+          "sha256": "ff4708334a650f5f49c7a074d8a99b298a991e4f2b7b31182f7adeb39d205e85"
+        },
+        {
+          "path": "Aircar/Binaries/Win64/AirCar-Win64-Shipping.exe",
+          "sha256": "20b54904ddff9cde2636a51a4192835516f6d11d2ad738cdc683ff1e267dc04f"
+        },
+        {
+          "path": "Aircar/Config/SteamVRBindings/steamvr_manifest.json",
+          "sha256": "3ab801d0547c0223b96a6fc64c586b705d740c52e44be0ef6615d8671e1b9718"
+        },
+        {
+          "path": "Engine/Binaries/ThirdParty/OpenVR/OpenVRv1_0_16/Win64/openvr_api.dll",
+          "sha256": "040cdd453d8794e1b8b7ee33909b81d9995e8a3ddb82878c0f0c2d3a1daae160"
+        },
+        {
+          "path": "Engine/Plugins/Marketplace/SteamVRInput/Source/ThirdParty/OpenVRSDK/bin/win64/openvr_api.dll",
+          "sha256": "b066af6748930343dc6f9ccd831f0fd0cd6bbba1d3541a7867c41f9bd8b3e734"
+        }
+      ],
+      "fileCount": 38,
+      "treeSha256": "d7f8199a4c0649b8acfcec5d859f61373848ab4949b77618c91601c98bb32dbf"
+    },
+    "provider": "steam"
+  },
+  "validation": {
+    "cadence": {
+      "maximumFps": 90.5,
+      "minimumFps": 89.5,
+      "targetFps": 90.0
+    },
+    "cleanup": {
+      "requireNoOwnedState": true,
+      "requireStockHashes": true
+    },
+    "drops": {
+      "native": 0,
+      "producer": 0
+    },
+    "frameCounts": {
+      "disconnected": 5400,
+      "physical": 81000,
+      "smoke": 300
+    },
+    "human": {
+      "clearAndSmooth": true
+    },
+    "pose": {
+      "exactPairing": true,
+      "maximumGenerationGaps": 0
+    },
+    "recovery": {
+      "clientRelaunch": true,
+      "headsetReentry": true
+    }
+  }
+}

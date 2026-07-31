@@ -112,3 +112,4 @@ Use this shape:
 - [023 - Aircar packaged-runtime qualification](023-aircar-profile-qualification.md)
 - [024 - Google Earth VR legacy classification](024-google-earth-vr-classification.md)
 - [025 - Aperture Hand Lab Index-input classification](025-aperture-hand-lab-classification.md)
+- [026 - Fixed-resolution profile qualification](026-fixed-resolution-profile-qualification.md)
