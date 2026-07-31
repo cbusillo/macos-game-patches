@@ -839,6 +839,43 @@ def semantic_operation(operation: dict[str, Any]) -> dict[str, Any]:
     return {key: operation[key] for key in SEMANTIC_OPERATION_FIELDS if key in operation}
 
 
+def validate_plan_identity(
+    value: dict[str, str] | None,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"profileId", "profileSha256"}
+        or not isinstance(value.get("profileId"), str)
+        or PROFILE_ID_PATTERN.fullmatch(value["profileId"]) is None
+        or not isinstance(value.get("profileSha256"), str)
+        or SHA256_PATTERN.fullmatch(value["profileSha256"]) is None
+    ):
+        raise TransactionError(
+            "transaction.plan_invalid",
+            "Transaction plan identity is invalid",
+        )
+    return dict(value)
+
+
+def semantic_plan_digest(
+    operations: Sequence[dict[str, Any]],
+    plan_identity: dict[str, str] | None = None,
+) -> str:
+    identity = validate_plan_identity(plan_identity)
+    plan = [semantic_operation(operation) for operation in operations]
+    digest_input: Any = plan
+    if identity is not None:
+        digest_input = {
+            "operations": plan,
+            "planIdentity": identity,
+        }
+    return artifact_contract.sha256_bytes(
+        artifact_contract.canonical_json_bytes(digest_input)
+    )
+
+
 class TransactionExecutor:
     def __init__(
         self,
@@ -868,38 +905,9 @@ class TransactionExecutor:
             self.operations.append(dict(operation))
         self.failure_injector = failure_injector
         self.tree_ownership_validator = tree_ownership_validator
-        self.plan_identity = self._validate_plan_identity(plan_identity)
-        plan = [semantic_operation(operation) for operation in self.operations]
-        digest_input: Any = plan
-        if self.plan_identity is not None:
-            digest_input = {
-                "operations": plan,
-                "planIdentity": self.plan_identity,
-            }
-        self.plan_digest = artifact_contract.sha256_bytes(
-            artifact_contract.canonical_json_bytes(digest_input)
-        )
+        self.plan_identity = validate_plan_identity(plan_identity)
+        self.plan_digest = semantic_plan_digest(self.operations, self.plan_identity)
         self.lock_path = self.journal_path.with_suffix(self.journal_path.suffix + ".lock")
-
-    @staticmethod
-    def _validate_plan_identity(
-        value: dict[str, str] | None,
-    ) -> dict[str, str] | None:
-        if value is None:
-            return None
-        if (
-            not isinstance(value, dict)
-            or set(value) != {"profileId", "profileSha256"}
-            or not isinstance(value.get("profileId"), str)
-            or PROFILE_ID_PATTERN.fullmatch(value["profileId"]) is None
-            or not isinstance(value.get("profileSha256"), str)
-            or SHA256_PATTERN.fullmatch(value["profileSha256"]) is None
-        ):
-            raise TransactionError(
-                "transaction.plan_invalid",
-                "Transaction plan identity is invalid",
-            )
-        return dict(value)
 
     @staticmethod
     def _absolute_input_path(path: pathlib.Path) -> pathlib.Path:
@@ -2095,7 +2103,7 @@ class TransactionExecutor:
         elif schema_version == 3:
             expected_keys = {*base_keys, "planIdentity"}
             try:
-                journal_identity = self._validate_plan_identity(journal.get("planIdentity"))
+                journal_identity = validate_plan_identity(journal.get("planIdentity"))
             except TransactionError as error:
                 raise self._invalid_journal("Transaction journal plan identity is invalid") from error
             if journal_identity is None:

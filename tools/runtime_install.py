@@ -638,6 +638,24 @@ def _build_plan(
     return _materialize_profile_plan(plan, manifest, artifact, profile, bindings)
 
 
+def build_runtime_plan(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    manifest: dict[str, Any],
+    manifest_hash: str,
+    lock_hash: str,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    return _build_plan(
+        context,
+        artifact,
+        manifest,
+        manifest_hash,
+        lock_hash,
+        profile_id,
+    )
+
+
 def _refresh_plan_readiness(plan: dict[str, Any], kind: MutationKind) -> None:
     operations = plan.get(kind)
     if not isinstance(operations, list):
@@ -658,7 +676,7 @@ def _refresh_plan_readiness(plan: dict[str, Any], kind: MutationKind) -> None:
     plan[f"{kind}Blockers"] = [*sealing_blockers, *blockers]
 
 
-def _profile_plan_identity(plan: dict[str, Any]) -> dict[str, str] | None:
+def resolved_plan_identity(plan: dict[str, Any]) -> dict[str, str] | None:
     profile = plan.get("profile")
     if profile is None:
         return None
@@ -677,6 +695,20 @@ def _profile_plan_identity(plan: dict[str, Any]) -> dict[str, str] | None:
         "profileId": profile["id"],
         "profileSha256": profile["sha256"],
     }
+def resolved_plan_digest(plan: dict[str, Any], kind: MutationKind) -> str:
+    operations = plan.get(kind)
+    if not isinstance(operations, list) or any(
+        not isinstance(operation, dict) for operation in operations
+    ):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Resolved plan is missing lifecycle operations",
+            kind=kind,
+        )
+    return runtime_transaction.semantic_plan_digest(
+        operations,
+        resolved_plan_identity(plan),
+    )
 
 
 def _admit_profile_plan(
@@ -686,7 +718,7 @@ def _admit_profile_plan(
     artifact: pathlib.Path,
     plan: dict[str, Any],
 ) -> None:
-    identity = _profile_plan_identity(plan)
+    identity = resolved_plan_identity(plan)
     if identity is None:
         return
     profile = plan["profile"]
@@ -828,7 +860,7 @@ def _executor(
         transaction_root=paths.transaction_root,
         allowed_roots=paths.allowed_roots,
         tree_ownership_validator=tree_ownership_validator,
-        plan_identity=_profile_plan_identity(plan),
+        plan_identity=resolved_plan_identity(plan),
     )
 
 

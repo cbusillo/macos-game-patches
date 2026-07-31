@@ -347,7 +347,7 @@ passes that complete materialized list unchanged to the same executor. Every
 target is admitted before the first mutation, and rollback or recovery covers
 the full set.
 
-The dev11 manifest uses preserved-bundle sealing to retain the already
+The dev12 manifest uses preserved-bundle sealing to retain the already
 authorized bridge identity while independently updating the Windows runtime
 payload. This does not weaken admission.
 Both lifecycle commands return `artifact.sealing_required` before creating
@@ -380,13 +380,24 @@ python3 tools/runtime_cli.py stop \
   --bindings .code/runtime-bindings.json
 ```
 
-The dev10 source contract pins the profile validator, JSON Schema, and explicit
-curated profiles. Public start accepts an identifier rather than an arbitrary
-path, requires the exact sealed profile hash, verifies Steam app/build/depot
-identity, and projects the installed game tree through the exact uninstall
-substitutions and removals before launch. The current transaction plan is
-Freedom-specific, so `freedom-locomotion` is admitted and The Lab fails closed
-until its three targets receive separately reviewed lifecycle operations.
+The dev12 source contract pins the profile validator, JSON Schema, and explicit
+curated certification profiles. Public start accepts an identifier rather than
+an arbitrary path, requires the exact sealed profile hash, verifies Steam
+app/build/depot identity, and projects the installed game tree through the exact
+uninstall substitutions and removals before launch. It materializes the same
+profile-aware filesystem plan used by explicit install and uninstall, then
+requires the exact profile ID, profile SHA-256, semantic plan digest, and
+journal-v3 committed identity before admitting a profile-bound install. Legacy
+artifact-only singleton journals retain their journal-v2 digest and remain an
+explicit fallback for existing Freedom and Aircar installations. The Lab owns
+the finite `hub`, `secret-shop`, and `robot-repair` target set, so its complete
+overlay and multi-process authority chain are admitted without changing
+singleton schema-v5 publication.
+
+Curated profiles remain reviewable certification fixtures for known games, not
+the long-term onboarding mechanism. Issue #117 tracks generic runtime discovery
+and generated machine-local game locks so ordinary compatible titles can be
+admitted without adding one checked-in profile per game.
 
 The detached supervisor admits CrossOver 26.2's exact in-bundle relative
 `cxstart -> wine` link only when its sibling target is a real executable. It

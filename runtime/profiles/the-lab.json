@@ -61,6 +61,11 @@
     },
     "installRoot": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/The Lab",
     "ownedProcess": null,
+    "ownedTargets": [
+      "hub",
+      "secret-shop",
+      "robot-repair"
+    ],
     "processPattern": "([T]heLab\\.exe|[S]ecretShop\\.exe|RobotRepair.*[v]r\\.exe)",
     "startupTimeoutSeconds": 180,
     "transitionTimeoutSeconds": 600
