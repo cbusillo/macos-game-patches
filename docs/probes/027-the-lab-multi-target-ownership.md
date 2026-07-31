@@ -156,7 +156,8 @@ journal-v2 artifact-only fallback for existing singleton installs. Profiles
 with no resolved owned process still fail before plan inspection, and singleton
 supervisor publication remains schema v5.
 
-Two independent dev12 builds produced unsealed seal
+Two independent dev12 builds from source commit
+`a5d06f5e2a3ba9738253f1f8c2104abac32dfa51` produced unsealed seal
 `5c3d4d381f33483eaa59ce335717b10c77f6956ad7a24e6ebcd03e011c56d4b0`.
 Preserved-bundle sealing produced identical verified seal
 `064d6a8c25aa94e1f95c2a7d217490012bf2edf6a3f2d957f59d0a69664f3f4c`
