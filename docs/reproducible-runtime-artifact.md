@@ -347,7 +347,7 @@ passes that complete materialized list unchanged to the same executor. Every
 target is admitted before the first mutation, and rollback or recovery covers
 the full set.
 
-The dev12 manifest uses preserved-bundle sealing to retain the already
+The dev13 manifest uses preserved-bundle sealing to retain the already
 authorized bridge identity while independently updating the Windows runtime
 payload. This does not weaken admission.
 Both lifecycle commands return `artifact.sealing_required` before creating
@@ -380,7 +380,7 @@ python3 tools/runtime_cli.py stop \
   --bindings .code/runtime-bindings.json
 ```
 
-The dev12 source contract pins the profile validator, JSON Schema, and explicit
+The dev13 source contract pins the profile validator, JSON Schema, and explicit
 curated certification profiles. Public start accepts an identifier rather than
 an arbitrary path, requires the exact sealed profile hash, verifies Steam
 app/build/depot identity, and projects the installed game tree through the exact
@@ -421,6 +421,9 @@ PGIDs from original leaderless groups, preserves malformed or incomplete
 dead-owner evidence, scans for unrecorded exact Shipping processes, and
 revalidates service content plus producer identity immediately before
 publication and exact launchd bootout; serialized PIDs remain evidence only.
+Schema-v6 multi-target stop reserves the final ten seconds of its bounded
+quiescence deadline for fresh process-table absence proof instead of consuming
+that margin as target-replacement wait time.
 Vision Pro connection, streaming, and recovery state remain outside this
 host-only producer slice.
 

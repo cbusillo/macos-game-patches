@@ -3012,10 +3012,7 @@ def _quiesce_owned_producers(
     transition_timeout = float(
         profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"]
     )
-    quiesce_deadline = monotonic() + max(
-        PRODUCER_QUIESCE_TIMEOUT_SECONDS,
-        transition_timeout + PRODUCER_QUIESCE_MARGIN_SECONDS,
-    )
+    quiesce_deadline = monotonic() + PRODUCER_QUIESCE_TIMEOUT_SECONDS
     quiesce_runner = DeadlineRunner(context.runner, quiesce_deadline, monotonic)
     retained = _ordered_owned_producer_identities(profile, identities)
     term_signaled: set[int] = set()
@@ -3195,7 +3192,7 @@ def _quiesce_owned_producers(
                     absence_deadline = now + transition_timeout
                 absence_deadline = min(
                     max(absence_deadline, now + MONITOR_INTERVAL_SECONDS),
-                    quiesce_deadline,
+                    quiesce_deadline - PRODUCER_QUIESCE_MARGIN_SECONDS,
                 )
                 absence_observed = True
             assert absence_deadline is not None

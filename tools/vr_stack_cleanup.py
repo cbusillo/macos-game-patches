@@ -38,8 +38,6 @@ WINE_CROSSOVER_PROCESS_NAMES = {
 
 WINE_VR_COMMAND_PATTERNS = (
     "C:\\ALVR\\",
-    "C:\\Program Files\\Bonjour\\mDNSResponder.exe",
-    "\\Bonjour\\mDNSResponder.exe",
     "\\ALVR Dashboard.exe",
     "\\ALVR Launcher.exe",
     "\\alvr_dashboard.exe",
@@ -63,9 +61,14 @@ WINE_VR_COMMAND_PATTERNS = (
     "\\steamapps\\common\\Freedom Locomotion VR\\",
 )
 
+WINE_BACKGROUND_COMMAND_PATTERNS = (
+    "C:\\Program Files\\Bonjour\\mDNSResponder.exe",
+    "\\Bonjour\\mDNSResponder.exe",
+)
+
 WINDOWS_EXECUTABLE_SUFFIXES = tuple(
     pattern.lower()
-    for pattern in WINE_VR_COMMAND_PATTERNS
+    for pattern in WINE_VR_COMMAND_PATTERNS + WINE_BACKGROUND_COMMAND_PATTERNS
     if pattern.lower().endswith(".exe")
 )
 
@@ -200,8 +203,19 @@ def command_matches(process: ProcessMatch, include_wine_crossover: bool, sterile
         pattern.lower() in normalized_command for pattern in WINE_VR_COMMAND_PATTERNS
     ):
         return True
-    if include_wine_crossover and name in WINE_CROSSOVER_PROCESS_NAMES:
-        return True
+    if include_wine_crossover:
+        if name in WINE_CROSSOVER_PROCESS_NAMES:
+            return True
+        if (
+            command_starts_with_windows_path
+            or wine_process_with_windows_arg_path
+            or wine_process_with_known_windows_executable
+            or direct_windows_helper
+        ) and any(
+            pattern.lower() in normalized_command
+            for pattern in WINE_BACKGROUND_COMMAND_PATTERNS
+        ):
+            return True
     if sterile_native_steam:
         return any(pattern.lower() in lowered_command for pattern in NATIVE_STEAM_PATTERNS)
     return False

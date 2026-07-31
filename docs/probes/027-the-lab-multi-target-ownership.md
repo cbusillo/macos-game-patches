@@ -172,6 +172,35 @@ pass with artifact contract checks and self-tests. No disconnected launch,
 in-headset transition, or physical experience claim is made by slice 5; those
 remain slice 6.
 
+### Slice 6 Live Qualification
+
+The first dev12 live pass began from exact stock OpenVR hashes for all three
+targets. The research disconnected probe submitted and released all 5,400
+frames and restored every stock file, but host load contaminated cadence: one
+producer startup drop was recorded, effective cadence was 67.333 FPS, and the
+89.5 FPS strict floor did not pass. That run is negative evidence, not a
+disconnected qualification.
+
+Five hardware-free transition fixtures passed for zero-target replacement,
+sequential replacement, bounded overlap, outgoing-group absence, and late
+authenticated target quiescence. The profile-bound production install then
+committed all 51 operations at the expected digest, and production start
+published schema v6 in `waiting` with the exact hub identity.
+
+The first cooperative stop exposed a deadline-accounting defect. Termination
+and the 600-second replacement guard consumed the complete quiescence deadline,
+so the final process-table absence proof returned
+`producer.identity_unavailable`. A dead-owner retry removed the exact transient
+state, the 27-operation uninstall committed at the expected digest, all staged
+overlay files were absent, and all three final stock OpenVR hashes matched.
+
+The dev13 correction reserves the existing ten-second quiescence margin for the
+final fresh absence proof. Default VR cleanup also stops treating CrossOver's
+persistent Bonjour helper as VR residue; broad Wine/CrossOver cleanup remains an
+explicit opt-in. A sealed dev13 lifecycle rerun must pass before exact stop or
+disconnected cadence is qualified. Physical Secret Shop and Robot Repair
+transitions remain owner/headset gates.
+
 ## Hardware-Free Fixture Matrix
 
 - existing singleton profile/state/start/stop/install fixtures remain green;
@@ -207,6 +236,7 @@ uv run python tools/runtime_profile_test.py
 uv run python tools/runtime_control_test.py
 uv run python tools/runtime_start_test.py
 uv run python tools/runtime_install_test.py
+uv run python tools/vr_stack_cleanup_test.py
 ```
 
 Before any live or simulated probe:

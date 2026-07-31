@@ -76,7 +76,7 @@
     "lint": {
       "markdown": "npx --yes markdownlint-cli2 \"README.md\" \"AGENTS.md\" \"docs/*.md\" \"docs/**/*.md\" \"patches/**/*.md\"",
       "workflows": "actionlint -config-file .github/actionlint.yaml .github/workflows/ci.yml",
-      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py tools/runtime_profile_test.py tools/runtime_control.py tools/runtime_cli.py tools/runtime_start.py tools/runtime_control_test.py tools/runtime_start_test.py tools/runtime_descriptor.py tools/runtime_descriptor_test.py tools/runtime_transaction.py tools/runtime_transaction_test.py tools/runtime_install.py tools/runtime_install_test.py",
+      "pythonTools": "python3 -m py_compile tools/vr_stack_cleanup.py tools/vr_stack_cleanup_test.py tools/launch_freedom_crossover.py tools/build_runtime_artifact.py tools/runtime_profile.py tools/runtime_profile_test.py tools/runtime_control.py tools/runtime_cli.py tools/runtime_start.py tools/runtime_control_test.py tools/runtime_start_test.py tools/runtime_descriptor.py tools/runtime_descriptor_test.py tools/runtime_transaction.py tools/runtime_transaction_test.py tools/runtime_install.py tools/runtime_install_test.py",
       "shellTools": "bash -n tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh && shellcheck tools/run_real_openvr_iosurface_probe.sh tools/run_real_native_iosurface_probe.sh tools/run_freedom_local_window_regression.sh tools/run_open_brush_runtime_discovery.sh tools/run_open_brush_native_probe.sh tools/run_steamvr_tutorial_unity_control.sh tools/run_iosurface_mach_port_probe.sh tools/run_wine_iosurface_mach_port_probe.sh tools/run_dxvk_native_iosurface_bind_probe.sh"
     },
     "security": {
@@ -134,6 +134,7 @@
     },
     "runtimePreflight": {
       "vrStackCleanup": "python3 tools/vr_stack_cleanup.py",
+      "vrStackCleanupFixtures": "python3 tools/vr_stack_cleanup_test.py",
       "iosurfaceMachRight": "bash tools/run_iosurface_mach_port_probe.sh",
       "iosurfaceWineImport": "bash tools/run_wine_iosurface_mach_port_probe.sh",
       "iosurfaceNativeBind": "bash tools/run_dxvk_native_iosurface_bind_probe.sh"

@@ -3277,6 +3277,66 @@ class RuntimeStartTests(unittest.TestCase):
         )
         self.assertIn((secret_group, runtime_start.signal.SIGTERM), runner.signals)
 
+    def test_multi_target_quiescence_reserves_final_inspection_margin_after_slow_stop(
+        self,
+    ) -> None:
+        fixture = self.use_multi_target_fixture()
+        fixture.profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"] = 30
+        runner = fixture.multi_runner
+        run_dir = fixture.state_root / "multi-quiesce-slow-stop"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        launched_process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        retained = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        clock = [0.0]
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def sleeper(duration: float) -> None:
+            clock[0] += duration
+
+        def signal_group(process_group: int, signal_number: int) -> None:
+            clock[0] = 10.0
+            launcher.group_signaler(process_group, signal_number)
+
+        final_retained = runtime_start._quiesce_owned_producers(
+            launched_process,
+            runner.producer_birth_token,
+            runner.launcher_started_at,
+            runner.producer_group,
+            retained,
+            fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            fixture.paths.service_label,
+            launcher.generation,
+            4321,
+            replace(fixture.context, sleeper=sleeper),
+            monotonic,
+            launcher.group_id,
+            signal_group,
+            launcher.group_live,
+        )
+
+        self.assertEqual(
+            {identity.target_id for identity in final_retained},
+            {"hub"},
+        )
+        self.assertGreaterEqual(clock[0], 30.0)
+        self.assertLess(clock[0], 40.0)
+
     def test_multi_target_quiescence_never_signals_late_unauthenticated_target(
         self,
     ) -> None:
