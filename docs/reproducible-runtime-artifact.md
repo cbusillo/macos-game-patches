@@ -423,7 +423,10 @@ revalidates service content plus producer identity immediately before
 publication and exact launchd bootout; serialized PIDs remain evidence only.
 Schema-v6 multi-target stop reserves the final ten seconds of its bounded
 quiescence deadline for fresh process-table absence proof instead of consuming
-that margin as target-replacement wait time.
+that margin as target-replacement wait time. During cooperative launchd
+bootout, a transient service-identity read failure is tolerated only when a
+fresh launchd snapshot proves the exact job is already absent; a present,
+foreign, or uninspectable job still fails closed.
 Vision Pro connection, streaming, and recovery state remain outside this
 host-only producer slice.
 

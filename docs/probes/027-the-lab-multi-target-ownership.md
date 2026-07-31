@@ -197,9 +197,14 @@ overlay files were absent, and all three final stock OpenVR hashes matched.
 The dev13 correction reserves the existing ten-second quiescence margin for the
 final fresh absence proof. Default VR cleanup also stops treating CrossOver's
 persistent Bonjour helper as VR residue; broad Wine/CrossOver cleanup remains an
-explicit opt-in. A sealed dev13 lifecycle rerun must pass before exact stop or
-disconnected cadence is qualified. Physical Secret Shop and Robot Repair
-transitions remain owner/headset gates.
+explicit opt-in. The first sealed dev13 rerun completed producer quiescence in
+44 seconds but exposed a second stop race: launchd bootout won against the
+supervisor's concurrent code-sign identity read, so the supervisor preserved
+dead-owner state even though the exact job was already absent. Dev13 now
+rechecks launchd after that transient identity-read failure and tolerates it
+only when the fresh snapshot proves absence. A final sealed lifecycle rerun must
+pass before exact stop or disconnected cadence is qualified. Physical Secret
+Shop and Robot Repair transitions remain owner/headset gates.
 
 ## Hardware-Free Fixture Matrix
 
