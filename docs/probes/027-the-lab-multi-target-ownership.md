@@ -150,15 +150,16 @@ its complete authority chain is present.
 As of July 31, 2026, slices 1 through 5 are complete in hardware-free fixtures.
 The checked-in The Lab profile owns `hub`, `secret-shop`, and `robot-repair`.
 Start materializes the same profile-aware filesystem plan used by install and
-uninstall, requires the exact journal-v3 profile identity and semantic digest,
-and retains the journal-v2 artifact-only fallback for existing singleton
-installs. Profiles with no resolved owned process still fail before plan
-inspection, and singleton supervisor publication remains schema v5.
+uninstall, requires the executor's complete terminal journal schema plus the
+exact journal-v3 profile identity and semantic digest, and retains the
+journal-v2 artifact-only fallback for existing singleton installs. Profiles
+with no resolved owned process still fail before plan inspection, and singleton
+supervisor publication remains schema v5.
 
 Two independent dev12 builds produced unsealed seal
-`478fc9892477a0ca05ddcdcc1cb0e27dec5aa543e6e653f7a104c4eccd661bfa`.
+`5c3d4d381f33483eaa59ce335717b10c77f6956ad7a24e6ebcd03e011c56d4b0`.
 Preserved-bundle sealing produced identical verified seal
-`248bd2c213bfc9acfeb0ea7218ff27941567b822b061e6e72a88028f8e7d8a00`
+`064d6a8c25aa94e1f95c2a7d217490012bf2edf6a3f2d957f59d0a69664f3f4c`
 with the qualified Developer ID CDHash and bundle tree unchanged. All 18 doctor
 checks pass. The profile-aware The Lab plan is ready with no blockers: 51
 install operations at digest
