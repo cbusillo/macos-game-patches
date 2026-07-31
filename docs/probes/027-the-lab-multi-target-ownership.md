@@ -56,8 +56,10 @@ fields. Its producer record replaces the singular fields with:
 
 - `expectedOwnedProcesses`: the finite ordered target ID, executable, and
   process-pattern set;
-- `ownedProcesses`: zero or more exact live identities, each with target ID,
+- `ownedProcesses`: zero or more exact recorded identities, each with target ID,
   PID, birth token, PID version, start time, PGID, command, and executable;
+  `ready` entries are live, while `quiesced` entries retain evidence for exact
+  absence checks;
 - the unchanged launcher identity and generation-local log;
 - status `launching`, `starting`, `ready`, or `quiesced`.
 
@@ -134,6 +136,11 @@ machinery only when a fixture demonstrates a real gap.
 
 Each slice must remain reviewable and leave production start fail-closed until
 its complete authority chain is present.
+
+As of July 31, 2026, slices 1 and 2 are complete in hardware-free fixtures.
+Schema v6 is admitted by state inspection, status, dead-owner cleanup, and
+cooperative stop, but production start still publishes schema v5 and rejects
+The Lab until the supervisor and installation slices are complete.
 
 ## Hardware-Free Fixture Matrix
 

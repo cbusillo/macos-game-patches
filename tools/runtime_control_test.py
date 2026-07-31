@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import contextlib
 import io
@@ -12,6 +13,7 @@ import socket
 import tempfile
 import unittest
 from collections.abc import Sequence
+from typing import Any
 from unittest import mock
 
 import build_runtime_artifact as artifact_contract
@@ -378,7 +380,7 @@ class LifecycleTests(unittest.TestCase):
                 "cdHashes": ["0123456789abcdef0123456789abcdef01234567"],
             },
         }
-        if schema_version in {2, 3, 4, 5}:
+        if schema_version in {2, 3, 4, 5, 6}:
             assert run_dir is not None
             record.update(
                 {
@@ -515,6 +517,123 @@ class LifecycleTests(unittest.TestCase):
                         "pgid": target_pid,
                         "command": str(target_executable),
                         "executable": target_executable,
+                    }
+        if schema_version == 6:
+            assert run_dir is not None
+            launcher_pid = 6001
+            expected_targets = [
+                {
+                    "targetId": "hub",
+                    "executable": str(self.root / "game/TheLab/win64/TheLab.exe"),
+                    "processPattern": "[T]heLab\\.exe",
+                },
+                {
+                    "targetId": "secret-shop",
+                    "executable": str(
+                        self.root / "game/SecretShop/win64/SecretShop.exe"
+                    ),
+                    "processPattern": "[S]ecretShop\\.exe",
+                },
+                {
+                    "targetId": "robot-repair",
+                    "executable": str(self.root / "game/RobotRepair/bin/win64/vr.exe"),
+                    "processPattern": "RobotRepair.*[v]r\\.exe",
+                },
+            ]
+            owned_processes = []
+            if producer_status in {"ready", "quiesced"}:
+                owned_processes = [
+                    {
+                        "targetId": "hub",
+                        "pid": 6002,
+                        "birthToken": 6002001,
+                        "pidVersion": 302,
+                        "startedAt": "Sat Jul 18 03:00:02 2026",
+                        "processGroupId": launcher_pid,
+                        "command": expected_targets[0]["executable"],
+                        "executable": expected_targets[0]["executable"],
+                    },
+                    {
+                        "targetId": "secret-shop",
+                        "pid": 6003,
+                        "birthToken": 6003001,
+                        "pidVersion": 303,
+                        "startedAt": "Sat Jul 18 03:00:03 2026",
+                        "processGroupId": 6003,
+                        "command": expected_targets[1]["executable"],
+                        "executable": expected_targets[1]["executable"],
+                    },
+                ]
+            launcher = (
+                None
+                if producer_status == "launching"
+                else {
+                    "pid": launcher_pid,
+                    "birthToken": 6001001,
+                    "startedAt": "Sat Jul 18 03:00:01 2026",
+                    "processGroupId": launcher_pid,
+                }
+            )
+            record.update(
+                {
+                    "profile": {
+                        "id": "the-lab",
+                        "sha256": "c" * 64,
+                        "appId": "450390",
+                        "buildId": "7242747",
+                        "entrypointTarget": "hub",
+                    },
+                    "producer": {
+                        "status": producer_status,
+                        "launcher": launcher,
+                        "expectedOwnedProcesses": expected_targets,
+                        "ownedProcesses": owned_processes,
+                        "log": str(run_dir / "producer.log"),
+                    },
+                }
+            )
+            if producer_status == "ready":
+                contract_valid = state in {"connected", "streaming"}
+                stream_epoch = 1 if contract_valid else (2 if state == "recovering" else 0)
+                connect_events = 1 if state != "waiting" else 0
+                disconnect_events = 1 if state == "recovering" else 0
+                record["client"] = {
+                    "status": state,
+                    "telemetryVersion": 7,
+                    "runtimeGeneration": 1,
+                    "bridgePid": 4321,
+                    "bridgeSessionId": 7001,
+                    "streamEpoch": stream_epoch,
+                    "streamContractValid": contract_valid,
+                    "framesTransported": 1 if state == "streaming" else 0,
+                    "connectEvents": connect_events,
+                    "disconnectEvents": disconnect_events,
+                    "contractFailureEvents": 0,
+                }
+            else:
+                record["client"] = None
+            if producer_live:
+                if launcher is not None:
+                    self.runner.processes[launcher_pid] = {
+                        "birthToken": 6001001,
+                        "pidVersion": 301,
+                        "startedAt": "Sat Jul 18 03:00:01 2026",
+                        "pgid": launcher_pid,
+                        "command": "cxstart --wait-children TheLab.exe",
+                    }
+                for identity in owned_processes:
+                    pid = identity["pid"]
+                    executable_value = identity["executable"]
+                    assert isinstance(pid, int)
+                    assert isinstance(executable_value, str)
+                    executable = pathlib.Path(executable_value)
+                    self.runner.processes[pid] = {
+                        "birthToken": identity["birthToken"],
+                        "pidVersion": identity["pidVersion"],
+                        "startedAt": identity["startedAt"],
+                        "pgid": identity["processGroupId"],
+                        "command": identity["command"],
+                        "executable": executable,
                     }
         self.paths.state_path.write_text(json.dumps(record))
         return record
@@ -1026,6 +1145,242 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(state_mismatch.valid)
         self.assertEqual(state_mismatch.error_code, "state.invalid_schema")
 
+    def test_schema_six_accepts_multi_target_lifecycle_states(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+
+        for state in ("waiting", "connected", "streaming", "recovering"):
+            with self.subTest(state=state):
+                record = self.create_state(
+                    state=state,
+                    owner_pid=2000,
+                    schema_version=6,
+                    run_dir=run_dir,
+                )
+                inspected = load_control_state(self.paths.state_path)
+                self.assertTrue(inspected.valid, inspected.message)
+                producer = record["producer"]
+                assert isinstance(producer, dict)
+                self.assertEqual(len(producer["expectedOwnedProcesses"]), 3)
+                self.assertEqual(len(producer["ownedProcesses"]), 2)
+
+        for producer_status in ("launching", "starting", "quiesced"):
+            with self.subTest(producer_status=producer_status):
+                self.create_state(
+                    state="idle",
+                    owner_pid=2000,
+                    schema_version=6,
+                    run_dir=run_dir,
+                    producer_status=producer_status,
+                    producer_live=False,
+                )
+                inspected = load_control_state(self.paths.state_path)
+                self.assertTrue(inspected.valid, inspected.message)
+
+        record = self.create_state(
+            state="streaming",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+        )
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        owned = producer["ownedProcesses"]
+        assert isinstance(expected, list)
+        assert isinstance(owned, list)
+        first_expected = expected[0]
+        second_expected = expected[1]
+        second_owned = owned[1]
+        assert isinstance(first_expected, dict)
+        assert isinstance(second_expected, dict)
+        assert isinstance(second_owned, dict)
+        second_expected["executable"] = first_expected["executable"]
+        second_owned["executable"] = first_expected["executable"]
+        self.paths.state_path.write_text(json.dumps(record))
+        shared_executable = load_control_state(self.paths.state_path)
+        self.assertTrue(shared_executable.valid, shared_executable.message)
+
+    def test_schema_six_rejects_malformed_process_collections(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        base = self.create_state(
+            state="streaming",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+        )
+
+        def assert_invalid(record: dict[str, object], case: str) -> None:
+            self.paths.state_path.write_text(json.dumps(record))
+            inspected = load_control_state(self.paths.state_path)
+            self.assertFalse(inspected.valid, case)
+            self.assertEqual(inspected.error_code, "state.invalid_schema", case)
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        producer["expectedOwnedProcesses"] = producer["expectedOwnedProcesses"][:1]
+        assert_invalid(record, "singleton expected collection")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(expected, list)
+        duplicate = copy.deepcopy(expected[0])
+        assert isinstance(duplicate, dict)
+        duplicate["executable"] = str(self.root / "game/duplicate.exe")
+        expected.append(duplicate)
+        assert_invalid(record, "duplicate target id")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        owned = producer["ownedProcesses"]
+        assert isinstance(owned, list)
+        first_owned = owned[0]
+        assert isinstance(first_owned, dict)
+        first_owned["targetId"] = "unknown"
+        assert_invalid(record, "unknown owned target")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        owned = producer["ownedProcesses"]
+        assert isinstance(owned, list)
+        first_owned = owned[0]
+        second_owned = owned[1]
+        assert isinstance(first_owned, dict)
+        assert isinstance(second_owned, dict)
+        second_owned["pid"] = first_owned["pid"]
+        assert_invalid(record, "duplicate pid")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        owned = producer["ownedProcesses"]
+        assert isinstance(owned, list)
+        first_owned = owned[0]
+        second_owned = owned[1]
+        assert isinstance(first_owned, dict)
+        assert isinstance(second_owned, dict)
+        second_owned["targetId"] = first_owned["targetId"]
+        assert_invalid(record, "duplicate owned target")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        owned = producer["ownedProcesses"]
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(owned, list)
+        assert isinstance(expected, list)
+        first_owned = owned[0]
+        second_expected = expected[1]
+        assert isinstance(first_owned, dict)
+        assert isinstance(second_expected, dict)
+        first_owned["executable"] = second_expected["executable"]
+        assert_invalid(record, "owned executable mismatch")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        owned = producer["ownedProcesses"]
+        assert isinstance(owned, list)
+        first_owned = owned[0]
+        assert isinstance(first_owned, dict)
+        first_owned["processGroupId"] = 9999
+        assert_invalid(record, "foreign process group")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(expected, list)
+        first_expected = expected[0]
+        assert isinstance(first_expected, dict)
+        first_expected["processPattern"] = "["
+        assert_invalid(record, "invalid pattern")
+
+        record = copy.deepcopy(base)
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        producer["ownedProcesses"] = []
+        assert_invalid(record, "ready without owned identity")
+
+        record = copy.deepcopy(base)
+        record["state"] = "idle"
+        record["client"] = None
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        producer["status"] = "starting"
+        assert_invalid(record, "starting with owned identities")
+
+    def test_schema_six_status_validates_every_owned_identity(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="waiting",
+                owner_pid=2000,
+                schema_version=6,
+                run_dir=run_dir,
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            waiting = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(waiting.state, "waiting")
+
+            self.runner.processes[6003]["pidVersion"] = 304
+            changed = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(changed.state, "failed")
+            self.assertEqual(changed.reason_code, "producer.identity_changed")
+        finally:
+            control_socket.close()
+
+    def test_schema_six_quiesced_state_requires_every_group_empty(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        control_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            control_socket.bind(str(run_dir / "c.sock"))
+            pathlib.Path(run_dir / "c.sock").chmod(0o600)
+            control_socket.listen(1)
+            self.create_lock("2000", run_dir=str(run_dir))
+            self.alive_pids.add(2000)
+            self.create_state(
+                state="idle",
+                owner_pid=2000,
+                schema_version=6,
+                run_dir=run_dir,
+                producer_status="quiesced",
+            )
+            self.set_service()
+            self.context.ping_requester = lambda _: (True, None)
+            failed = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(failed.state, "failed")
+            self.assertEqual(failed.reason_code, "producer.quiesce_failed")
+
+            self.runner.processes.clear()
+            idle = status_runtime(self.context, verify_live_artifact=False)
+            self.assertEqual(idle.state, "idle")
+        finally:
+            control_socket.close()
+
     def test_schema_four_waiting_allows_launcher_pid_version_change(self) -> None:
         self.create_bridge()
         self.create_plist()
@@ -1425,6 +1780,144 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(self.paths.lock_path.exists())
         self.assertTrue(run_dir.exists())
 
+    def test_dead_schema_six_owner_preserves_recorded_second_target(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+        )
+        self.runner.processes.pop(6001)
+        self.runner.processes.pop(6002)
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+
+    def test_dead_schema_six_owner_preserves_unrecorded_exact_target(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        record = self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(expected, list)
+        robot = expected[2]
+        assert isinstance(robot, dict)
+        executable_value = robot["executable"]
+        assert isinstance(executable_value, str)
+        executable = pathlib.Path(executable_value)
+        self.runner.processes[7004] = {
+            "birthToken": 7004001,
+            "pidVersion": 404,
+            "startedAt": "Sat Jul 18 03:00:04 2026",
+            "pgid": 7004,
+            "command": str(executable),
+            "executable": executable,
+        }
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+
+    def test_dead_schema_six_owner_ignores_pattern_only_foreign_process(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        record = self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(expected, list)
+        robot = expected[2]
+        assert isinstance(robot, dict)
+        command = robot["executable"]
+        assert isinstance(command, str)
+        self.runner.processes[7004] = {
+            "birthToken": 7004001,
+            "pidVersion": 404,
+            "startedAt": "Sat Jul 18 03:00:04 2026",
+            "pgid": 7004,
+            "command": command,
+            "executable": self.root / "foreign/RobotRepair/vr.exe",
+        }
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertFalse(self.paths.state_path.exists())
+        self.assertFalse(self.paths.lock_path.exists())
+        self.assertFalse(run_dir.exists())
+
+    def test_dead_schema_six_starting_owner_preserves_incomplete_ownership(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="idle",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_status="starting",
+            producer_live=False,
+        )
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.identity_unavailable")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+
+    def test_dead_schema_six_owner_cleans_when_all_targets_are_absent(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertFalse(self.paths.state_path.exists())
+        self.assertFalse(self.paths.lock_path.exists())
+        self.assertFalse(run_dir.exists())
+
     def test_stop_requests_synchronized_supervisor_cleanup(self) -> None:
         self.create_bridge()
         self.create_plist()
@@ -1474,6 +1967,76 @@ class LifecycleTests(unittest.TestCase):
         )
         self.assertTrue(any(action.startswith("request supervisor stop") for action in stopped.actions))
         self.assertFalse(any(command[:2] == ("/bin/launchctl", "kill") for command in self.runner.commands))
+
+    def test_schema_six_stop_requests_synchronized_supervisor_cleanup(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.alive_pids.add(2000)
+        record = self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+        )
+        self.set_service()
+        cleaned = False
+
+        def cleanup(_: float) -> None:
+            nonlocal cleaned
+            if cleaned:
+                return
+            cleaned = True
+            self.paths.state_path.unlink(missing_ok=True)
+            self.paths.launch_agent_plist.unlink(missing_ok=True)
+            for name in ("pid", "run-dir"):
+                (self.paths.lock_path / name).unlink(missing_ok=True)
+            self.paths.lock_path.rmdir()
+            run_dir.rmdir()
+
+        self.context.stop_requester = lambda actual: (actual == record, None)
+        self.context.sleeper = cleanup
+        live_status = StatusReport(
+            "waiting",
+            "runtime.waiting",
+            "fixture live runtime",
+            {"sealId": "a" * 64},
+            {},
+            {},
+            {"record": record},
+        )
+        with mock.patch("runtime_control.status_runtime", return_value=live_status):
+            stopped = stop_runtime(self.context)
+        self.assertTrue(stopped.ok)
+        self.assertTrue(any(action.startswith("request supervisor stop") for action in stopped.actions))
+        self.assertFalse(any(command[:2] == ("/bin/launchctl", "kill") for command in self.runner.commands))
+
+    def test_schema_six_stop_preserves_synchronized_content_drift(self) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        self.set_service()
+        self.paths.bridge_program.write_bytes(b"changed bridge")
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "state.content_mismatch")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+        self.assertFalse(
+            any(command[:2] == ("/bin/launchctl", "bootout") for command in self.runner.commands)
+        )
 
     def test_stop_revalidates_content_after_supervisor_acknowledgement(self) -> None:
         self.create_bridge()
