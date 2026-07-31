@@ -583,6 +583,357 @@ class FixtureProducerLauncher:
         return False
 
 
+class MultiTargetRunner(SupervisorRunner):
+    def __init__(self, paths: RuntimePaths) -> None:
+        super().__init__(paths)
+        self.target_processes: dict[int, dict[str, Any]] = {}
+        self.target_lock = threading.Lock()
+
+    def register_target(
+        self,
+        target_id: str,
+        pid: int,
+        executable: pathlib.Path,
+        *,
+        command: str | None = None,
+        process_group: int | None = None,
+        started_at: str = "Sat Jul 18 04:00:02 2026",
+        birth_token: int | None = None,
+        pid_version: int | None = None,
+        mappings: Sequence[pathlib.Path] | None = None,
+        live: bool = False,
+    ) -> None:
+        with self.target_lock:
+            self.target_processes[pid] = {
+                "targetId": target_id,
+                "pid": pid,
+                "executable": executable,
+                "command": command or str(executable),
+                "processGroupId": process_group or pid,
+                "startedAt": started_at,
+                "birthToken": birth_token or (pid * 1_000 + 1),
+                "pidVersion": pid_version or (pid + 100),
+                "mappings": tuple(mappings or (executable,)),
+                "live": live,
+                "lsofError": False,
+            }
+
+    def process_for_target(self, target_id: str) -> dict[str, Any]:
+        with self.target_lock:
+            matches = [
+                process
+                for process in self.target_processes.values()
+                if process["targetId"] == target_id
+            ]
+            if len(matches) != 1:
+                raise AssertionError(f"expected one fixture process for {target_id}")
+            return matches[0]
+
+    def set_target_live(self, target_id: str, live: bool) -> None:
+        with self.target_lock:
+            matches = [
+                process
+                for process in self.target_processes.values()
+                if process["targetId"] == target_id
+            ]
+            if len(matches) != 1:
+                raise AssertionError(f"expected one fixture process for {target_id}")
+            matches[0]["live"] = live
+
+    def set_group_live(self, process_group: int, live: bool) -> None:
+        with self.target_lock:
+            for process in self.target_processes.values():
+                if process["processGroupId"] == process_group:
+                    process["live"] = live
+        if process_group == self.producer_group:
+            self.producer_live = live
+
+    def birth_token(self, pid: int) -> tuple[int | None, str | None]:
+        with self.target_lock:
+            process = self.target_processes.get(pid)
+            if process is not None and process["live"]:
+                return int(process["birthToken"]), None
+        return super().birth_token(pid)
+
+    def pid_version(self, pid: int) -> tuple[int | None, str | None]:
+        with self.target_lock:
+            process = self.target_processes.get(pid)
+            if process is not None and process["live"]:
+                return int(process["pidVersion"]), None
+        return super().pid_version(pid)
+
+    def run(self, argv: Sequence[str], *, timeout: float = 10.0) -> CommandResult:
+        command = tuple(str(item) for item in argv)
+        if command and command[0] == "/usr/sbin/lsof":
+            pid = int(command[command.index("-p") + 1])
+            with self.target_lock:
+                process = self.target_processes.get(pid)
+                if process is not None:
+                    self.commands.append(command)
+                    if process["lsofError"]:
+                        return CommandResult(command, None, error="timeout")
+                    if not process["live"]:
+                        return CommandResult(command, 1)
+                    return CommandResult(
+                        command,
+                        0,
+                        stdout=(
+                            f"p{pid}\n"
+                            + "".join(
+                                f"n{mapping}\n" for mapping in process["mappings"]
+                            )
+                        ),
+                    )
+        if command[:3] == ("/usr/bin/env", "LC_ALL=C", "/bin/ps"):
+            if "-axo" in command and "pid=,pgid=,command=" in command:
+                with self.target_lock:
+                    rows = [
+                        f"{pid} {process['processGroupId']} {process['command']}"
+                        for pid, process in sorted(self.target_processes.items())
+                        if process["live"]
+                    ]
+                self.commands.append(command)
+                return CommandResult(
+                    command,
+                    0,
+                    stdout="\n".join(rows) + ("\n" if rows else ""),
+                )
+            if "-axo" in command and "pid=,pgid=,stat=" in command:
+                group_rows: list[str] = []
+                if self.producer_live:
+                    group_rows.append(
+                        f"{self.producer_pid} {self.producer_group} S"
+                    )
+                with self.target_lock:
+                    group_rows.extend(
+                        f"{pid} {process['processGroupId']} S"
+                        for pid, process in sorted(self.target_processes.items())
+                        if process["live"]
+                    )
+                self.commands.append(command)
+                return CommandResult(
+                    command,
+                    0,
+                    stdout="\n".join(group_rows)
+                    + ("\n" if group_rows else ""),
+                )
+            pid = int(command[command.index("-p") + 1])
+            with self.target_lock:
+                process = self.target_processes.get(pid)
+                if process is not None:
+                    self.commands.append(command)
+                    if not process["live"]:
+                        return CommandResult(command, 1)
+                    if "lstart=" in command:
+                        return CommandResult(
+                            command,
+                            0,
+                            stdout=f"{process['startedAt']}\n",
+                        )
+                    if "pgid=" in command:
+                        return CommandResult(
+                            command,
+                            0,
+                            stdout=f"{process['processGroupId']}\n",
+                        )
+                    if "command=" in command:
+                        return CommandResult(
+                            command,
+                            0,
+                            stdout=f"{process['command']}\n",
+                        )
+        return super().run(argv, timeout=timeout)
+
+
+class MultiTargetFixture(StartFixture):
+    def __init__(self) -> None:
+        super().__init__()
+        install_root = self.root / "game"
+        target_specs = (
+            (
+                "hub",
+                "TheLab",
+                install_root / "TheLab/win64/TheLab.exe",
+                "[T]heLab(?:\\.exe)?",
+            ),
+            (
+                "secret-shop",
+                "SecretShop",
+                install_root / "SecretShop/win64/SecretShop.exe",
+                "[S]ecretShop(?:\\.exe)?",
+            ),
+            (
+                "robot-repair",
+                "RobotRepair",
+                install_root / "RobotRepair/bin/win64/vr.exe",
+                "[R]obotRepair",
+            ),
+        )
+        targets: list[runtime_profile.ResolvedProfileTarget] = []
+        for target_id, role, executable, process_pattern in target_specs:
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(f"fixture {target_id}".encode())
+            openvr_directory = executable.parent / "OpenVR"
+            graphics_directory = executable.parent
+            openvr_directory.mkdir(parents=True, exist_ok=True)
+            targets.append(
+                runtime_profile.ResolvedProfileTarget(
+                    id=target_id,
+                    role=role,
+                    executable=executable,
+                    working_directory=executable.parent,
+                    openvr_directory=openvr_directory,
+                    graphics_directory=graphics_directory,
+                    stock_openvr_sha256="d" * 64,
+                    process_pattern=process_pattern,
+                )
+            )
+        loaded_profile = runtime_profile.LoadedProfile(
+            path=REPO_ROOT / "runtime/profiles/the-lab.json",
+            data={
+                "id": "the-lab",
+                "source": {
+                    "appId": "450390",
+                    "buildId": "1234567",
+                    "payload": {"fileCount": 3, "treeSha256": "e" * 64},
+                },
+                "launch": {
+                    "entrypointTarget": "hub",
+                    "ownedProcess": None,
+                    "ownedTargets": [
+                        "hub",
+                        "secret-shop",
+                        "robot-repair",
+                    ],
+                    "arguments": [],
+                    "environment": {},
+                    "startupTimeoutSeconds": 5,
+                    "transitionTimeoutSeconds": 1,
+                },
+                "geometry": {"maximumStereo": {"width": 3240, "height": 1800}},
+            },
+            sha256="6" * 64,
+        )
+        installed_profile = runtime_profile.InstalledProfile(
+            loaded=loaded_profile,
+            install_root=install_root,
+            steam_manifest=self.root / "appmanifest.acf",
+            steam_manifest_sha256="c" * 64,
+            targets=tuple(targets),
+            owned_process=None,
+        )
+        self.profile = ProfileStartAdmission(
+            installed=installed_profile,
+            crossover_launcher=self.root / "cxstart",
+            bottle_name="Steam",
+            bridge_root=self.root / "bridge",
+        )
+        self.multi_runner = MultiTargetRunner(self.paths)
+        self.runner = self.multi_runner
+        for index, target in enumerate(targets, start=1):
+            self.multi_runner.register_target(
+                target.id,
+                9_100 + (index - 1) * 100 + 1,
+                target.executable,
+                command=f"{target.role} {target.executable}",
+                started_at=f"Sat Jul 18 04:00:0{index + 1} 2026",
+            )
+        self.context = replace(
+            self.context,
+            runner=self.multi_runner,
+            birth_token_reader=self.multi_runner.birth_token,
+            pid_version_reader=self.multi_runner.pid_version,
+        )
+        self.admission = replace(self.admission, profile=self.profile)
+
+
+class MultiTargetProducerLauncher:
+    def __init__(
+        self,
+        fixture: MultiTargetFixture,
+        *,
+        initial_target: str = "hub",
+        publish_markers: bool = True,
+    ) -> None:
+        self.fixture = fixture
+        self.initial_target = initial_target
+        self.publish_markers = publish_markers
+        self.process = FixtureProducerProcess(fixture.runner)
+        self.command: tuple[str, ...] | None = None
+        self.bridge_log: pathlib.Path | None = None
+        self.generation = 1
+        self.failed_groups: set[int] = set()
+
+    def launch(
+        self,
+        argv: Sequence[str],
+        working_directory: pathlib.Path,
+        environment: dict[str, str],
+        log_path: pathlib.Path,
+    ) -> FixtureProducerProcess:
+        del working_directory, environment
+        self.command = tuple(str(item) for item in argv)
+        log_path.write_text("fixture multi-target producer\n")
+        self.fixture.multi_runner.producer_live = True
+        self.fixture.multi_runner.set_target_live(self.initial_target, True)
+        if "--env" in self.command:
+            environment_values = dict(
+                item.split("=", 1)
+                for item in shlex.split(self.command[self.command.index("--env") + 1])
+            )
+            self.generation = int(environment_values["ALVR_IOSURFACE_POOL_NONCE"])
+        self.bridge_log = log_path.parent / BRIDGE_LOG_NAME
+        if self.publish_markers:
+            self.publish_handshake(self.initial_target, include_self_tests=True)
+        return self.process
+
+    def publish_handshake(
+        self,
+        target_id: str,
+        *,
+        include_self_tests: bool = False,
+    ) -> None:
+        if self.bridge_log is None:
+            raise AssertionError("fixture launcher has not started")
+        process = self.fixture.multi_runner.process_for_target(target_id)
+        with self.bridge_log.open("a") as stream:
+            stream.write(
+                "native_source producer handshake accepted "
+                f"service={self.fixture.paths.service_label} "
+                f"nonce={self.generation} bridge_pid=4321 "
+                f"producer_pid={process['pid']} "
+                f"producer_pidversion={process['pidVersion']} "
+                f"producer_start_token={process['birthToken']} "
+                "source=3240x1800\n"
+            )
+            if include_self_tests:
+                stream.write("native_source startup self-tests passed slots=3\n")
+
+    def group_id(self, pid: int) -> int:
+        if pid != self.process.pid or not self.fixture.multi_runner.producer_live:
+            raise ProcessLookupError(pid)
+        return self.fixture.multi_runner.producer_group
+
+    def group_signaler(self, process_group: int, signal_number: int) -> None:
+        self.fixture.multi_runner.signals.append((process_group, signal_number))
+        if process_group in self.failed_groups:
+            raise PermissionError(f"fixture refuses group {process_group}")
+        self.fixture.multi_runner.set_group_live(process_group, False)
+
+    def group_live(self, process_group: int) -> bool:
+        if (
+            process_group == self.fixture.multi_runner.producer_group
+            and self.fixture.multi_runner.producer_live
+        ):
+            return True
+        with self.fixture.multi_runner.target_lock:
+            return any(
+                process["live"]
+                and process["processGroupId"] == process_group
+                for process in self.fixture.multi_runner.target_processes.values()
+            )
+
+
 class ExitedProcess(ImmediateProcess):
     def poll(self) -> int | None:
         return 1
@@ -666,11 +1017,19 @@ class RuntimeStartTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.fixture.cleanup()
 
+    def use_multi_target_fixture(self) -> MultiTargetFixture:
+        self.fixture.cleanup()
+        fixture = MultiTargetFixture()
+        self.fixture = fixture
+        return fixture
+
     def supervise_fixture(
         self,
         generation: int,
         run_dir: pathlib.Path,
-        producer_launcher: FixtureProducerLauncher | None = None,
+        producer_launcher: (
+            FixtureProducerLauncher | MultiTargetProducerLauncher | None
+        ) = None,
         telemetry_reader: Callable[[], ClientTelemetry] | None = None,
     ) -> StartReport:
         self.fixture.telemetry.bind(generation, 4321)
@@ -728,6 +1087,39 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["state"], "waiting")
         return self.wait_for_state("waiting", producer_status="ready")
+
+    def wait_for_owned_targets(
+        self,
+        target_ids: set[str],
+        *,
+        producer_status: str = "ready",
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = load_control_state(self.fixture.paths.state_path)
+            if state.valid and state.record is not None:
+                producer = state.record.get("producer")
+                if isinstance(producer, dict):
+                    identities = producer.get("ownedProcesses")
+                    observed_ids = (
+                        {
+                            identity["targetId"]
+                            for identity in identities
+                            if isinstance(identity, dict)
+                            and isinstance(identity.get("targetId"), str)
+                        }
+                        if isinstance(identities, list)
+                        else set()
+                    )
+                    if (
+                        producer.get("status") == producer_status
+                        and observed_ids == target_ids
+                    ):
+                        return state.record
+            time.sleep(0.01)
+        self.fail(
+            f"runtime did not publish producer={producer_status} targets={sorted(target_ids)}"
+        )
 
     def exact_profile_plan(self) -> dict[str, object]:
         target = self.fixture.profile.installed.entrypoint
@@ -889,6 +1281,187 @@ class RuntimeStartTests(unittest.TestCase):
                 )
         self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
         inspect_plan.assert_not_called()
+
+    def test_multi_target_profile_remains_fenced_from_production_admission(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        with mock.patch(
+            "runtime_start.runtime_profile.load_curated_profile",
+            return_value=fixture.profile.installed.loaded,
+        ), mock.patch(
+            "runtime_start.runtime_profile.resolve_installed_profile",
+            return_value=fixture.profile.installed,
+        ), mock.patch(
+            "runtime_start._require_plan_operation",
+        ) as inspect_plan:
+            with self.assertRaises(ControlError) as raised:
+                _inspect_profile_admission(
+                    {},
+                    {},
+                    {},
+                    fixture.artifact,
+                    "the-lab",
+                )
+        self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
+        inspect_plan.assert_not_called()
+
+    def test_multi_target_discovery_uses_one_snapshot_and_rejects_ambiguity(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        runner.set_target_live("hub", True)
+        hub = runner.process_for_target("hub")
+        foreign_executable = fixture.root / "foreign/TheLab.exe"
+        foreign_executable.parent.mkdir(parents=True)
+        foreign_executable.write_bytes(b"foreign")
+        runner.register_target(
+            "foreign",
+            9_199,
+            foreign_executable,
+            command="TheLab foreign helper",
+            mappings=(foreign_executable,),
+            live=True,
+        )
+        before = len(
+            [
+                command
+                for command in runner.commands
+                if "pid=,pgid=,command=" in command
+            ]
+        )
+        candidates = runtime_start._owned_producer_candidates(
+            fixture.profile,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        after = len(
+            [
+                command
+                for command in runner.commands
+                if "pid=,pgid=,command=" in command
+            ]
+        )
+        self.assertEqual(after - before, 1)
+        self.assertEqual([candidate.target_id for candidate in candidates], ["hub"])
+
+        runner.register_target(
+            "duplicate-hub",
+            9_198,
+            pathlib.Path(hub["executable"]),
+            command="TheLab duplicate",
+            live=True,
+        )
+        with self.assertRaises(ControlError) as duplicate:
+            runtime_start._owned_producer_candidates(
+                fixture.profile,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(duplicate.exception.code, "producer.identity_changed")
+        self.assertIn("Multiple exact candidates", duplicate.exception.message)
+
+        with runner.target_lock:
+            runner.target_processes[9_198]["live"] = False
+            hub["live"] = False
+            runner.target_processes[9_199]["live"] = False
+        runner.register_target(
+            "ambiguous",
+            9_197,
+            pathlib.Path(hub["executable"]),
+            command="TheLab SecretShop shared host",
+            mappings=(pathlib.Path(hub["executable"]),),
+            live=True,
+        )
+        with self.assertRaises(ControlError) as ambiguous:
+            runtime_start._owned_producer_candidates(
+                fixture.profile,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(ambiguous.exception.code, "producer.identity_changed")
+        self.assertIn("ambiguously matches", ambiguous.exception.message)
+
+    def test_multi_target_discovery_rejects_prelaunch_and_invalid_group(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        runner.set_target_live("hub", True)
+        hub = runner.process_for_target("hub")
+        hub["startedAt"] = "Sat Jul 18 04:00:00 2026"
+        with self.assertRaises(ControlError) as prelaunch:
+            runtime_start._inspect_owned_producer_identities(
+                fixture.profile,
+                runner.launcher_started_at,
+                runner.producer_group,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(prelaunch.exception.code, "producer.identity_changed")
+        self.assertIn("predates", prelaunch.exception.message)
+
+        hub["startedAt"] = "Sat Jul 18 04:00:02 2026"
+        hub["processGroupId"] = 8_888
+        with self.assertRaises(ControlError) as invalid_group:
+            runtime_start._inspect_owned_producer_identities(
+                fixture.profile,
+                runner.launcher_started_at,
+                runner.producer_group,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(invalid_group.exception.code, "producer.identity_changed")
+        self.assertIn("admitted process group", invalid_group.exception.message)
+
+        hub["processGroupId"] = hub["pid"]
+        observation = runtime_start._inspect_owned_producer_observation(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        hub["pidVersion"] = int(hub["pidVersion"]) + 1
+        with self.assertRaises(ControlError) as drifted:
+            runtime_start._confirm_owned_producer_observation(
+                observation,
+                fixture.profile,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(drifted.exception.code, "producer.identity_changed")
+
+    def test_multi_target_revalidation_rejects_cross_target_mapping_drift(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        runner.set_target_live("hub", True)
+        observation = runtime_start._inspect_owned_producer_observation(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        hub = runner.process_for_target("hub")
+        secret = runner.process_for_target("secret-shop")
+        hub["mappings"] = (
+            pathlib.Path(hub["executable"]),
+            pathlib.Path(secret["executable"]),
+        )
+        with self.assertRaises(ControlError) as drifted:
+            runtime_start._confirm_owned_producer_observation(
+                observation,
+                fixture.profile,
+                runner,
+                runner.birth_token,
+                runner.pid_version,
+            )
+        self.assertEqual(drifted.exception.code, "producer.identity_changed")
+        self.assertIn("executable mapping changed", drifted.exception.message)
 
     def test_preexisting_owned_process_fails_before_service_or_launch(self) -> None:
         run_dir = self.fixture.state_root / "r-0000000000000033"
@@ -1078,6 +1651,269 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertFalse(self.fixture.paths.lock_path.exists())
         self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
         self.assertFalse(run_dir.exists())
+
+    def test_singleton_supervisor_state_remains_schema_five(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000046"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(70, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            record = self.wait_for_waiting_startup(run_dir)
+            self.assertEqual(record["schemaVersion"], 5)
+            self.assertEqual(
+                set(record["producer"]),
+                {
+                    "status",
+                    "launcher",
+                    "expectedOwnedProcess",
+                    "ownedProcess",
+                    "log",
+                },
+            )
+            accepted, error = request_supervisor_stop(record)
+            self.assertTrue(accepted, error)
+            self.fixture.runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+
+    def test_multi_target_startup_waits_through_zero_target_transition(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        run_dir = fixture.state_root / "r-0000000000000047"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = MultiTargetProducerLauncher(fixture)
+        transition_timer: threading.Timer | None = None
+        transition_scheduled = False
+
+        def telemetry_reader() -> ClientTelemetry:
+            nonlocal transition_scheduled, transition_timer
+            if not transition_scheduled and producer_launcher.bridge_log is not None:
+                transition_scheduled = True
+                fixture.multi_runner.set_target_live("hub", False)
+
+                def finish_transition() -> None:
+                    fixture.multi_runner.set_target_live("secret-shop", True)
+                    producer_launcher.publish_handshake("secret-shop")
+
+                transition_timer = threading.Timer(0.05, finish_transition)
+                transition_timer.start()
+            return fixture.telemetry.read()
+
+        def supervise() -> None:
+            result.append(
+                self.supervise_fixture(
+                    71,
+                    run_dir,
+                    producer_launcher,
+                    telemetry_reader,
+                )
+            )
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(fixture.root)]},
+                {},
+                fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            record = self.wait_for_waiting_startup(run_dir)
+            self.assertEqual(record["schemaVersion"], 6)
+            self.assertEqual(
+                [
+                    identity["targetId"]
+                    for identity in record["producer"]["ownedProcesses"]
+                ],
+                ["secret-shop"],
+            )
+            accepted, error = request_supervisor_stop(record)
+            self.assertTrue(accepted, error)
+            fixture.multi_runner.loaded = False
+            thread.join(timeout=5)
+
+        if transition_timer is not None:
+            transition_timer.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+
+    def test_multi_target_supervisor_publishes_sequential_transition(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        run_dir = fixture.state_root / "r-0000000000000048"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = MultiTargetProducerLauncher(fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(72, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(fixture.root)]},
+                {},
+                fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            record = self.wait_for_waiting_startup(run_dir)
+            self.assertEqual(record["schemaVersion"], 6)
+            self.assertEqual(
+                [
+                    identity["targetId"]
+                    for identity in record["producer"]["ownedProcesses"]
+                ],
+                ["hub"],
+            )
+
+            fixture.multi_runner.set_target_live("hub", False)
+            starting = self.wait_for_owned_targets(set(), producer_status="starting")
+            self.assertEqual(starting["state"], "idle")
+            self.assertIsNone(starting["client"])
+
+            fixture.multi_runner.set_target_live("secret-shop", True)
+            producer_launcher.publish_handshake("secret-shop")
+            ready = self.wait_for_owned_targets({"secret-shop"})
+            accepted, error = request_supervisor_stop(ready)
+            self.assertTrue(accepted, error)
+            quiesced = load_control_state(fixture.paths.state_path)
+            self.assertTrue(quiesced.valid)
+            assert quiesced.record is not None
+            self.assertEqual(quiesced.record["producer"]["status"], "quiesced")
+            self.assertEqual(
+                {
+                    identity["targetId"]
+                    for identity in quiesced.record["producer"]["ownedProcesses"]
+                },
+                {"hub", "secret-shop"},
+            )
+            fixture.multi_runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+
+    def test_multi_target_supervisor_publishes_bounded_overlap(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        run_dir = fixture.state_root / "r-0000000000000049"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = MultiTargetProducerLauncher(fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(73, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(fixture.root)]},
+                {},
+                fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            self.wait_for_waiting_startup(run_dir)
+            fixture.multi_runner.set_target_live("secret-shop", True)
+            producer_launcher.publish_handshake("secret-shop")
+            overlap = self.wait_for_owned_targets({"hub", "secret-shop"})
+            self.assertEqual(overlap["producer"]["status"], "ready")
+
+            fixture.multi_runner.set_target_live("hub", False)
+            ready = self.wait_for_owned_targets({"secret-shop"})
+            self.assertEqual(
+                [
+                    identity["targetId"]
+                    for identity in ready["producer"]["ownedProcesses"]
+                ],
+                ["secret-shop"],
+            )
+            accepted, error = request_supervisor_stop(ready)
+            self.assertTrue(accepted, error)
+            fixture.multi_runner.loaded = False
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+
+    def test_multi_target_partial_termination_preserves_published_evidence(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        run_dir = fixture.state_root / "r-000000000000004a"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = MultiTargetProducerLauncher(fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(74, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(fixture.root)]},
+                {},
+                fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            self.wait_for_waiting_startup(run_dir)
+            fixture.multi_runner.set_target_live("secret-shop", True)
+            producer_launcher.publish_handshake("secret-shop")
+            overlap = self.wait_for_owned_targets({"hub", "secret-shop"})
+            secret = fixture.multi_runner.process_for_target("secret-shop")
+            producer_launcher.failed_groups.add(int(secret["processGroupId"]))
+
+            accepted, error = request_supervisor_stop(overlap)
+            self.assertFalse(accepted)
+            self.assertIn("producer.quiesce_failed", error or "")
+            preserved = load_control_state(fixture.paths.state_path)
+            self.assertTrue(preserved.valid)
+            assert preserved.record is not None
+            self.assertEqual(
+                {
+                    identity["targetId"]
+                    for identity in preserved.record["producer"]["ownedProcesses"]
+                },
+                {"hub", "secret-shop"},
+            )
+            self.assertTrue(secret["live"])
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result)
+        self.assertTrue(fixture.paths.state_path.exists())
 
     def test_post_quiescence_publication_failure_keeps_stop_terminal(self) -> None:
         run_dir = self.fixture.state_root / "r-0000000000000037"
@@ -2040,6 +2876,363 @@ class RuntimeStartTests(unittest.TestCase):
                 9_002_002,
             )
         )
+
+    def test_multi_target_stale_handshake_does_not_reset_transition_deadline(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        runner.set_target_live("hub", True)
+        observation = runtime_start._inspect_owned_producer_observation(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        observation = runtime_start._confirm_owned_producer_observation(
+            observation,
+            fixture.profile,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        hub = runner.process_for_target("hub")
+        bridge_log = fixture.root / "stale-multi-target.log"
+        bridge_log.write_text(
+            "native_source producer handshake accepted "
+            f"service={fixture.paths.service_label} nonce=42 bridge_pid=4321 "
+            f"producer_pid={hub['pid']} "
+            f"producer_pidversion={int(hub['pidVersion']) - 1} "
+            f"producer_start_token={hub['birthToken']} source=3240x1800\n"
+            "native_source startup self-tests passed slots=3\n"
+        )
+        self.assertEqual(
+            runtime_start._owned_producer_handshake_intersection(
+                bridge_log,
+                fixture.paths.service_label,
+                42,
+                4321,
+                observation.identities,
+            ),
+            (),
+        )
+
+        initial = runtime_start._OwnedProducerTransition((), (), None)
+        first = runtime_start._reconcile_owned_producer_transition(
+            fixture.profile,
+            initial,
+            observation,
+            bridge_log,
+            fixture.paths.service_label,
+            42,
+            4321,
+            runner.producer_group,
+            10.0,
+            2.0,
+            lambda process_group: False,
+        )
+        self.assertEqual(first.deadline, 12.0)
+        second = runtime_start._reconcile_owned_producer_transition(
+            fixture.profile,
+            first,
+            observation,
+            bridge_log,
+            fixture.paths.service_label,
+            42,
+            4321,
+            runner.producer_group,
+            11.0,
+            2.0,
+            lambda process_group: False,
+        )
+        self.assertEqual(second.deadline, 12.0)
+        with self.assertRaises(ControlError) as timed_out:
+            runtime_start._reconcile_owned_producer_transition(
+                fixture.profile,
+                second,
+                observation,
+                bridge_log,
+                fixture.paths.service_label,
+                42,
+                4321,
+                runner.producer_group,
+                12.0,
+                2.0,
+                lambda process_group: False,
+            )
+        self.assertEqual(timed_out.exception.code, "producer.transition_timeout")
+
+    def test_multi_target_transition_requires_exact_outgoing_absence(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        runner.set_target_live("hub", True)
+        hub_observation = runtime_start._inspect_owned_producer_observation(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        hub_identity = hub_observation.identities[0]
+        runner.set_target_live("hub", False)
+        runner.set_target_live("secret-shop", True)
+        secret_observation = runtime_start._inspect_owned_producer_observation(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        secret = runner.process_for_target("secret-shop")
+        bridge_log = fixture.root / "outgoing-absence.log"
+        bridge_log.write_text(
+            "native_source producer handshake accepted "
+            f"service={fixture.paths.service_label} nonce=42 bridge_pid=4321 "
+            f"producer_pid={secret['pid']} "
+            f"producer_pidversion={secret['pidVersion']} "
+            f"producer_start_token={secret['birthToken']} source=3240x1800\n"
+            "native_source startup self-tests passed slots=3\n"
+        )
+        previous = runtime_start._OwnedProducerTransition(
+            (hub_identity,),
+            (hub_identity,),
+            20.0,
+        )
+        with self.assertRaises(ControlError) as raised:
+            runtime_start._reconcile_owned_producer_transition(
+                fixture.profile,
+                previous,
+                secret_observation,
+                bridge_log,
+                fixture.paths.service_label,
+                42,
+                4321,
+                runner.producer_group,
+                11.0,
+                10.0,
+                lambda process_group: (
+                    process_group == hub_identity.identity.process_group_id
+                ),
+            )
+        self.assertEqual(raised.exception.code, "producer.identity_changed")
+        self.assertIn("group remains live", raised.exception.message)
+
+    def test_multi_target_quiescence_deduplicates_shared_process_group(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        with runner.target_lock:
+            for target_process in runner.target_processes.values():
+                if target_process["targetId"] in {"hub", "secret-shop"}:
+                    target_process["processGroupId"] = runner.producer_group
+        run_dir = fixture.state_root / "multi-quiesce-dedup"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        launched_process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        runner.set_target_live("secret-shop", True)
+        launcher.publish_handshake("secret-shop")
+        identities = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        retained = runtime_start._quiesce_owned_producers(
+            launched_process,
+            runner.producer_birth_token,
+            runner.launcher_started_at,
+            runner.producer_group,
+            identities,
+            fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            fixture.paths.service_label,
+            launcher.generation,
+            4321,
+            fixture.context,
+            time.monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertEqual(
+            {identity.target_id for identity in retained},
+            {"hub", "secret-shop"},
+        )
+        self.assertEqual(
+            runner.signals,
+            [(runner.producer_group, runtime_start.signal.SIGTERM)],
+        )
+
+    def test_multi_target_quiescence_admits_late_authenticated_target(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        run_dir = fixture.state_root / "multi-quiesce-late-authenticated"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        launched_process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        retained = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        late_published = False
+
+        def signal_group(process_group: int, signal_number: int) -> None:
+            nonlocal late_published
+            launcher.group_signaler(process_group, signal_number)
+            if not late_published:
+                late_published = True
+                runner.set_target_live("secret-shop", True)
+                launcher.publish_handshake("secret-shop")
+
+        final_retained = runtime_start._quiesce_owned_producers(
+            launched_process,
+            runner.producer_birth_token,
+            runner.launcher_started_at,
+            runner.producer_group,
+            retained,
+            fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            fixture.paths.service_label,
+            launcher.generation,
+            4321,
+            fixture.context,
+            time.monotonic,
+            launcher.group_id,
+            signal_group,
+            launcher.group_live,
+        )
+        self.assertEqual(
+            {identity.target_id for identity in final_retained},
+            {"hub", "secret-shop"},
+        )
+        secret_group = int(
+            runner.process_for_target("secret-shop")["processGroupId"]
+        )
+        self.assertIn((secret_group, runtime_start.signal.SIGTERM), runner.signals)
+
+    def test_multi_target_quiescence_observes_after_first_empty_snapshot(self) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        run_dir = fixture.state_root / "multi-quiesce-post-empty"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        launched_process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        retained = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        clock = [0.0]
+        late_published = False
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def sleeper(duration: float) -> None:
+            nonlocal late_published
+            if not late_published and not runner.producer_live:
+                late_published = True
+                runner.set_target_live("secret-shop", True)
+                launcher.publish_handshake("secret-shop")
+            clock[0] += duration
+
+        final_retained = runtime_start._quiesce_owned_producers(
+            launched_process,
+            runner.producer_birth_token,
+            runner.launcher_started_at,
+            runner.producer_group,
+            retained,
+            fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            fixture.paths.service_label,
+            launcher.generation,
+            4321,
+            replace(fixture.context, sleeper=sleeper),
+            monotonic,
+            launcher.group_id,
+            launcher.group_signaler,
+            launcher.group_live,
+        )
+        self.assertTrue(late_published)
+        self.assertEqual(
+            {identity.target_id for identity in final_retained},
+            {"hub", "secret-shop"},
+        )
+        secret_group = int(
+            runner.process_for_target("secret-shop")["processGroupId"]
+        )
+        self.assertIn((secret_group, runtime_start.signal.SIGTERM), runner.signals)
+
+    def test_multi_target_quiescence_never_signals_late_unauthenticated_target(
+        self,
+    ) -> None:
+        fixture = self.use_multi_target_fixture()
+        runner = fixture.multi_runner
+        run_dir = fixture.state_root / "multi-quiesce-unauthenticated"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        retained = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        runner.set_target_live("secret-shop", True)
+        with self.assertRaises(ControlError) as raised:
+            runtime_start._quiesce_owned_producers(
+                process,
+                runner.producer_birth_token,
+                runner.launcher_started_at,
+                runner.producer_group,
+                retained,
+                fixture.profile,
+                run_dir / BRIDGE_LOG_NAME,
+                fixture.paths.service_label,
+                launcher.generation,
+                4321,
+                fixture.context,
+                time.monotonic,
+                launcher.group_id,
+                launcher.group_signaler,
+                launcher.group_live,
+            )
+        self.assertEqual(raised.exception.code, "producer.quiesce_failed")
+        self.assertIn("without a current authenticated handshake", raised.exception.message)
+        self.assertEqual(runner.signals, [])
+        self.assertTrue(runner.process_for_target("secret-shop")["live"])
 
     def test_start_parent_returns_generation_bound_child_result(self) -> None:
         launcher = ImmediateLauncher(self.fixture.admission.artifact, self.fixture.profile)

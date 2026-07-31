@@ -1738,7 +1738,6 @@ def recorded_producer_group_present(
                 executable
                 for executable, pattern in compiled_expected
                 if pattern.search(command)
-                and executable.name.casefold() in command.casefold()
             ]
             if not matching_expected:
                 continue
