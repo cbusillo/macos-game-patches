@@ -176,6 +176,10 @@ def _profile_error(error: runtime_profile.ProfileError) -> RuntimeInstallError:
     return RuntimeInstallError(error.code, error.message, **error.context)
 
 
+def _transaction_error(error: runtime_transaction.TransactionError) -> RuntimeInstallError:
+    return RuntimeInstallError(error.code, error.message, **error.context)
+
+
 def _ensure_allowed(
     path: pathlib.Path,
     allowed_roots: Sequence[pathlib.Path],
@@ -709,6 +713,17 @@ def resolved_plan_digest(plan: dict[str, Any], kind: MutationKind) -> str:
         operations,
         resolved_plan_identity(plan),
     )
+
+
+def validate_resolved_plan_journal(
+    plan: dict[str, Any],
+    kind: MutationKind,
+    journal: Any,
+) -> dict[str, Any]:
+    try:
+        return _executor(kind, plan, lifecycle_paths(plan)).validate_journal(journal)
+    except runtime_transaction.TransactionError as error:
+        raise _transaction_error(error) from error
 
 
 def _admit_profile_plan(

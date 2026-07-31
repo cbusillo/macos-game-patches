@@ -2275,6 +2275,10 @@ class TransactionExecutor:
                     raise self._invalid_journal("Transaction cleanup tree identity is invalid")
         return journal
 
+    def validate_journal(self, journal: Any) -> dict[str, Any]:
+        with self._descriptors():
+            return self._validate_journal(journal)
+
     def _load_journal(self) -> dict[str, Any] | None:
         if not path_lexists(self.journal_path):
             return None

@@ -837,28 +837,33 @@ def _require_committed_install_journal(plan: dict[str, Any]) -> None:
         journal = artifact_contract.load_json(journal_path)
     except artifact_contract.ArtifactError as error:
         raise ControlError(error.code, error.message, **error.context) from error
-    expected_digest = _install_plan_digest(plan)
     try:
-        expected_identity = runtime_install.resolved_plan_identity(plan)
+        journal = runtime_install.validate_resolved_plan_journal(
+            plan,
+            "install",
+            journal,
+        )
     except runtime_install.RuntimeInstallError as error:
+        if error.code == "transaction.journal_mismatch":
+            raise ControlError(
+                "runtime.not_installed",
+                "Active lifecycle journal does not prove an exact committed install",
+                path=str(journal_path),
+                expectedPlanDigest=_install_plan_digest(plan),
+            ) from error
         raise ControlError(error.code, error.message, **error.context) from error
-    expected_schema = 3 if expected_identity is not None else 2
     if (
-        not isinstance(journal, dict)
-        or journal.get("schemaVersion") != expected_schema
-        or journal.get("kind") != "install"
-        or journal.get("state") != "committed"
-        or journal.get("planDigest") != expected_digest
-        or journal.get("planIdentity") != expected_identity
+        journal.get("state") != "committed"
         or journal.get("cleanupFailures") != []
         or journal.get("rollbackFailures") != []
         or journal.get("failure") is not None
+        or journal.get("cleanupInProgress") != {}
     ):
         raise ControlError(
             "runtime.not_installed",
             "Active lifecycle journal does not prove an exact committed install",
             path=str(journal_path),
-            expectedPlanDigest=expected_digest,
+            expectedPlanDigest=_install_plan_digest(plan),
         )
 
 

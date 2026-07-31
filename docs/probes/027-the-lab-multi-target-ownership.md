@@ -121,6 +121,16 @@ The implementation must first prove whether the existing transaction executor
 can consume the expanded operation list unchanged. Add new transaction
 machinery only when a fixture demonstrates a real gap.
 
+### Universality Boundary
+
+The checked-in profiles certify known compatibility shapes and provide exact
+regression fixtures; they are not the long-term onboarding mechanism. GitHub
+issue #117 tracks generic runtime discovery plus generated machine-local locks so
+compatible OpenVR/D3D11 titles can eventually be admitted without adding one
+curated repository profile per game. This work keeps that future path open by
+putting all title-specific filesystem and process authority in resolved profile
+data rather than in start, stop, transaction, or cleanup branches.
+
 ## Implementation Slices
 
 1. Add profile validation and resolution for `ownedTargets` with focused tests.
@@ -137,22 +147,28 @@ machinery only when a fixture demonstrates a real gap.
 Each slice must remain reviewable and leave production start fail-closed until
 its complete authority chain is present.
 
-As of July 31, 2026, slices 1 through 4 are complete in hardware-free fixtures.
-Schema v6 is admitted by state inspection, status, dead-owner cleanup,
-cooperative stop, and the additive multi-target supervisor lane selected only
-when a resolved profile owns more than one target. Discovery uses one process
-snapshot per collection observation and exact executable mappings; transitions
-publish only current authenticated identities and share one non-resetting
-deadline; quiescence validates every target before deduplicating and signaling
-groups. Profile-aware `install --profile` and `uninstall --profile` now expand
-the artifact's game overlay across every declared runtime target while keeping
-shared host resources single. Profile ID and SHA-256 are bound into the plan
-digest and schema-v3 transaction journal; legacy artifact-only transactions
-retain their existing digest and schema-v2 journal. The unchanged executor
-admits the full expanded list before mutation and rolls back or recovers every
-target as one transaction. All 68 start, 67 control, 30 install, and 31
-transaction fixtures pass. Production admission still rejects The Lab until
-slice 5 updates the checked-in profile and builds a matching sealed artifact.
+As of July 31, 2026, slices 1 through 5 are complete in hardware-free fixtures.
+The checked-in The Lab profile owns `hub`, `secret-shop`, and `robot-repair`.
+Start materializes the same profile-aware filesystem plan used by install and
+uninstall, requires the exact journal-v3 profile identity and semantic digest,
+and retains the journal-v2 artifact-only fallback for existing singleton
+installs. Profiles with no resolved owned process still fail before plan
+inspection, and singleton supervisor publication remains schema v5.
+
+Two independent dev12 builds produced unsealed seal
+`478fc9892477a0ca05ddcdcc1cb0e27dec5aa543e6e653f7a104c4eccd661bfa`.
+Preserved-bundle sealing produced identical verified seal
+`248bd2c213bfc9acfeb0ea7218ff27941567b822b061e6e72a88028f8e7d8a00`
+with the qualified Developer ID CDHash and bundle tree unchanged. All 18 doctor
+checks pass. The profile-aware The Lab plan is ready with no blockers: 51
+install operations at digest
+`735a8191863b9193558bc3de25599c54e09c706edc63fbb5afe78eee676dbcb7`
+and 27 uninstall operations at digest
+`6ffd0ae9c0febb0388ab06aae4c2343739992cdf4891e45cdba868d63c62f307`.
+All 15 profile, 72 start, 67 control, 30 install, and 31 transaction fixtures
+pass with artifact contract checks and self-tests. No disconnected launch,
+in-headset transition, or physical experience claim is made by slice 5; those
+remain slice 6.
 
 ## Hardware-Free Fixture Matrix
 

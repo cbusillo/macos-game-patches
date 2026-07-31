@@ -386,8 +386,9 @@ an arbitrary path, requires the exact sealed profile hash, verifies Steam
 app/build/depot identity, and projects the installed game tree through the exact
 uninstall substitutions and removals before launch. It materializes the same
 profile-aware filesystem plan used by explicit install and uninstall, then
-requires the exact profile ID, profile SHA-256, semantic plan digest, and
-journal-v3 committed identity before admitting a profile-bound install. Legacy
+requires the executor's complete terminal journal schema plus the exact profile
+ID, profile SHA-256, semantic plan digest, and journal-v3 committed identity
+before admitting a profile-bound install. Legacy
 artifact-only singleton journals retain their journal-v2 digest and remain an
 explicit fallback for existing Freedom and Aircar installations. The Lab owns
 the finite `hub`, `secret-shop`, and `robot-repair` target set, so its complete

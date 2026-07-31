@@ -21,6 +21,7 @@ from unittest import mock
 
 import runtime_profile
 import runtime_start
+import runtime_transaction
 from runtime_control import (
     CommandResult,
     ControlError,
@@ -1173,6 +1174,69 @@ class RuntimeStartTests(unittest.TestCase):
             ]
         )
         return {"install": install, "uninstall": uninstall}
+
+    def committed_install_plan(
+        self,
+        *,
+        layout_id: str,
+        operation_id: str,
+        profile: tuple[str, str] | None = None,
+    ) -> tuple[dict[str, Any], pathlib.Path]:
+        lifecycle_root = self.fixture.root / f"lifecycle-{layout_id}"
+        transaction_root = lifecycle_root / "transactions"
+        transaction_root.mkdir(parents=True, exist_ok=True)
+        journal = transaction_root / "active.json"
+        operation = {
+            "id": operation_id,
+            "resource": "fixture",
+            "action": "retain",
+            "target": str(self.fixture.root / "fixture"),
+            "ready": True,
+        }
+        plan: dict[str, Any] = {
+            "artifact": str(self.fixture.artifact),
+            "allowedTargetRoots": [str(self.fixture.root)],
+            "mutableState": [
+                {"id": "lifecycle_root", "location": str(lifecycle_root)},
+                {"id": "transaction_root", "location": str(transaction_root)},
+                {
+                    "id": "transaction_history",
+                    "location": str(transaction_root / "history"),
+                },
+                {"id": "transaction_journal", "location": str(journal)},
+                {
+                    "id": "transaction_lock",
+                    "location": str(lifecycle_root / "runtime.lock"),
+                },
+                {
+                    "id": "transaction_journal_lock",
+                    "location": str(journal.with_suffix(".json.lock")),
+                },
+                {
+                    "id": "transaction_undo",
+                    "location": str(journal.with_name("active.json.undo")),
+                },
+            ],
+            "install": [operation],
+        }
+        plan_identity = None
+        if profile is not None:
+            profile_id, profile_sha256 = profile
+            plan["profile"] = {"id": profile_id, "sha256": profile_sha256}
+            plan_identity = {
+                "profileId": profile_id,
+                "profileSha256": profile_sha256,
+            }
+        runtime_transaction.TransactionExecutor(
+            kind="install",
+            operations=[operation],
+            artifact_root=self.fixture.artifact,
+            journal_path=journal,
+            transaction_root=transaction_root,
+            allowed_roots=(self.fixture.root,),
+            plan_identity=plan_identity,
+        ).execute()
+        return plan, journal
 
     def test_deadline_runner_caps_and_refuses_commands(self) -> None:
         runner = mock.Mock()
@@ -3903,35 +3967,10 @@ class RuntimeStartTests(unittest.TestCase):
             )
 
     def test_committed_install_journal_must_match_semantic_plan(self) -> None:
-        journal = self.fixture.root / "transaction.json"
-        plan = {
-            "mutableState": [
-                {"id": "transaction_journal", "location": str(journal)},
-            ],
-            "install": [
-                {
-                    "id": "retain_fixture",
-                    "resource": "fixture",
-                    "action": "retain",
-                    "target": str(self.fixture.root / "fixture"),
-                    "ready": True,
-                }
-            ],
-        }
-        journal.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "kind": "install",
-                    "state": "committed",
-                    "planDigest": _install_plan_digest(plan),
-                    "cleanupFailures": [],
-                    "rollbackFailures": [],
-                    "failure": None,
-                }
-            )
+        plan, journal = self.committed_install_plan(
+            layout_id="legacy",
+            operation_id="retain_fixture",
         )
-        journal.chmod(0o600)
         _require_committed_install_journal(plan)
         payload = json.loads(journal.read_text())
         payload["kind"] = "uninstall"
@@ -3940,39 +3979,11 @@ class RuntimeStartTests(unittest.TestCase):
             _require_committed_install_journal(plan)
 
     def test_profile_install_journal_requires_exact_identity(self) -> None:
-        journal = self.fixture.root / "profile-transaction.json"
-        plan = {
-            "profile": {"id": "the-lab", "sha256": "a" * 64},
-            "mutableState": [
-                {"id": "transaction_journal", "location": str(journal)},
-            ],
-            "install": [
-                {
-                    "id": "retain_fixture",
-                    "resource": "fixture",
-                    "action": "retain",
-                    "ready": True,
-                }
-            ],
-        }
-        journal.write_text(
-            json.dumps(
-                {
-                    "schemaVersion": 3,
-                    "kind": "install",
-                    "state": "committed",
-                    "planDigest": _install_plan_digest(plan),
-                    "planIdentity": {
-                        "profileId": "the-lab",
-                        "profileSha256": "a" * 64,
-                    },
-                    "cleanupFailures": [],
-                    "rollbackFailures": [],
-                    "failure": None,
-                }
-            )
+        plan, journal = self.committed_install_plan(
+            layout_id="profile",
+            operation_id="retain_fixture",
+            profile=("the-lab", "a" * 64),
         )
-        journal.chmod(0o600)
         _require_committed_install_journal(plan)
         payload = json.loads(journal.read_text())
         payload["planIdentity"]["profileSha256"] = "b" * 64
@@ -3980,50 +3991,61 @@ class RuntimeStartTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "exact committed install"):
             _require_committed_install_journal(plan)
 
-    def test_start_selects_profile_plan_and_falls_back_to_legacy_journal(self) -> None:
-        journal = self.fixture.root / "selected-transaction.json"
-        common_state = [
-            {"id": "transaction_journal", "location": str(journal)},
-        ]
-        profile_plan: dict[str, Any] = {
-            "profile": {"id": "the-lab", "sha256": "a" * 64},
-            "mutableState": common_state,
-            "install": [
-                {"id": "profile", "resource": "fixture", "action": "retain"}
-            ],
-        }
-        legacy_plan: dict[str, Any] = {
-            "mutableState": common_state,
-            "install": [
-                {"id": "legacy", "resource": "fixture", "action": "retain"}
-            ],
-        }
-
-        def write_journal(plan: dict[str, Any]) -> None:
-            identity = plan.get("profile")
-            payload: dict[str, object] = {
-                "schemaVersion": 3 if identity is not None else 2,
-                "kind": "install",
-                "state": "committed",
-                "planDigest": _install_plan_digest(plan),
-                "cleanupFailures": [],
-                "rollbackFailures": [],
-                "failure": None,
+    def test_start_rejects_incomplete_or_extended_transaction_journal(self) -> None:
+        plan, journal = self.committed_install_plan(
+            layout_id="invalid",
+            operation_id="retain_fixture",
+        )
+        valid = json.loads(journal.read_text())
+        invalid_payloads = []
+        missing_steps = dict(valid)
+        missing_steps.pop("steps")
+        invalid_payloads.append(missing_steps)
+        extended = dict(valid)
+        extended["untrusted"] = True
+        invalid_payloads.append(extended)
+        cleanup_in_progress = dict(valid)
+        cleanup_in_progress["cleanupInProgress"] = {
+            str(self.fixture.root / "foreign"): {
+                "phase": "intent",
+                "identity": None,
+                "treeEntries": None,
             }
-            if isinstance(identity, dict):
-                payload["planIdentity"] = {
-                    "profileId": identity["id"],
-                    "profileSha256": identity["sha256"],
-                }
+        }
+        invalid_payloads.append(cleanup_in_progress)
+
+        for payload in invalid_payloads:
+            with self.subTest(fields=sorted(payload)):
+                journal.write_text(json.dumps(payload))
+                with self.assertRaises(ControlError) as raised:
+                    _require_committed_install_journal(plan)
+                self.assertEqual(raised.exception.code, "transaction.journal_invalid")
+
+    def test_start_selects_profile_plan_and_falls_back_to_legacy_journal(self) -> None:
+        legacy_plan, journal = self.committed_install_plan(
+            layout_id="selected",
+            operation_id="legacy",
+        )
+        legacy_payload = json.loads(journal.read_text())
+        journal.unlink()
+        profile_plan, profile_journal = self.committed_install_plan(
+            layout_id="selected",
+            operation_id="profile",
+            profile=("the-lab", "a" * 64),
+        )
+        self.assertEqual(profile_journal, journal)
+        profile_payload = json.loads(journal.read_text())
+
+        def write_journal(payload: dict[str, Any]) -> None:
             journal.write_text(json.dumps(payload))
             journal.chmod(0o600)
 
-        write_journal(legacy_plan)
+        write_journal(legacy_payload)
         self.assertIs(
             _select_committed_install_plan((profile_plan, legacy_plan)),
             legacy_plan,
         )
-        write_journal(profile_plan)
+        write_journal(profile_payload)
         self.assertIs(
             _select_committed_install_plan((profile_plan, legacy_plan)),
             profile_plan,
