@@ -202,9 +202,27 @@ explicit opt-in. The first sealed dev13 rerun completed producer quiescence in
 supervisor's concurrent code-sign identity read, so the supervisor preserved
 dead-owner state even though the exact job was already absent. Dev13 now
 rechecks launchd after that transient identity-read failure and tolerates it
-only when the fresh snapshot proves absence. A final sealed lifecycle rerun must
-pass before exact stop or disconnected cadence is qualified. Physical Secret
-Shop and Robot Repair transitions remain owner/headset gates.
+only when the fresh snapshot proves absence.
+
+Source commit `466453a98fe83d0c42678e19851e766cd65b603a` produced two
+independent final dev13 builds at unsealed seal
+`c201b16526ceab6c4fcaeb583145d0797c480c0598f99b6a68b544db7e49d5b5`.
+Preserved-bundle sealing produced verified seal
+`526815ef3dd8551429c81398108b6849610744715c01a1161ebb7bc077e70896`
+with all 18 doctor checks passing. The final profile-bound install committed as
+transaction `2db9ffc4094b406d876f3d05b412442b`, schema-v6 start published the
+exact hub identity, and cooperative stop completed the full replacement guard
+in 601 seconds without a retry. Uninstall committed as transaction
+`f671ab31a2a841f9baee7c084ea13969`; final status was `runtime.ready`, the
+launchd job and all transient owned state were absent, every created overlay was
+absent, default cleanup matched no process, and all three stock OpenVR hashes
+matched.
+
+All 15 profile, 74 start, 67 control, 30 install, 31 transaction, and 2 cleanup
+fixtures pass with artifact checks and self-tests. The production hub lifecycle
+and simulated transition contract are qualified. The load-contaminated
+disconnected cadence run is not, and physical Secret Shop and Robot Repair
+transitions remain owner/headset gates.
 
 ## Hardware-Free Fixture Matrix
 
