@@ -135,8 +135,8 @@ and bounded `recovering` after disconnect. Stop freshly revalidates and
 quiesces each live owned process group, refuses ambiguous dead-owner cleanup,
 revalidates service and producer identity before publication or launchd
 bootout, ignores late client telemetry, and never signals serialized PIDs. The
-first production-admitted profile is `freedom-locomotion`; The Lab remains a
-separate multi-target lifecycle slice.
+production-admitted single-process profiles are `freedom-locomotion` and
+`aircar`; The Lab remains a separate multi-target lifecycle slice.
 
 ## Starting New Work
 

@@ -318,16 +318,41 @@ contention with load average above `47`; they are retained as functional and
 cleanup evidence, not cadence qualification. The longer passing qualification
 above remains applicable because every runtime payload byte is identical.
 
-Hardware-free qualification is complete for the packaged artifact. The
-remaining Aircar closeout is one connected replay from this exact seal when a
-worn visual check is available. Earlier identity-preserved physical and worn
-controller runs already prove smooth output, both controller poses, both
-thumbsticks, both triggers, menu/pause/Turbo interactions, and client reentry;
-the title did not emit a haptic command during the observed interval.
+### Final-Seal Owner Acceptance
 
-Current verdict: physical video, cadence, startup, controller pose, steering,
-thrust, menu, Turbo, reconnect, exact host/game restoration, and frozen
-preserved-bundle packaging are proven on the retained authorized bridge. The
-remaining production-admission step is the full `81,000`-frame connected
-physical profile from final seal `180f8dd0f73a1290505b89d0f9c27b4169e0c65e2804b39462d68d694b6b4e56`.
-Haptic output remains unobserved rather than failed.
+Final-seal physical run
+`.code/probes/013-the-lab-profile-qualification/aircar/real-native-encode-20260731T004915Z`
+ran for `52,883` submitted frames and `592,563` ms of producer time before the
+owner intentionally ended it. The owner reported smooth, fully usable operation
+from the exact dev11 package, with lower apparent resolution as the only quality
+concern. Cleanup still completed with `restore_status=0`.
+
+The strict runner result remains recorded as `fail`; it is not rewritten as a
+completed `81,000`-frame soak. The interrupted run recorded one boundary
+`not_ready` drop, a `89.414` FPS steady-tail sample just below the `89.5` gate,
+and a decoder/bridge exit after production stopped. Those facts make this run
+owner-acceptance evidence, not the strict automated cadence result.
+
+Production admission instead uses the complete same-payload evidence set:
+
+- the final dev11 payload is byte-for-byte identical to the earlier qualified
+  seal;
+- physical run `real-native-encode-20260730T195747Z` passed `5,400/5,400`
+  submitted, encoded, and transported frames at `89.682` FPS with zero drops,
+  zero pose gaps, and exact cleanup;
+- worn run `real-native-encode-20260730T202919Z` proved both controller poses,
+  both thumbsticks, both triggers, steering/thrust, menu, pause, Turbo, and
+  interaction actions;
+- reconnect run `real-native-encode-20260730T205938Z` resumed automatically on
+  stream epoch `3` with zero producer steady-state drops; and
+- the exact final seal received direct owner confirmation of smooth usable
+  output before the owner-ended stop.
+
+Current verdict: Aircar is production-admitted as the third positive
+OpenVR/D3D11 title. Physical video, cadence, startup, controller input,
+reconnect, exact restoration, and frozen preserved-bundle packaging are proven
+without a title-specific runtime branch. The owner accepted the composite
+evidence and declined another full-duration replay. Haptic output remains
+unobserved rather than failed because Aircar emitted no haptic command during
+the observed intervals. The softer image is a non-blocking resolution-quality
+follow-up under compatibility tranche #59 and profile experiment #109.
