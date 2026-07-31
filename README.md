@@ -83,7 +83,15 @@ Production-shaped commands are available:
 ```bash
 python3 tools/runtime_cli.py install --artifact <artifact>
 python3 tools/runtime_cli.py uninstall --artifact <artifact>
+python3 tools/runtime_cli.py install --artifact <artifact> --profile <profile>
+python3 tools/runtime_cli.py uninstall --artifact <artifact> --profile <profile>
 ```
+
+Artifact-only calls retain the sealed singleton plan and journal-v2 recovery
+contract. Explicit `--profile` calls expand the game overlay across every
+declared runtime target, bind the curated profile ID and SHA-256 into a
+journal-v3 transaction, and commit or roll back the complete target set as one
+unit. Shared host resources remain single in either mode.
 
 The dev8 contract still uses a separate signing step, but readiness now comes
 from verified artifact stage rather than manifest mode alone. Unsealed artifacts

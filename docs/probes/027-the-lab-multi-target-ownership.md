@@ -137,16 +137,22 @@ machinery only when a fixture demonstrates a real gap.
 Each slice must remain reviewable and leave production start fail-closed until
 its complete authority chain is present.
 
-As of July 31, 2026, slices 1 through 3 are complete in hardware-free fixtures.
+As of July 31, 2026, slices 1 through 4 are complete in hardware-free fixtures.
 Schema v6 is admitted by state inspection, status, dead-owner cleanup,
 cooperative stop, and the additive multi-target supervisor lane selected only
 when a resolved profile owns more than one target. Discovery uses one process
 snapshot per collection observation and exact executable mappings; transitions
 publish only current authenticated identities and share one non-resetting
 deadline; quiescence validates every target before deduplicating and signaling
-groups. All 68 start and 67 control fixtures pass. Singleton profiles retain
-schema-v5 behavior, and production admission still rejects The Lab until the
-profile-aware installation slice lands.
+groups. Profile-aware `install --profile` and `uninstall --profile` now expand
+the artifact's game overlay across every declared runtime target while keeping
+shared host resources single. Profile ID and SHA-256 are bound into the plan
+digest and schema-v3 transaction journal; legacy artifact-only transactions
+retain their existing digest and schema-v2 journal. The unchanged executor
+admits the full expanded list before mutation and rolls back or recovers every
+target as one transaction. All 68 start, 67 control, 30 install, and 31
+transaction fixtures pass. Production admission still rejects The Lab until
+slice 5 updates the checked-in profile and builds a matching sealed artifact.
 
 ## Hardware-Free Fixture Matrix
 

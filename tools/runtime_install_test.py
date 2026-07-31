@@ -18,6 +18,7 @@ from unittest import mock
 import build_runtime_artifact as artifact_contract
 import runtime_cli
 import runtime_install
+import runtime_profile
 import runtime_transaction
 from runtime_control import (
     CheckResult,
@@ -350,6 +351,258 @@ class LifecycleFixture:
     def assert_common_path(self, path: pathlib.Path) -> None:
         if os.path.commonpath([str(path), str(self.root)]) != str(self.root):
             raise AssertionError(f"fixture path escaped root: {path}")
+
+
+class ProfilePlanFixture:
+    def __init__(self, lifecycle: LifecycleFixture) -> None:
+        self.lifecycle = lifecycle
+        self.sources = {
+            "game_openvr": lifecycle._artifact_file(
+                "payload/windows/openvr_api.dll",
+                b"profile openvr shim",
+            ),
+            "custom_openvr_runtime": lifecycle._artifact_file(
+                "payload/windows/openvr_api.real.dll",
+                b"profile fake runtime",
+            ),
+            "dxvk_d3d11": lifecycle._artifact_file(
+                "payload/windows/d3d11.dll",
+                b"profile d3d11",
+            ),
+            "dxvk_dxgi": lifecycle._artifact_file(
+                "payload/windows/dxgi.dll",
+                b"profile dxgi",
+            ),
+            "game_wine_bridge_windows": lifecycle._artifact_file(
+                "payload/windows/alvr_iosurface_bridge.dll",
+                b"profile wine bridge",
+            ),
+        }
+        targets: list[runtime_profile.ResolvedProfileTarget] = []
+        self.stock_payloads: dict[str, bytes] = {}
+        for target_id in ("hub", "secret-shop", "robot-repair"):
+            target_root = lifecycle.targets_root / target_id
+            openvr_directory = target_root / "openvr"
+            graphics_directory = target_root / "graphics"
+            openvr_directory.mkdir(parents=True)
+            graphics_directory.mkdir(parents=True)
+            stock_payload = f"stock {target_id}".encode()
+            (openvr_directory / "openvr_api.dll").write_bytes(stock_payload)
+            stock_sha256 = artifact_contract.sha256_bytes(stock_payload)
+            self.stock_payloads[target_id] = stock_payload
+            targets.append(
+                runtime_profile.ResolvedProfileTarget(
+                    id=target_id,
+                    role="hub" if target_id == "hub" else "experience",
+                    executable=target_root / f"{target_id}.exe",
+                    working_directory=target_root,
+                    openvr_directory=openvr_directory,
+                    graphics_directory=graphics_directory,
+                    stock_openvr_sha256=stock_sha256,
+                    process_pattern=f"[{target_id[0]}]{target_id[1:]}",
+                )
+            )
+        self.profile = runtime_install.ProfilePlanBinding(
+            id="the-lab",
+            sha256="f" * 64,
+            install_root=lifecycle.targets_root,
+            targets=tuple(targets),
+        )
+        legacy_openvr = lifecycle.targets_root / "legacy/openvr"
+        legacy_graphics = lifecycle.targets_root / "legacy/graphics"
+        legacy_openvr.mkdir(parents=True)
+        legacy_graphics.mkdir(parents=True)
+        (legacy_openvr / "openvr_api.dll").write_bytes(b"legacy stock")
+        legacy_backup = lifecycle.backup_root / "legacy-openvr.dll"
+        self.manifest: dict[str, list[dict[str, Any]]] = {
+            "installPlan": [
+                {
+                    "id": "retain_shared_install",
+                    "resource": "shared_runtime",
+                    "action": "retain",
+                    "target": str(lifecycle.stock),
+                },
+                {
+                    "id": "verify_stock_openvr",
+                    "resource": "game_openvr",
+                    "action": "assert_sha256",
+                    "expectedSha256": artifact_contract.sha256_bytes(b"legacy stock"),
+                    "target": str(legacy_openvr / "openvr_api.dll"),
+                },
+                {
+                    "id": "backup_stock_openvr",
+                    "resource": "game_openvr",
+                    "action": "backup",
+                    "backup": str(legacy_backup),
+                    "target": str(legacy_openvr / "openvr_api.dll"),
+                },
+                {
+                    "id": "install_openvr_shim",
+                    "resource": "game_openvr",
+                    "action": "replace_file",
+                    "atomic": True,
+                    "source": "payload/windows/openvr_api.dll",
+                    "target": str(legacy_openvr / "openvr_api.dll"),
+                },
+                *self._create_templates(
+                    "custom_openvr_runtime",
+                    "fake_runtime",
+                    legacy_openvr / "openvr_api.real.dll",
+                    "payload/windows/openvr_api.real.dll",
+                ),
+                *self._create_templates(
+                    "dxvk_d3d11",
+                    "d3d11",
+                    legacy_graphics / "d3d11.dll",
+                    "payload/windows/d3d11.dll",
+                ),
+                *self._create_templates(
+                    "dxvk_dxgi",
+                    "dxgi",
+                    legacy_graphics / "dxgi.dll",
+                    "payload/windows/dxgi.dll",
+                ),
+                *self._create_templates(
+                    "game_wine_bridge_windows",
+                    "game_wine_bridge_windows",
+                    legacy_graphics / "alvr_iosurface_bridge.dll",
+                    "payload/windows/alvr_iosurface_bridge.dll",
+                ),
+                {
+                    "id": "retain_stock_openvr_backup",
+                    "resource": "game_openvr",
+                    "action": "retain",
+                    "target": str(legacy_backup),
+                },
+            ],
+            "uninstallPlan": [
+                {
+                    "id": "restore_stock_openvr",
+                    "resource": "game_openvr",
+                    "action": "restore",
+                    "atomic": True,
+                    "source": "payload/windows/openvr_api.dll",
+                    "target": str(legacy_openvr / "openvr_api.dll"),
+                    "backup": str(legacy_backup),
+                    "expectedSha256": artifact_contract.sha256_bytes(b"legacy stock"),
+                },
+                *self._remove_templates(
+                    "custom_openvr_runtime",
+                    "fake_runtime",
+                    legacy_openvr / "openvr_api.real.dll",
+                    "payload/windows/openvr_api.real.dll",
+                ),
+                *self._remove_templates(
+                    "dxvk_d3d11",
+                    "d3d11",
+                    legacy_graphics / "d3d11.dll",
+                    "payload/windows/d3d11.dll",
+                ),
+                *self._remove_templates(
+                    "dxvk_dxgi",
+                    "dxgi",
+                    legacy_graphics / "dxgi.dll",
+                    "payload/windows/dxgi.dll",
+                ),
+                *self._remove_templates(
+                    "game_wine_bridge_windows",
+                    "game_wine_bridge_windows",
+                    legacy_graphics / "alvr_iosurface_bridge.dll",
+                    "payload/windows/alvr_iosurface_bridge.dll",
+                ),
+                {
+                    "id": "retain_stock_openvr_backup_after_restore",
+                    "resource": "game_openvr",
+                    "action": "retain",
+                    "target": str(legacy_backup),
+                },
+                {
+                    "id": "retain_shared_uninstall",
+                    "resource": "shared_runtime",
+                    "action": "retain",
+                    "target": str(lifecycle.stock),
+                },
+            ],
+        }
+        base_plan = lifecycle.plan()
+        allowed_roots = [lifecycle.root]
+        base_plan["install"] = [
+            artifact_contract.resolve_plan_operation(
+                item,
+                lifecycle.artifact_root,
+                {},
+                allowed_roots,
+            )
+            for item in self.manifest["installPlan"]
+        ]
+        base_plan["uninstall"] = [
+            artifact_contract.resolve_plan_operation(
+                item,
+                lifecycle.artifact_root,
+                {},
+                allowed_roots,
+            )
+            for item in self.manifest["uninstallPlan"]
+        ]
+        self.plan = runtime_install._materialize_profile_plan(
+            base_plan,
+            self.manifest,
+            lifecycle.artifact_root,
+            self.profile,
+            {},
+        )
+
+    @staticmethod
+    def _create_templates(
+        resource: str,
+        identifier: str,
+        target: pathlib.Path,
+        source: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": f"verify_{identifier}_absent",
+                "resource": resource,
+                "action": "assert_absent",
+                "target": str(target),
+            },
+            {
+                "id": f"install_{identifier}",
+                "resource": resource,
+                "action": "create_file",
+                "atomic": True,
+                "source": source,
+                "target": str(target),
+            },
+        ]
+
+    @staticmethod
+    def _remove_templates(
+        resource: str,
+        identifier: str,
+        target: pathlib.Path,
+        source: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": f"remove_{identifier}",
+                "resource": resource,
+                "action": "remove",
+                "source": source,
+                "target": str(target),
+            }
+        ]
+
+    def prepare_executor(self, kind: runtime_install.MutationKind) -> runtime_transaction.TransactionExecutor:
+        paths = runtime_install.lifecycle_paths(self.plan)
+        runtime_install.ensure_private_directory(
+            paths.transaction_root,
+            paths.allowed_roots,
+            "transaction_root",
+        )
+        if kind == "install":
+            runtime_install._provision_install_directories(self.plan, paths)
+        return runtime_install._executor(kind, self.plan, paths)
 
 
 @contextlib.contextmanager
@@ -1063,6 +1316,271 @@ os.close(descriptor)
         self.assertEqual(report.state, "committed")
         self.assertEqual(report.cleanup_failures, ("undo cleanup failed",))
 
+    def test_profile_plan_expands_every_target_and_validates_unchanged(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            plan = fixture.plan
+            self.assertEqual(plan["schemaVersion"], 2)
+            self.assertEqual(plan["profile"]["id"], "the-lab")
+            self.assertEqual(
+                [target["id"] for target in plan["profile"]["targets"]],
+                ["hub", "secret-shop", "robot-repair"],
+            )
+            install_effects = [
+                operation
+                for operation in plan["install"]
+                if operation["action"] in runtime_transaction.INSTALL_EFFECTS
+            ]
+            self.assertEqual(len(install_effects), 15)
+            self.assertEqual(
+                sum(operation["id"] == "retain_shared_install" for operation in plan["install"]),
+                1,
+            )
+            self.assertEqual(
+                len({operation["resource"] for operation in install_effects}),
+                len(install_effects),
+            )
+            for target in fixture.profile.targets:
+                suffix = target.id.replace("-", "_")
+                guard = next(
+                    operation
+                    for operation in plan["install"]
+                    if operation["id"] == f"verify_stock_openvr_{suffix}"
+                )
+                replacement = next(
+                    operation
+                    for operation in install_effects
+                    if operation["id"] == f"install_openvr_shim_{suffix}"
+                )
+                backup = next(
+                    operation
+                    for operation in plan["install"]
+                    if operation["id"] == f"backup_stock_openvr_{suffix}"
+                )
+                self.assertEqual(guard["expectedSha256"], target.stock_openvr_sha256)
+                self.assertEqual(
+                    replacement["target"],
+                    str(target.openvr_directory / "openvr_api.dll"),
+                )
+                self.assertIn(f"the-lab-{target.id}", backup["backup"])
+
+            executor = fixture.prepare_executor("install")
+            executor.validate()
+            self.assertEqual(executor.plan_identity, fixture.profile.plan_identity)
+
+    def test_profile_plan_admits_all_targets_before_first_mutation(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            missing_target = fixture.profile.targets[1]
+            (missing_target.openvr_directory / "openvr_api.dll").unlink()
+            executor = fixture.prepare_executor("install")
+
+            with self.assertRaises(runtime_transaction.TransactionError):
+                executor.execute()
+
+            self.assertFalse(lifecycle.journal.exists())
+            for target in fixture.profile.targets:
+                stock = target.openvr_directory / "openvr_api.dll"
+                if target.id != missing_target.id:
+                    self.assertEqual(stock.read_bytes(), fixture.stock_payloads[target.id])
+                self.assertFalse((target.openvr_directory / "openvr_api.real.dll").exists())
+                self.assertFalse((target.graphics_directory / "d3d11.dll").exists())
+                self.assertFalse((target.graphics_directory / "dxgi.dll").exists())
+                self.assertFalse(
+                    (target.graphics_directory / "alvr_iosurface_bridge.dll").exists()
+                )
+
+    def test_profile_plan_rolls_back_every_target_on_failure(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            executor = fixture.prepare_executor("install")
+
+            def fail_last_target(step_id: str, phase: str) -> None:
+                if (
+                    step_id == "install_game_wine_bridge_windows_robot_repair"
+                    and phase == "after-mutation"
+                ):
+                    raise RuntimeError("fixture failure")
+
+            executor.failure_injector = fail_last_target
+            with self.assertRaises(runtime_transaction.TransactionError) as raised:
+                executor.execute()
+            self.assertEqual(raised.exception.code, "transaction.rolled_back")
+            for target in fixture.profile.targets:
+                self.assertEqual(
+                    (target.openvr_directory / "openvr_api.dll").read_bytes(),
+                    fixture.stock_payloads[target.id],
+                )
+                self.assertFalse((target.openvr_directory / "openvr_api.real.dll").exists())
+                self.assertFalse((target.graphics_directory / "d3d11.dll").exists())
+                self.assertFalse((target.graphics_directory / "dxgi.dll").exists())
+                self.assertFalse(
+                    (target.graphics_directory / "alvr_iosurface_bridge.dll").exists()
+                )
+
+    def test_profile_plan_uninstalls_every_target_in_one_transaction(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            install_executor = fixture.prepare_executor("install")
+            installed = install_executor.execute()
+            self.assertEqual(installed.state, "committed")
+            paths = runtime_install.lifecycle_paths(fixture.plan)
+            runtime_install._archive_terminal_journal(paths, install_executor)
+
+            uninstalled = fixture.prepare_executor("uninstall").execute()
+            self.assertEqual(uninstalled.state, "committed")
+            journal = json.loads(lifecycle.journal.read_text())
+            self.assertEqual(journal["schemaVersion"], 3)
+            self.assertEqual(journal["kind"], "uninstall")
+            archived = runtime_install._archive_prior_committed_journal(paths, journal)
+            self.assertTrue(archived.is_file())
+            self.assertFalse(lifecycle.journal.exists())
+            for target in fixture.profile.targets:
+                self.assertEqual(
+                    (target.openvr_directory / "openvr_api.dll").read_bytes(),
+                    fixture.stock_payloads[target.id],
+                )
+                self.assertFalse((target.openvr_directory / "openvr_api.real.dll").exists())
+                self.assertFalse((target.graphics_directory / "d3d11.dll").exists())
+                self.assertFalse((target.graphics_directory / "dxgi.dll").exists())
+                self.assertFalse(
+                    (target.graphics_directory / "alvr_iosurface_bridge.dll").exists()
+                )
+
+    def test_profile_plan_recovers_every_target_after_interruption(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            executor = fixture.prepare_executor("install")
+
+            def crash_last_target(step_id: str, phase: str) -> None:
+                if (
+                    step_id == "install_game_wine_bridge_windows_robot_repair"
+                    and phase == "after-mutation"
+                ):
+                    raise SimulatedCrash("fixture crash")
+
+            executor.failure_injector = crash_last_target
+            with self.assertRaises(SimulatedCrash):
+                executor.execute()
+            interrupted = json.loads(lifecycle.journal.read_text())
+            self.assertEqual(interrupted["schemaVersion"], 3)
+            self.assertEqual(interrupted["planIdentity"], fixture.profile.plan_identity)
+
+            recovered = fixture.prepare_executor("install").recover()
+            self.assertEqual(recovered.state, "rolled-back")
+            for target in fixture.profile.targets:
+                self.assertEqual(
+                    (target.openvr_directory / "openvr_api.dll").read_bytes(),
+                    fixture.stock_payloads[target.id],
+                )
+                self.assertFalse((target.openvr_directory / "openvr_api.real.dll").exists())
+                self.assertFalse((target.graphics_directory / "d3d11.dll").exists())
+                self.assertFalse((target.graphics_directory / "dxgi.dll").exists())
+                self.assertFalse(
+                    (target.graphics_directory / "alvr_iosurface_bridge.dll").exists()
+                )
+
+    def test_profile_admission_checks_stock_hashes_only_for_install(self) -> None:
+        with lifecycle_fixture() as lifecycle:
+            fixture = ProfilePlanFixture(lifecycle)
+            loaded = runtime_profile.LoadedProfile(
+                path=REPO_ROOT / "runtime/profiles/the-lab.json",
+                data={"id": "the-lab"},
+                sha256=fixture.profile.sha256,
+            )
+            context = RuntimeContext(bindings_path=lifecycle.root / "bindings.json")
+            with (
+                mock.patch.object(
+                    artifact_contract,
+                    "resolve_bindings",
+                    return_value={},
+                ),
+                mock.patch.object(
+                    runtime_profile,
+                    "load_curated_profile",
+                    return_value=loaded,
+                ),
+                mock.patch.object(
+                    runtime_profile,
+                    "verify_steam_identity",
+                    return_value=(
+                        fixture.profile.install_root,
+                        lifecycle.root / "appmanifest.acf",
+                        "a" * 64,
+                    ),
+                ),
+                mock.patch.object(
+                    runtime_profile,
+                    "resolve_profile_targets",
+                    return_value=fixture.profile.targets,
+                ) as resolve_targets,
+            ):
+                runtime_install._admit_profile_plan(
+                    "install",
+                    context,
+                    {},
+                    lifecycle.artifact_root,
+                    fixture.plan,
+                )
+                runtime_install._admit_profile_plan(
+                    "uninstall",
+                    context,
+                    {},
+                    lifecycle.artifact_root,
+                    fixture.plan,
+                )
+
+            self.assertEqual(
+                [call.kwargs["require_stock_openvr"] for call in resolve_targets.call_args_list],
+                [True, False],
+            )
+
+    def test_profile_bound_installed_state_rejects_another_profile_plan(self) -> None:
+        with lifecycle_fixture() as fixture, patched_lifecycle(fixture) as (
+            context,
+            _,
+            _,
+        ):
+            def profile_plan(*args: Any) -> dict[str, Any]:
+                plan = fixture.plan()
+                profile_id = args[5] if len(args) > 5 else None
+                plan["schemaVersion"] = 2
+                plan["profile"] = {
+                    "id": profile_id or "the-lab",
+                    "sha256": ("a" if profile_id == "the-lab" else "b") * 64,
+                    "installRoot": str(fixture.targets_root),
+                    "targets": [],
+                }
+                return plan
+
+            with (
+                mock.patch.object(
+                    runtime_install,
+                    "_build_plan",
+                    side_effect=profile_plan,
+                ),
+                mock.patch.object(runtime_install, "_admit_profile_plan"),
+            ):
+                installed = runtime_install.install_runtime(
+                    context,
+                    fixture.artifact_root,
+                    "the-lab",
+                )
+                blocked = runtime_install.uninstall_runtime(
+                    context,
+                    fixture.artifact_root,
+                    "aircar",
+                )
+
+            self.assertTrue(installed.ok, installed.to_dict())
+            self.assertFalse(blocked.ok)
+            self.assertEqual(blocked.reason_code, "transaction.journal_mismatch")
+            journal = json.loads(fixture.journal.read_text())
+            self.assertEqual(journal["schemaVersion"], 3)
+            self.assertEqual(journal["kind"], "install")
+            self.assertEqual(journal["planIdentity"]["profileId"], "the-lab")
+            self.assertEqual(fixture.stock.read_bytes(), b"patched payload")
+
     @unittest.skipUnless(sys.platform == "darwin", "requires macOS bundle signing")
     def test_probe_artifact_staging_preserves_signed_bundle_identity(self) -> None:
         script = REPO_ROOT / "tools" / "run_real_native_iosurface_probe.sh"
@@ -1236,11 +1754,26 @@ remove_owned_native_bridge_bundle "$success_bundle"
         )
         stdout = io.StringIO()
         with (
-            mock.patch.object(runtime_cli, "install_runtime", return_value=report),
+            mock.patch.object(
+                runtime_cli,
+                "install_runtime",
+                return_value=report,
+            ) as install_mock,
             contextlib.redirect_stdout(stdout),
         ):
-            status = runtime_cli.main(["install", "--artifact", "/fixture", "--json"])
+            status = runtime_cli.main(
+                [
+                    "install",
+                    "--artifact",
+                    "/fixture",
+                    "--profile",
+                    "the-lab",
+                    "--json",
+                ]
+            )
         self.assertEqual(status, 1)
+        install_mock.assert_called_once()
+        self.assertEqual(install_mock.call_args.args[2], "the-lab")
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["reasonCode"], "artifact.sealing_required")
         self.assertEqual(payload["command"], "install")

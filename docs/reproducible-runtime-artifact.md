@@ -318,6 +318,16 @@ python3 tools/runtime_cli.py install \
 python3 tools/runtime_cli.py uninstall \
   --artifact .code/runtime-artifacts/<artifact> \
   --bindings .code/runtime-bindings.json
+
+python3 tools/runtime_cli.py install \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --profile <profile> \
+  --bindings .code/runtime-bindings.json
+
+python3 tools/runtime_cli.py uninstall \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --profile <profile> \
+  --bindings .code/runtime-bindings.json
 ```
 
 The coordinator accepts no caller-selected plan, journal, backup, target root,
@@ -328,6 +338,14 @@ stops exact-owned runtime state, rejects open targets, checks conservative
 per-filesystem capacity, and passes planner operations unchanged to the durable
 executor. Matching committed work is an idempotent success; interrupted work is
 rolled back and archived before the operator retries the requested direction.
+Without `--profile`, the explicit sealed singleton plan retains its existing
+digest and journal-v2 shape. With `--profile`, the coordinator deterministically
+expands only the game-specific OpenVR, graphics, and Wine bridge operations
+across every declared runtime target, keeps shared operations single, binds the
+curated profile ID and SHA-256 into the digest and journal-v3 identity, and then
+passes that complete materialized list unchanged to the same executor. Every
+target is admitted before the first mutation, and rollback or recovery covers
+the full set.
 
 The dev11 manifest uses preserved-bundle sealing to retain the already
 authorized bridge identity while independently updating the Windows runtime
