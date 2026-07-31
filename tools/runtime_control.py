@@ -1350,7 +1350,7 @@ def validate_recorded_producer(
     pid_version_reader: Callable[[int], tuple[int | None, str | None]],
 ) -> tuple[bool, str | None, str | None]:
     schema_version = record.get("schemaVersion")
-    if schema_version not in {3, 4, 5} or not isinstance(record.get("producer"), dict):
+    if schema_version not in {3, 4, 5, 6} or not isinstance(record.get("producer"), dict):
         return True, None, None
     producer = record["producer"]
     if schema_version == 3:
@@ -1403,6 +1403,118 @@ def validate_recorded_producer(
                 or command_error
                 or "Ready producer target identity does not match control state",
             )
+        return True, None, None
+
+    if schema_version == 6:
+        if producer["status"] == "launching":
+            return True, None, None
+        launcher = producer["launcher"]
+        owned_processes = producer["ownedProcesses"]
+        expected_by_id = _expected_owned_processes_v6(
+            producer["expectedOwnedProcesses"]
+        )
+        if (
+            not isinstance(launcher, dict)
+            or not isinstance(owned_processes, list)
+            or expected_by_id is None
+        ):
+            return False, "producer.identity_changed", "Multi-target producer state is incomplete"
+        group_ids = {launcher["processGroupId"]}
+        group_ids.update(
+            identity["processGroupId"]
+            for identity in owned_processes
+            if isinstance(identity, dict)
+        )
+        multi_group_members: dict[int, list[int]] = {}
+        for group in group_ids:
+            members, member_error = process_group_members(group, runner)
+            if members is None:
+                return False, "producer.identity_unavailable", member_error
+            multi_group_members[group] = members
+        if producer["status"] == "quiesced":
+            if any(multi_group_members.values()):
+                return (
+                    False,
+                    "producer.quiesce_failed",
+                    "A recorded multi-target producer process group remains live after quiescence",
+                )
+            return True, None, None
+        launcher_birth_token, launcher_birth_error = birth_token_reader(launcher["pid"])
+        launcher_started_at, launcher_error = process_start_time(launcher["pid"], runner)
+        launcher_group, group_error = process_group_id(launcher["pid"], runner)
+        if (
+            launcher_birth_token != launcher["birthToken"]
+            or launcher_started_at != launcher["startedAt"]
+            or launcher_group != launcher["processGroupId"]
+            or launcher["pid"] not in multi_group_members[launcher["processGroupId"]]
+        ):
+            return (
+                False,
+                "producer.identity_changed",
+                launcher_birth_error
+                or launcher_error
+                or group_error
+                or "Multi-target producer launcher identity does not match control state",
+            )
+        if producer["status"] == "starting":
+            return True, None, None
+        if not owned_processes:
+            return False, "producer.identity_changed", "Ready multi-target identities are missing"
+        for identity in owned_processes:
+            target_id = identity["targetId"]
+            expected = expected_by_id.get(target_id)
+            if expected is None:
+                return (
+                    False,
+                    "producer.identity_changed",
+                    f"Ready target {target_id!r} is not declared",
+                )
+            target_pid = identity["pid"]
+            target_birth_token, target_birth_error = birth_token_reader(target_pid)
+            target_pid_version, target_pid_version_error = pid_version_reader(target_pid)
+            target_started_at, target_error = process_start_time(target_pid, runner)
+            target_group, target_group_error = process_group_id(target_pid, runner)
+            target_command, command_error = process_command(target_pid, runner)
+            expected_executable = pathlib.Path(expected["executable"])
+            lsof_result = runner.run(
+                ["/usr/sbin/lsof", "-a", "-p", str(target_pid), "-d", "txt", "-Fn"],
+                timeout=5.0,
+            )
+            if lsof_result.error is not None or lsof_result.returncode != 0:
+                return (
+                    False,
+                    "producer.identity_unavailable",
+                    f"Exact executable mapping is unavailable for target {target_id}",
+                )
+            executable_matches = any(
+                line.startswith("n")
+                and len(line) > 1
+                and paths_match(pathlib.Path(line[1:]), expected_executable)
+                for line in lsof_result.stdout.splitlines()
+            )
+            if (
+                target_birth_token != identity["birthToken"]
+                or target_pid_version != identity["pidVersion"]
+                or target_started_at != identity["startedAt"]
+                or target_group != identity["processGroupId"]
+                or target_pid not in multi_group_members[identity["processGroupId"]]
+                or target_command != identity["command"]
+                or not paths_match(
+                    pathlib.Path(identity["executable"]),
+                    expected_executable,
+                )
+                or not executable_matches
+            ):
+                return (
+                    False,
+                    "producer.identity_changed",
+                    target_birth_error
+                    or target_pid_version_error
+                    or target_error
+                    or target_group_error
+                    or command_error
+                    or f"Ready target {target_id!r} does not match control state",
+                )
         return True, None, None
 
     launcher = producer["launcher"]
@@ -1501,7 +1613,7 @@ def recorded_producer_group_present(
     pid_version_reader: Callable[[int], tuple[int | None, str | None]],
 ) -> tuple[bool | None, str | None]:
     schema_version = record.get("schemaVersion")
-    if schema_version not in {3, 4, 5} or not isinstance(record.get("producer"), dict):
+    if schema_version not in {3, 4, 5, 6} or not isinstance(record.get("producer"), dict):
         return False, None
     producer = record["producer"]
     if schema_version == 3:
@@ -1516,6 +1628,154 @@ def recorded_producer_group_present(
                 None,
                 "Schema-v3 Freedom state cannot prove detached Shipping absence; use the originating runtime or manual exact-process cleanup",
             )
+        return False, None
+    if schema_version == 6:
+        launcher = producer["launcher"]
+        owned_processes = producer["ownedProcesses"]
+        expected_by_id = _expected_owned_processes_v6(
+            producer["expectedOwnedProcesses"]
+        )
+        if not isinstance(owned_processes, list) or expected_by_id is None:
+            return None, "Schema-v6 producer ownership state is incomplete"
+        identities = [
+            (identity, require_pid_version)
+            for identity, require_pid_version in [
+                (launcher, False),
+                *((identity, True) for identity in owned_processes),
+            ]
+            if isinstance(identity, dict)
+        ]
+        groups = {identity["processGroupId"] for identity, _ in identities}
+        for group in groups:
+            members, members_error = process_group_members(group, runner)
+            if members is None:
+                return None, members_error
+            if not members:
+                continue
+            anchors = [
+                (identity, require_pid_version)
+                for identity, require_pid_version in identities
+                if identity["pid"] in members
+            ]
+            if not anchors:
+                return True, None
+            exact_anchor = False
+            for identity, require_pid_version in anchors:
+                birth_token, birth_error = birth_token_reader(identity["pid"])
+                started_at, start_error = process_start_time(identity["pid"], runner)
+                expected_pid_version = identity["pidVersion"] if require_pid_version else None
+                observed_pid_version: int | None = None
+                observed_pid_version_error: str | None = None
+                if expected_pid_version is not None:
+                    observed_pid_version, observed_pid_version_error = pid_version_reader(
+                        identity["pid"]
+                    )
+                if (
+                    birth_token is None
+                    or started_at is None
+                    or (
+                        expected_pid_version is not None
+                        and observed_pid_version is None
+                    )
+                ):
+                    refreshed_members, refresh_error = process_group_members(group, runner)
+                    if refreshed_members is None:
+                        return None, refresh_error
+                    if not refreshed_members:
+                        break
+                    if identity["pid"] not in refreshed_members:
+                        return True, None
+                    return (
+                        None,
+                        birth_error
+                        or observed_pid_version_error
+                        or start_error
+                        or "Recorded multi-target group identity could not be inspected",
+                    )
+                if (
+                    birth_token == identity["birthToken"]
+                    and started_at == identity["startedAt"]
+                    and (
+                        expected_pid_version is None
+                        or observed_pid_version == expected_pid_version
+                    )
+                ):
+                    exact_anchor = True
+                    break
+            if exact_anchor:
+                return True, None
+
+        compiled_expected: list[tuple[pathlib.Path, re.Pattern[str]]] = []
+        for expected in expected_by_id.values():
+            try:
+                pattern = re.compile(expected["processPattern"])
+            except re.error as pattern_error:
+                return None, f"Recorded owned-process pattern is invalid: {pattern_error}"
+            compiled_expected.append((pathlib.Path(expected["executable"]), pattern))
+        process_result = runner.run(
+            [
+                "/usr/bin/env",
+                "LC_ALL=C",
+                "/bin/ps",
+                "-ww",
+                "-axo",
+                "pid=,pgid=,command=",
+            ],
+            timeout=5.0,
+        )
+        if process_result.error is not None or process_result.returncode != 0:
+            return None, "Exact multi-target process candidates could not be inspected"
+        for line in process_result.stdout.splitlines():
+            fields = line.strip().split(maxsplit=2)
+            if len(fields) != 3:
+                continue
+            try:
+                pid = int(fields[0])
+            except ValueError:
+                continue
+            command = fields[2]
+            matching_expected = [
+                executable
+                for executable, pattern in compiled_expected
+                if pattern.search(command)
+                and executable.name.casefold() in command.casefold()
+            ]
+            if not matching_expected:
+                continue
+            lsof_result = runner.run(
+                ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"],
+                timeout=5.0,
+            )
+            if lsof_result.error is not None or lsof_result.returncode != 0:
+                return None, f"Exact multi-target executable could not be inspected for pid={pid}"
+            if any(
+                line.startswith("n")
+                and len(line) > 1
+                and any(
+                    paths_match(pathlib.Path(line[1:]), executable)
+                    for executable in matching_expected
+                )
+                for line in lsof_result.stdout.splitlines()
+            ):
+                return True, None
+        if producer["status"] != "quiesced" and not owned_processes:
+            return None, "Schema-v6 state has not completed owned-process discovery"
+        for identity, require_pid_version in identities:
+            birth_token, _ = birth_token_reader(identity["pid"])
+            started_at, _ = process_start_time(identity["pid"], runner)
+            expected_pid_version = identity["pidVersion"] if require_pid_version else None
+            observed_final_pid_version = None
+            if expected_pid_version is not None:
+                observed_final_pid_version, _ = pid_version_reader(identity["pid"])
+            if (
+                birth_token == identity["birthToken"]
+                and started_at == identity["startedAt"]
+                and (
+                    expected_pid_version is None
+                    or observed_final_pid_version == expected_pid_version
+                )
+            ):
+                return True, None
         return False, None
     identities = [
         (identity, require_pid_version)
@@ -1777,6 +2037,236 @@ def inspect_service(paths: RuntimePaths, runner: CommandRunner) -> ServiceInspec
     )
 
 
+def _valid_profile_state_record(profile: Any) -> bool:
+    return (
+        isinstance(profile, dict)
+        and set(profile) == {"id", "sha256", "appId", "buildId", "entrypointTarget"}
+        and isinstance(profile["id"], str)
+        and PROFILE_ID_PATTERN.fullmatch(profile["id"]) is not None
+        and isinstance(profile["sha256"], str)
+        and SHA256_PATTERN.fullmatch(profile["sha256"]) is not None
+        and isinstance(profile["appId"], str)
+        and profile["appId"].isdigit()
+        and isinstance(profile["buildId"], str)
+        and profile["buildId"].isdigit()
+        and isinstance(profile["entrypointTarget"], str)
+        and PROFILE_ID_PATTERN.fullmatch(profile["entrypointTarget"]) is not None
+    )
+
+
+def _valid_launcher_state_record(launcher: Any) -> bool:
+    launcher_keys = frozenset(launcher) if isinstance(launcher, dict) else frozenset()
+    if launcher_keys not in {
+        frozenset({"pid", "birthToken", "startedAt", "processGroupId"}),
+        frozenset({"pid", "birthToken", "pidVersion", "startedAt", "processGroupId"}),
+    }:
+        return False
+    assert isinstance(launcher, dict)
+    return (
+        isinstance(launcher["pid"], int)
+        and not isinstance(launcher["pid"], bool)
+        and launcher["pid"] > 0
+        and isinstance(launcher["birthToken"], int)
+        and not isinstance(launcher["birthToken"], bool)
+        and launcher["birthToken"] > 0
+        and (
+            "pidVersion" not in launcher
+            or (
+                isinstance(launcher["pidVersion"], int)
+                and not isinstance(launcher["pidVersion"], bool)
+                and launcher["pidVersion"] > 0
+            )
+        )
+        and isinstance(launcher["startedAt"], str)
+        and bool(launcher["startedAt"])
+        and isinstance(launcher["processGroupId"], int)
+        and not isinstance(launcher["processGroupId"], bool)
+        and launcher["processGroupId"] == launcher["pid"]
+    )
+
+
+def _producer_log_is_under_run_dir(value: Any, run_dir: pathlib.Path | None) -> bool:
+    producer_log = pathlib.Path(value) if isinstance(value, str) else None
+    if run_dir is None or producer_log is None:
+        return False
+    try:
+        return (
+            producer_log.is_absolute()
+            and producer_log != run_dir
+            and os.path.commonpath([str(run_dir), str(producer_log)]) == str(run_dir)
+        )
+    except ValueError:
+        return False
+
+
+def _expected_owned_processes_v6(value: Any) -> dict[str, dict[str, Any]] | None:
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    expected_by_id: dict[str, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "targetId",
+            "executable",
+            "processPattern",
+        }:
+            return None
+        target_id = item["targetId"]
+        executable = pathlib.Path(item["executable"]) if isinstance(item["executable"], str) else None
+        process_pattern = item["processPattern"]
+        if (
+            not isinstance(target_id, str)
+            or PROFILE_ID_PATTERN.fullmatch(target_id) is None
+            or target_id in expected_by_id
+            or executable is None
+            or not executable.is_absolute()
+            or not isinstance(process_pattern, str)
+            or not process_pattern
+        ):
+            return None
+        try:
+            re.compile(process_pattern)
+        except re.error:
+            return None
+        expected_by_id[target_id] = item
+    return expected_by_id
+
+
+def _owned_processes_v6_valid(
+    value: Any,
+    expected_by_id: dict[str, dict[str, Any]],
+    launcher: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(value, list):
+        return False
+    target_ids: set[str] = set()
+    pids: set[int] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "targetId",
+            "pid",
+            "birthToken",
+            "pidVersion",
+            "startedAt",
+            "processGroupId",
+            "command",
+            "executable",
+        }:
+            return False
+        target_id = item["targetId"]
+        expected = expected_by_id.get(target_id) if isinstance(target_id, str) else None
+        executable = pathlib.Path(item["executable"]) if isinstance(item["executable"], str) else None
+        pid = item["pid"]
+        process_group_id = item["processGroupId"]
+        if (
+            expected is None
+            or target_id in target_ids
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+            or pid in pids
+            or not isinstance(item["birthToken"], int)
+            or isinstance(item["birthToken"], bool)
+            or item["birthToken"] <= 0
+            or not isinstance(item["pidVersion"], int)
+            or isinstance(item["pidVersion"], bool)
+            or item["pidVersion"] <= 0
+            or not isinstance(item["startedAt"], str)
+            or not item["startedAt"]
+            or not isinstance(process_group_id, int)
+            or isinstance(process_group_id, bool)
+            or process_group_id <= 0
+            or not isinstance(item["command"], str)
+            or not item["command"]
+            or executable is None
+            or not executable.is_absolute()
+            or not paths_match(executable, pathlib.Path(expected["executable"]))
+        ):
+            return False
+        allowed_groups = {pid}
+        if launcher is not None:
+            allowed_groups.add(launcher["processGroupId"])
+        if process_group_id not in allowed_groups:
+            return False
+        target_ids.add(target_id)
+        pids.add(pid)
+    return True
+
+
+def _valid_client_state_record(
+    client: Any,
+    producer_status: Any,
+    record: dict[str, Any],
+) -> bool:
+    if client is None:
+        return producer_status != "ready"
+    if not isinstance(client, dict) or set(client) != {
+        "status",
+        "telemetryVersion",
+        "runtimeGeneration",
+        "bridgePid",
+        "bridgeSessionId",
+        "streamEpoch",
+        "streamContractValid",
+        "framesTransported",
+        "connectEvents",
+        "disconnectEvents",
+        "contractFailureEvents",
+    }:
+        return False
+    client_status = client["status"]
+    stream_contract_valid = client["streamContractValid"]
+    return (
+        producer_status == "ready"
+        and client_status == record["state"]
+        and client_status in LEGACY_LIVE_STATES
+        and isinstance(client["telemetryVersion"], int)
+        and not isinstance(client["telemetryVersion"], bool)
+        and client["telemetryVersion"] == 7
+        and isinstance(client["runtimeGeneration"], int)
+        and not isinstance(client["runtimeGeneration"], bool)
+        and client["runtimeGeneration"] == record["generation"]
+        and isinstance(client["bridgePid"], int)
+        and not isinstance(client["bridgePid"], bool)
+        and client["bridgePid"] == record["servicePid"]
+        and isinstance(client["bridgeSessionId"], int)
+        and not isinstance(client["bridgeSessionId"], bool)
+        and client["bridgeSessionId"] > 0
+        and isinstance(client["streamEpoch"], int)
+        and not isinstance(client["streamEpoch"], bool)
+        and client["streamEpoch"] >= 0
+        and isinstance(stream_contract_valid, bool)
+        and isinstance(client["framesTransported"], int)
+        and not isinstance(client["framesTransported"], bool)
+        and client["framesTransported"] >= 0
+        and isinstance(client["connectEvents"], int)
+        and not isinstance(client["connectEvents"], bool)
+        and client["connectEvents"] >= 0
+        and isinstance(client["disconnectEvents"], int)
+        and not isinstance(client["disconnectEvents"], bool)
+        and client["disconnectEvents"] >= 0
+        and isinstance(client["contractFailureEvents"], int)
+        and not isinstance(client["contractFailureEvents"], bool)
+        and client["contractFailureEvents"] == 0
+        and client["streamEpoch"] == client["connectEvents"] + client["disconnectEvents"]
+        and (
+            (
+                client_status in {"waiting", "recovering"}
+                and not stream_contract_valid
+                and client["streamEpoch"] % 2 == 0
+                and client["connectEvents"] == client["disconnectEvents"]
+            )
+            or (
+                client_status in {"connected", "streaming"}
+                and stream_contract_valid
+                and client["streamEpoch"] > 0
+                and client["streamEpoch"] % 2 == 1
+                and client["connectEvents"] == client["disconnectEvents"] + 1
+                and (client_status != "streaming" or client["framesTransported"] > 0)
+            )
+        )
+    )
+
+
 def load_control_state(path: pathlib.Path) -> ControlStateInspection:
     try:
         metadata = path.lstat()
@@ -1825,7 +2315,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
         required = common_required
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LEGACY_LIVE_STATES
-    elif schema_version in {2, 3, 4, 5}:
+    elif schema_version in {2, 3, 4, 5, 6}:
         required = common_required | {
             "runDir",
             "controlSocket",
@@ -1833,9 +2323,9 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             "bridgeExecutableSha256",
             "serviceRuns",
         }
-        if schema_version in {3, 4, 5}:
+        if schema_version in {3, 4, 5, 6}:
             required |= {"profile", "producer"}
-        if schema_version == 5:
+        if schema_version in {5, 6}:
             required.add("client")
         allowed = required | {"updatedAt", "diagnostic"}
         valid_state = record.get("state") in LIVE_STATES
@@ -1880,7 +2370,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
             for value in record["bridgeIdentity"]["cdHashes"]
         )
     )
-    if schema_version in {2, 3, 4, 5}:
+    if schema_version in {2, 3, 4, 5, 6}:
         run_dir = pathlib.Path(record["runDir"]) if isinstance(record["runDir"], str) else None
         control_socket = (
             pathlib.Path(record["controlSocket"])
@@ -2158,81 +2648,80 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
                 )
             )
         valid = valid and profile_valid and producer_valid
-        if schema_version == 5:
-            client = record.get("client")
-            producer_status = producer.get("status") if isinstance(producer, dict) else None
-            client_valid = client is None and producer_status != "ready"
-            if isinstance(client, dict) and set(client) == {
-                "status",
-                "telemetryVersion",
-                "runtimeGeneration",
-                "bridgePid",
-                "bridgeSessionId",
-                "streamEpoch",
-                "streamContractValid",
-                "framesTransported",
-                "connectEvents",
-                "disconnectEvents",
-                "contractFailureEvents",
-            }:
-                client_status = client["status"]
-                stream_contract_valid = client["streamContractValid"]
-                client_valid = (
-                    producer_status == "ready"
-                    and client_status == record["state"]
-                    and client_status in LEGACY_LIVE_STATES
-                    and isinstance(client["telemetryVersion"], int)
-                    and not isinstance(client["telemetryVersion"], bool)
-                    and client["telemetryVersion"] == 7
-                    and isinstance(client["runtimeGeneration"], int)
-                    and not isinstance(client["runtimeGeneration"], bool)
-                    and client["runtimeGeneration"] == record["generation"]
-                    and isinstance(client["bridgePid"], int)
-                    and not isinstance(client["bridgePid"], bool)
-                    and client["bridgePid"] == record["servicePid"]
-                    and isinstance(client["bridgeSessionId"], int)
-                    and not isinstance(client["bridgeSessionId"], bool)
-                    and client["bridgeSessionId"] > 0
-                    and isinstance(client["streamEpoch"], int)
-                    and not isinstance(client["streamEpoch"], bool)
-                    and client["streamEpoch"] >= 0
-                    and isinstance(stream_contract_valid, bool)
-                    and isinstance(client["framesTransported"], int)
-                    and not isinstance(client["framesTransported"], bool)
-                    and client["framesTransported"] >= 0
-                    and isinstance(client["connectEvents"], int)
-                    and not isinstance(client["connectEvents"], bool)
-                    and client["connectEvents"] >= 0
-                    and isinstance(client["disconnectEvents"], int)
-                    and not isinstance(client["disconnectEvents"], bool)
-                    and client["disconnectEvents"] >= 0
-                    and isinstance(client["contractFailureEvents"], int)
-                    and not isinstance(client["contractFailureEvents"], bool)
-                    and client["contractFailureEvents"] == 0
-                    and client["streamEpoch"]
-                    == client["connectEvents"] + client["disconnectEvents"]
-                    and (
-                        (
-                            client_status in {"waiting", "recovering"}
-                            and not stream_contract_valid
-                            and client["streamEpoch"] % 2 == 0
-                            and client["connectEvents"] == client["disconnectEvents"]
-                        )
-                        or (
-                            client_status in {"connected", "streaming"}
-                            and stream_contract_valid
-                            and client["streamEpoch"] > 0
-                            and client["streamEpoch"] % 2 == 1
-                            and client["connectEvents"]
-                            == client["disconnectEvents"] + 1
-                            and (
-                                client_status != "streaming"
-                                or client["framesTransported"] > 0
-                            )
-                        )
+    if schema_version == 6:
+        profile = record.get("profile")
+        producer = record.get("producer")
+        profile_valid = _valid_profile_state_record(profile)
+        producer_valid = False
+        if isinstance(producer, dict) and set(producer) == {
+            "status",
+            "launcher",
+            "expectedOwnedProcesses",
+            "ownedProcesses",
+            "log",
+        }:
+            launcher = producer["launcher"]
+            launcher_valid = _valid_launcher_state_record(launcher)
+            expected_by_id = _expected_owned_processes_v6(
+                producer["expectedOwnedProcesses"]
+            )
+            owned_processes = producer["ownedProcesses"]
+            owned_processes_valid = (
+                expected_by_id is not None
+                and _owned_processes_v6_valid(
+                    owned_processes,
+                    expected_by_id,
+                    launcher if launcher_valid else None,
+                )
+            )
+            entrypoint_owned = (
+                profile_valid
+                and isinstance(profile, dict)
+                and expected_by_id is not None
+                and profile["entrypointTarget"] in expected_by_id
+            )
+            producer_valid = (
+                producer["status"] in {"launching", "starting", "ready", "quiesced"}
+                and expected_by_id is not None
+                and owned_processes_valid
+                and entrypoint_owned
+                and _producer_log_is_under_run_dir(producer["log"], run_dir)
+                and (
+                    (
+                        producer["status"] == "launching"
+                        and record["state"] == "idle"
+                        and launcher is None
+                        and owned_processes == []
+                    )
+                    or (
+                        producer["status"] == "starting"
+                        and record["state"] == "idle"
+                        and launcher_valid
+                        and owned_processes == []
+                    )
+                    or (
+                        producer["status"] == "ready"
+                        and record["state"] in LEGACY_LIVE_STATES
+                        and launcher_valid
+                        and isinstance(owned_processes, list)
+                        and bool(owned_processes)
+                    )
+                    or (
+                        producer["status"] == "quiesced"
+                        and record["state"] == "idle"
+                        and launcher_valid
                     )
                 )
-            valid = valid and client_valid
+            )
+        valid = valid and profile_valid and producer_valid
+    if schema_version in {5, 6}:
+        producer = record.get("producer")
+        producer_status = producer.get("status") if isinstance(producer, dict) else None
+        valid = valid and _valid_client_state_record(
+            record.get("client"),
+            producer_status,
+            record,
+        )
     if not valid:
         return ControlStateInspection(
             True,
@@ -2244,7 +2733,7 @@ def load_control_state(path: pathlib.Path) -> ControlStateInspection:
 
 
 def validate_control_socket(record: dict[str, Any]) -> tuple[pathlib.Path | None, str | None]:
-    if record.get("schemaVersion") not in {2, 3, 4, 5}:
+    if record.get("schemaVersion") not in {2, 3, 4, 5, 6}:
         return None, "Live control state does not expose a supervisor control socket"
     socket_value = record.get("controlSocket")
     run_dir_value = record.get("runDir")
@@ -2539,7 +3028,7 @@ def status_runtime(
                 lock,
                 control_state,
             )
-        if record["schemaVersion"] in {2, 3, 4, 5}:
+        if record["schemaVersion"] in {2, 3, 4, 5, 6}:
             run_dir = pathlib.Path(record["runDir"])
             if (
                 run_dir.parent != paths.state_root
@@ -2858,7 +3347,7 @@ def validate_recorded_content(
     if not control_state.valid or control_state.record is None:
         return True, None
     record = control_state.record
-    if record.get("schemaVersion") not in {2, 3, 4, 5}:
+    if record.get("schemaVersion") not in {2, 3, 4, 5, 6}:
         return True, None
     try:
         if path_lexists(paths.launch_agent_plist):
@@ -2966,7 +3455,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
         lock.alive
         and lock.pid is not None
         and initial_record is not None
-        and initial_record.get("schemaVersion") in {2, 3, 4, 5}
+        and initial_record.get("schemaVersion") in {2, 3, 4, 5, 6}
         and initial_record.get("ownerPid") == lock.pid
     ):
         actual_started_at, _ = process_start_time(lock.pid, context.runner)
@@ -2978,7 +3467,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     if (
         not lock.alive
         and initial_record is not None
-        and initial_record.get("schemaVersion") in {3, 4, 5}
+        and initial_record.get("schemaVersion") in {3, 4, 5, 6}
         and isinstance(initial_record.get("producer"), dict)
     ):
         producer_present, producer_error = recorded_producer_group_present(
@@ -3045,7 +3534,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
                 not live_status.ok
                 or live_status.state not in LIVE_STATES
                 or record is None
-                or record.get("schemaVersion") not in {2, 3, 4, 5}
+                or record.get("schemaVersion") not in {2, 3, 4, 5, 6}
             ):
                 return stop_failure(
                     "owner.unresponsive",
@@ -3221,7 +3710,7 @@ def stop_runtime(context: RuntimeContext) -> StopReport:
     stale_run_dir: pathlib.Path | None = None
     if control_state.valid and control_state.record is not None:
         record = control_state.record
-        if record.get("schemaVersion") in {2, 3, 4, 5} and isinstance(record.get("controlSocket"), str):
+        if record.get("schemaVersion") in {2, 3, 4, 5, 6} and isinstance(record.get("controlSocket"), str):
             run_dir = pathlib.Path(record["runDir"])
             if run_dir.parent != paths.state_root:
                 return stop_failure(
