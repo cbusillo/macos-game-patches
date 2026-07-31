@@ -172,6 +172,58 @@ pass with artifact contract checks and self-tests. No disconnected launch,
 in-headset transition, or physical experience claim is made by slice 5; those
 remain slice 6.
 
+### Slice 6 Live Qualification
+
+The first dev12 live pass began from exact stock OpenVR hashes for all three
+targets. The research disconnected probe submitted and released all 5,400
+frames and restored every stock file, but host load contaminated cadence: one
+producer startup drop was recorded, effective cadence was 67.333 FPS, and the
+89.5 FPS strict floor did not pass. That run is negative evidence, not a
+disconnected qualification.
+
+Five hardware-free transition fixtures passed for zero-target replacement,
+sequential replacement, bounded overlap, outgoing-group absence, and late
+authenticated target quiescence. The profile-bound production install then
+committed all 51 operations at the expected digest, and production start
+published schema v6 in `waiting` with the exact hub identity.
+
+The first cooperative stop exposed a deadline-accounting defect. Termination
+and the 600-second replacement guard consumed the complete quiescence deadline,
+so the final process-table absence proof returned
+`producer.identity_unavailable`. A dead-owner retry removed the exact transient
+state, the 27-operation uninstall committed at the expected digest, all staged
+overlay files were absent, and all three final stock OpenVR hashes matched.
+
+The dev13 correction reserves the existing ten-second quiescence margin for the
+final fresh absence proof. Default VR cleanup also stops treating CrossOver's
+persistent Bonjour helper as VR residue; broad Wine/CrossOver cleanup remains an
+explicit opt-in. The first sealed dev13 rerun completed producer quiescence in
+44 seconds but exposed a second stop race: launchd bootout won against the
+supervisor's concurrent code-sign identity read, so the supervisor preserved
+dead-owner state even though the exact job was already absent. Dev13 now
+rechecks launchd after that transient identity-read failure and tolerates it
+only when the fresh snapshot proves absence.
+
+Source commit `466453a98fe83d0c42678e19851e766cd65b603a` produced two
+independent final dev13 builds at unsealed seal
+`c201b16526ceab6c4fcaeb583145d0797c480c0598f99b6a68b544db7e49d5b5`.
+Preserved-bundle sealing produced verified seal
+`526815ef3dd8551429c81398108b6849610744715c01a1161ebb7bc077e70896`
+with all 18 doctor checks passing. The final profile-bound install committed as
+transaction `2db9ffc4094b406d876f3d05b412442b`, schema-v6 start published the
+exact hub identity, and cooperative stop completed the full replacement guard
+in 601 seconds without a retry. Uninstall committed as transaction
+`f671ab31a2a841f9baee7c084ea13969`; final status was `runtime.ready`, the
+launchd job and all transient owned state were absent, every created overlay was
+absent, default cleanup matched no process, and all three stock OpenVR hashes
+matched.
+
+All 15 profile, 74 start, 67 control, 30 install, 31 transaction, and 2 cleanup
+fixtures pass with artifact checks and self-tests. The production hub lifecycle
+and simulated transition contract are qualified. The load-contaminated
+disconnected cadence run is not, and physical Secret Shop and Robot Repair
+transitions remain owner/headset gates.
+
 ## Hardware-Free Fixture Matrix
 
 - existing singleton profile/state/start/stop/install fixtures remain green;
@@ -207,6 +259,7 @@ uv run python tools/runtime_profile_test.py
 uv run python tools/runtime_control_test.py
 uv run python tools/runtime_start_test.py
 uv run python tools/runtime_install_test.py
+uv run python tools/vr_stack_cleanup_test.py
 ```
 
 Before any live or simulated probe:

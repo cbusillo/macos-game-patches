@@ -102,6 +102,8 @@ class SupervisorRunner:
         self.transition_on_quiesce = False
         self.foreign_on_quiesce = False
         self.mutate_bridge_on_quiesce = False
+        self.service_identity_error_once = False
+        self.unload_after_service_identity_error = False
         self.transition_observed = threading.Event()
         self.service_path = self.paths.launch_agent_plist
         self.service_program = self.paths.bridge_program
@@ -175,6 +177,11 @@ class SupervisorRunner:
                 )
             return CommandResult(command, 0, stdout=f"p4321\nn{self.paths.bridge_program}\n")
         if command and command[0] == "/usr/bin/codesign":
+            if self.service_identity_error_once:
+                self.service_identity_error_once = False
+                if self.unload_after_service_identity_error:
+                    self.loaded = False
+                return CommandResult(command, None, error="timeout")
             return CommandResult(
                 command,
                 0,
@@ -2125,6 +2132,42 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
         self.assertFalse(run_dir.exists())
 
+    def test_cooperative_stop_tolerates_identity_read_race_after_bootout(self) -> None:
+        run_dir = self.fixture.state_root / "r-0000000000000033"
+        run_dir.mkdir(mode=0o700)
+        result: list[StartReport] = []
+        producer_launcher = FixtureProducerLauncher(self.fixture)
+
+        def supervise() -> None:
+            result.append(self.supervise_fixture(51, run_dir, producer_launcher))
+
+        with mock.patch(
+            "runtime_start.resolve_context_paths_for_start",
+            return_value=(
+                {"allowedTargetRoots": [str(self.fixture.root)]},
+                {},
+                self.fixture.paths,
+            ),
+        ), mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ):
+            thread = threading.Thread(target=supervise)
+            thread.start()
+            record = self.wait_for_waiting_startup(run_dir)
+            self.fixture.runner.service_identity_error_once = True
+            self.fixture.runner.unload_after_service_identity_error = True
+            accepted, error = request_supervisor_stop(record)
+            self.assertTrue(accepted, error)
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].state, "stopped")
+        self.assertFalse(self.fixture.paths.state_path.exists())
+        self.assertFalse(self.fixture.paths.lock_path.exists())
+        self.assertFalse(self.fixture.paths.launch_agent_plist.exists())
+        self.assertFalse(run_dir.exists())
+
     def test_cooperative_stop_rejects_foreign_launchd_replacement(self) -> None:
         run_dir = self.fixture.state_root / "r-0000000000000031"
         run_dir.mkdir(mode=0o700)
@@ -3276,6 +3319,66 @@ class RuntimeStartTests(unittest.TestCase):
             runner.process_for_target("secret-shop")["processGroupId"]
         )
         self.assertIn((secret_group, runtime_start.signal.SIGTERM), runner.signals)
+
+    def test_multi_target_quiescence_reserves_final_inspection_margin_after_slow_stop(
+        self,
+    ) -> None:
+        fixture = self.use_multi_target_fixture()
+        fixture.profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"] = 60
+        runner = fixture.multi_runner
+        run_dir = fixture.state_root / "multi-quiesce-slow-stop"
+        run_dir.mkdir(mode=0o700)
+        launcher = MultiTargetProducerLauncher(fixture)
+        launched_process = launcher.launch(
+            ["cxstart"],
+            fixture.profile.installed.entrypoint.working_directory,
+            {},
+            run_dir / "producer.log",
+        )
+        retained = runtime_start._inspect_owned_producer_identities(
+            fixture.profile,
+            runner.launcher_started_at,
+            runner.producer_group,
+            runner,
+            runner.birth_token,
+            runner.pid_version,
+        )
+        clock = [0.0]
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def sleeper(duration: float) -> None:
+            clock[0] += duration
+
+        def signal_group(process_group: int, signal_number: int) -> None:
+            clock[0] = 10.0
+            launcher.group_signaler(process_group, signal_number)
+
+        final_retained = runtime_start._quiesce_owned_producers(
+            launched_process,
+            runner.producer_birth_token,
+            runner.launcher_started_at,
+            runner.producer_group,
+            retained,
+            fixture.profile,
+            run_dir / BRIDGE_LOG_NAME,
+            fixture.paths.service_label,
+            launcher.generation,
+            4321,
+            replace(fixture.context, sleeper=sleeper),
+            monotonic,
+            launcher.group_id,
+            signal_group,
+            launcher.group_live,
+        )
+
+        self.assertEqual(
+            {identity.target_id for identity in final_retained},
+            {"hub"},
+        )
+        self.assertGreaterEqual(clock[0], 60.0)
+        self.assertLess(clock[0], 70.0)
 
     def test_multi_target_quiescence_never_signals_late_unauthenticated_target(
         self,

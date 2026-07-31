@@ -3195,7 +3195,7 @@ def _quiesce_owned_producers(
                     absence_deadline = now + transition_timeout
                 absence_deadline = min(
                     max(absence_deadline, now + MONITOR_INTERVAL_SECONDS),
-                    quiesce_deadline,
+                    quiesce_deadline - PRODUCER_QUIESCE_MARGIN_SECONDS,
                 )
                 absence_observed = True
             assert absence_deadline is not None
@@ -4903,6 +4903,16 @@ def supervise_runtime(
                         )
                         if not transitioning_service.snapshot.present:
                             continue
+                        if transitioning_service.error_code is not None:
+                            transitioned_snapshot = read_launchd_snapshot(
+                                active_admission.paths,
+                                context.runner,
+                            )
+                            if (
+                                transitioned_snapshot.error_code is None
+                                and not transitioned_snapshot.present
+                            ):
+                                continue
                         try:
                             transition_plist_sha256 = artifact_contract.sha256_file(
                                 active_admission.paths.launch_agent_plist
