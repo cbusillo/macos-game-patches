@@ -3324,7 +3324,7 @@ class RuntimeStartTests(unittest.TestCase):
         self,
     ) -> None:
         fixture = self.use_multi_target_fixture()
-        fixture.profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"] = 30
+        fixture.profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"] = 60
         runner = fixture.multi_runner
         run_dir = fixture.state_root / "multi-quiesce-slow-stop"
         run_dir.mkdir(mode=0o700)
@@ -3377,8 +3377,8 @@ class RuntimeStartTests(unittest.TestCase):
             {identity.target_id for identity in final_retained},
             {"hub"},
         )
-        self.assertGreaterEqual(clock[0], 30.0)
-        self.assertLess(clock[0], 40.0)
+        self.assertGreaterEqual(clock[0], 60.0)
+        self.assertLess(clock[0], 70.0)
 
     def test_multi_target_quiescence_never_signals_late_unauthenticated_target(
         self,

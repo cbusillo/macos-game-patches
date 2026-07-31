@@ -3012,7 +3012,10 @@ def _quiesce_owned_producers(
     transition_timeout = float(
         profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"]
     )
-    quiesce_deadline = monotonic() + PRODUCER_QUIESCE_TIMEOUT_SECONDS
+    quiesce_deadline = monotonic() + max(
+        PRODUCER_QUIESCE_TIMEOUT_SECONDS,
+        transition_timeout + PRODUCER_QUIESCE_MARGIN_SECONDS,
+    )
     quiesce_runner = DeadlineRunner(context.runner, quiesce_deadline, monotonic)
     retained = _ordered_owned_producer_identities(profile, identities)
     term_signaled: set[int] = set()
