@@ -844,13 +844,13 @@
     {
       "id": "runtime_profile",
       "path": "${REPO_ROOT}/tools/runtime_profile.py",
-      "sha256": "9c4077c8fdaf363285e2c6686ef581ce7f8327b90c549ba014d82eae0296344f",
+      "sha256": "603d2be9265fc8380f5b6734668b4e0f749673dfc7552d5a49c98f4c92a6b6cc",
       "supplyClass": "repo-source"
     },
     {
       "id": "game_profile_schema",
       "path": "${REPO_ROOT}/runtime/game-profile.schema.json",
-      "sha256": "faaac1f2ce042727ddc6a0f6d7aad31b55672f037410069daee193d0a012694d",
+      "sha256": "23816f268f1ee01f48f974f36fcb8bbb0829397e1396704d2d183829b3093920",
       "supplyClass": "repo-source"
     },
     {

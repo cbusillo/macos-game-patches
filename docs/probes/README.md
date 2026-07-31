@@ -113,3 +113,4 @@ Use this shape:
 - [024 - Google Earth VR legacy classification](024-google-earth-vr-classification.md)
 - [025 - Aperture Hand Lab Index-input classification](025-aperture-hand-lab-classification.md)
 - [026 - Fixed-resolution profile qualification](026-fixed-resolution-profile-qualification.md)
+- [027 - The Lab multi-target runtime ownership](027-the-lab-multi-target-ownership.md)

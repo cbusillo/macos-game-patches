@@ -57,12 +57,14 @@ LAUNCH_KEYS = {
     "installRoot",
     "entrypointTarget",
     "ownedProcess",
+    "ownedTargets",
     "arguments",
     "environment",
     "processPattern",
     "startupTimeoutSeconds",
     "transitionTimeoutSeconds",
 }
+LAUNCH_REQUIRED_KEYS = LAUNCH_KEYS - {"ownedTargets"}
 OWNED_PROCESS_KEYS = {"executable", "processPattern"}
 RUNTIME_KEYS = {"openvrRuntime", "graphicsApi", "targets"}
 TARGET_KEYS = {
@@ -156,6 +158,7 @@ class ResolvedProfileTarget:
 class ResolvedOwnedProcess:
     executable: pathlib.Path
     process_pattern: str
+    target_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,21 @@ class InstalledProfile:
     @property
     def entrypoint(self) -> ResolvedProfileTarget:
         return self.targets[0]
+
+    @property
+    def owned_processes(self) -> tuple[ResolvedOwnedProcess, ...]:
+        if self.owned_process is not None:
+            return (self.owned_process,)
+        owned_target_ids = self.loaded.data["launch"].get("ownedTargets", [])
+        targets_by_id = {target.id: target for target in self.targets}
+        return tuple(
+            ResolvedOwnedProcess(
+                executable=targets_by_id[target_id].executable,
+                process_pattern=targets_by_id[target_id].process_pattern,
+                target_id=target_id,
+            )
+            for target_id in owned_target_ids
+        )
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -378,7 +396,17 @@ def validate_source(profile: dict[str, Any]) -> None:
 
 def validate_launch(profile: dict[str, Any]) -> None:
     launch = require_object(profile["launch"], "launch")
-    require_exact_keys(launch, LAUNCH_KEYS, "launch")
+    actual_launch_keys = set(launch)
+    missing_launch_keys = LAUNCH_REQUIRED_KEYS - actual_launch_keys
+    unknown_launch_keys = actual_launch_keys - LAUNCH_KEYS
+    if missing_launch_keys or unknown_launch_keys:
+        raise ProfileError(
+            "profile.invalid",
+            "Object keys do not match the profile contract",
+            location="launch",
+            missing=sorted(missing_launch_keys),
+            unknown=sorted(unknown_launch_keys),
+        )
     install_root = require_string(launch["installRoot"], "launch.installRoot")
     unknown_templates = sorted(set(TEMPLATE_RE.findall(install_root)) - {"HOME", "REPO_ROOT", "STEAM_BOTTLE"})
     if unknown_templates:
@@ -390,6 +418,31 @@ def validate_launch(profile: dict[str, Any]) -> None:
         )
     require_identifier(launch["entrypointTarget"], "launch.entrypointTarget")
     owned_process = launch["ownedProcess"]
+    owned_targets: list[str] = []
+    if "ownedTargets" in launch:
+        raw_owned_targets = require_list(launch["ownedTargets"], "launch.ownedTargets")
+        if not raw_owned_targets:
+            raise ProfileError(
+                "profile.invalid",
+                "Owned target list must not be empty",
+                location="launch.ownedTargets",
+            )
+        for index, raw_target_id in enumerate(raw_owned_targets):
+            owned_targets.append(
+                require_identifier(raw_target_id, f"launch.ownedTargets[{index}]")
+            )
+        if len(set(owned_targets)) != len(owned_targets):
+            raise ProfileError(
+                "profile.invalid",
+                "Owned target ids must be unique",
+                location="launch.ownedTargets",
+            )
+        if owned_process is not None:
+            raise ProfileError(
+                "profile.invalid",
+                "Singleton and target-set ownership declarations are mutually exclusive",
+                location="launch",
+            )
     if owned_process is not None:
         owned = require_object(owned_process, "launch.ownedProcess")
         require_exact_keys(owned, OWNED_PROCESS_KEYS, "launch.ownedProcess")
@@ -542,6 +595,15 @@ def validate_runtime(profile: dict[str, Any]) -> None:
             "profile.invalid",
             "Multi-process profiles require exactly one hub",
             location="runtime.targets",
+        )
+    owned_target_ids = profile["launch"].get("ownedTargets", [])
+    unknown_owned_target_ids = sorted(set(owned_target_ids) - target_ids)
+    if unknown_owned_target_ids:
+        raise ProfileError(
+            "profile.invalid",
+            "Owned targets must identify runtime targets",
+            location="launch.ownedTargets",
+            targets=unknown_owned_target_ids,
         )
 
 
@@ -1636,6 +1698,26 @@ def command_self_test(_: argparse.Namespace) -> int:
     weak_controller["controller"]["requiredInputs"].remove("trigger")
     cases.append(("weak-controller", weak_controller))
 
+    empty_owned_targets = copy.deepcopy(source_profile)
+    empty_owned_targets["launch"]["ownedTargets"] = []
+    cases.append(("empty-owned-targets", empty_owned_targets))
+
+    duplicate_owned_targets = copy.deepcopy(source_profile)
+    duplicate_owned_targets["launch"]["ownedTargets"] = ["hub", "hub"]
+    cases.append(("duplicate-owned-targets", duplicate_owned_targets))
+
+    unknown_owned_target = copy.deepcopy(source_profile)
+    unknown_owned_target["launch"]["ownedTargets"] = ["unknown"]
+    cases.append(("unknown-owned-target", unknown_owned_target))
+
+    mixed_ownership = copy.deepcopy(source_profile)
+    mixed_ownership["launch"]["ownedProcess"] = {
+        "executable": "TheLab/win64/TheLab.exe",
+        "processPattern": "[T]heLab\\.exe",
+    }
+    mixed_ownership["launch"]["ownedTargets"] = ["hub"]
+    cases.append(("mixed-ownership", mixed_ownership))
+
     results: list[dict[str, Any]] = []
     for name, profile in cases:
         try:
@@ -1650,6 +1732,15 @@ def command_self_test(_: argparse.Namespace) -> int:
     if parsed["AppState"]["InstalledDepots"]["450391"]["manifest"] != "7":
         raise ProfileError("self-test.failed", "VDF parser fixture failed")
     results.append({"case": "vdf-parser", "passed": True})
+
+    multi_target = copy.deepcopy(source_profile)
+    multi_target["launch"]["ownedTargets"] = [
+        "hub",
+        "secret-shop",
+        "robot-repair",
+    ]
+    validate_profile(multi_target)
+    results.append({"case": "multi-target-ownership", "passed": True})
 
     fixture_root = os.environ.get("RUNTIME_FIXTURE_ROOT")
     if fixture_root is None and pathlib.Path("/private/tmp").is_dir():
