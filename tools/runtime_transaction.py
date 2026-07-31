@@ -144,6 +144,7 @@ TREE_PHASES = frozenset(
 FILE_PHASES = TREE_PHASES
 REMOVAL_PHASES = frozenset({"intent", "moved", "restored-after-change"})
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
@@ -850,6 +851,7 @@ class TransactionExecutor:
         allowed_roots: Sequence[pathlib.Path],
         failure_injector: FailureInjector | None = None,
         tree_ownership_validator: TreeOwnershipValidator | None = None,
+        plan_identity: dict[str, str] | None = None,
     ) -> None:
         self.kind = kind
         self.artifact_root = self._absolute_input_path(artifact_root)
@@ -866,11 +868,38 @@ class TransactionExecutor:
             self.operations.append(dict(operation))
         self.failure_injector = failure_injector
         self.tree_ownership_validator = tree_ownership_validator
+        self.plan_identity = self._validate_plan_identity(plan_identity)
         plan = [semantic_operation(operation) for operation in self.operations]
+        digest_input: Any = plan
+        if self.plan_identity is not None:
+            digest_input = {
+                "operations": plan,
+                "planIdentity": self.plan_identity,
+            }
         self.plan_digest = artifact_contract.sha256_bytes(
-            artifact_contract.canonical_json_bytes(plan)
+            artifact_contract.canonical_json_bytes(digest_input)
         )
         self.lock_path = self.journal_path.with_suffix(self.journal_path.suffix + ".lock")
+
+    @staticmethod
+    def _validate_plan_identity(
+        value: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"profileId", "profileSha256"}
+            or not isinstance(value.get("profileId"), str)
+            or PROFILE_ID_PATTERN.fullmatch(value["profileId"]) is None
+            or not isinstance(value.get("profileSha256"), str)
+            or SHA256_PATTERN.fullmatch(value["profileSha256"]) is None
+        ):
+            raise TransactionError(
+                "transaction.plan_invalid",
+                "Transaction plan identity is invalid",
+            )
+        return dict(value)
 
     @staticmethod
     def _absolute_input_path(path: pathlib.Path) -> pathlib.Path:
@@ -1624,8 +1653,8 @@ class TransactionExecutor:
 
     def _new_journal(self) -> dict[str, Any]:
         timestamp = utc_now()
-        return {
-            "schemaVersion": 2,
+        journal: dict[str, Any] = {
+            "schemaVersion": 3 if self.plan_identity is not None else 2,
             "transactionId": uuid.uuid4().hex,
             "kind": self.kind,
             "planDigest": self.plan_digest,
@@ -1649,6 +1678,9 @@ class TransactionExecutor:
             "cleanupFailures": [],
             "cleanupInProgress": {},
         }
+        if self.plan_identity is not None:
+            journal["planIdentity"] = self.plan_identity
+        return journal
 
     def _invalid_journal(self, message: str, **context: Any) -> TransactionError:
         return TransactionError("transaction.journal_invalid", message, **context)
@@ -2038,7 +2070,7 @@ class TransactionExecutor:
         raise self._invalid_journal("Transaction journal undo action is unsupported", index=index)
 
     def _validate_journal(self, journal: Any) -> dict[str, Any]:
-        expected_keys = {
+        base_keys = {
             "schemaVersion",
             "transactionId",
             "kind",
@@ -2054,13 +2086,29 @@ class TransactionExecutor:
             "cleanupFailures",
             "cleanupInProgress",
         }
-        if (
-            not isinstance(journal, dict)
-            or set(journal) != expected_keys
-            or journal.get("schemaVersion") != 2
-        ):
+        if not isinstance(journal, dict):
             raise self._invalid_journal("Transaction journal schema is invalid")
-        if journal.get("kind") != self.kind or journal.get("planDigest") != self.plan_digest:
+        schema_version = journal.get("schemaVersion")
+        if schema_version == 2:
+            expected_keys = base_keys
+            journal_identity = None
+        elif schema_version == 3:
+            expected_keys = {*base_keys, "planIdentity"}
+            try:
+                journal_identity = self._validate_plan_identity(journal.get("planIdentity"))
+            except TransactionError as error:
+                raise self._invalid_journal("Transaction journal plan identity is invalid") from error
+            if journal_identity is None:
+                raise self._invalid_journal("Transaction journal plan identity is invalid")
+        else:
+            raise self._invalid_journal("Transaction journal schema is invalid")
+        if set(journal) != expected_keys:
+            raise self._invalid_journal("Transaction journal schema is invalid")
+        if (
+            journal.get("kind") != self.kind
+            or journal.get("planDigest") != self.plan_digest
+            or journal_identity != self.plan_identity
+        ):
             raise TransactionError(
                 "transaction.journal_mismatch",
                 "Existing transaction journal belongs to another plan or kind",
@@ -2068,6 +2116,8 @@ class TransactionExecutor:
                 actualKind=journal.get("kind"),
                 expectedPlanDigest=self.plan_digest,
                 actualPlanDigest=journal.get("planDigest"),
+                expectedPlanIdentity=self.plan_identity,
+                actualPlanIdentity=journal_identity,
             )
         if (
             not isinstance(journal.get("transactionId"), str)

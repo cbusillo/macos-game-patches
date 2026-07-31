@@ -99,6 +99,7 @@ class FixtureLayout:
         failure_injector: Any = None,
         journal_path: pathlib.Path | None = None,
         tree_ownership_validator: runtime_transaction.TreeOwnershipValidator | None = None,
+        plan_identity: dict[str, str] | None = None,
     ) -> TransactionExecutor:
         return TransactionExecutor(
             kind=kind,  # type: ignore[arg-type]
@@ -109,6 +110,7 @@ class FixtureLayout:
             allowed_roots=[self.target_root],
             failure_injector=failure_injector,
             tree_ownership_validator=tree_ownership_validator,
+            plan_identity=plan_identity,
         )
 
     def transaction_temporary_paths(self) -> list[pathlib.Path]:
@@ -1691,6 +1693,106 @@ class TransactionTests(unittest.TestCase):
             policy_changed[0].pop("ownershipEvidence")
             semantic = fixture.executor("install", policy_changed)
             self.assertNotEqual(semantic.plan_digest, baseline.plan_digest)
+
+    def test_profile_plan_identity_binds_digest_and_schema_three_journal(self) -> None:
+        with fixture_layout() as fixture:
+            target = fixture.target_file("game/retained.bin", b"retained payload")
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "retain_target",
+                    "resource": "target",
+                    "action": "retain",
+                    "target": str(target),
+                }
+            ]
+            legacy = fixture.executor(
+                "install",
+                operations,
+                journal_path=fixture.transaction_root / "legacy.json",
+            )
+            profile_identity = {
+                "profileId": "the-lab",
+                "profileSha256": "a" * 64,
+            }
+            profile = fixture.executor(
+                "install",
+                operations,
+                plan_identity=profile_identity,
+            )
+
+            legacy_digest = artifact_contract.sha256_bytes(
+                artifact_contract.canonical_json_bytes(
+                    [runtime_transaction.semantic_operation(operation) for operation in operations]
+                )
+            )
+            self.assertEqual(legacy.plan_digest, legacy_digest)
+            self.assertNotEqual(profile.plan_digest, legacy.plan_digest)
+            legacy_report = legacy.execute()
+            profile_report = profile.execute()
+            legacy_journal = json.loads(legacy_report.journal.read_text())
+            profile_journal = json.loads(profile_report.journal.read_text())
+            self.assertEqual(legacy_journal["schemaVersion"], 2)
+            self.assertNotIn("planIdentity", legacy_journal)
+            self.assertEqual(profile_journal["schemaVersion"], 3)
+            self.assertEqual(profile_journal["planIdentity"], profile_identity)
+
+    def test_profile_journal_recovery_requires_exact_plan_identity(self) -> None:
+        with fixture_layout() as fixture:
+            source = fixture.artifact_file("payload/profile.bin", b"profile payload")
+            target = fixture.target_root / "game/profile.bin"
+            target.parent.mkdir()
+            operations: list[dict[str, Any]] = [
+                {
+                    "id": "assert_profile_absent",
+                    "resource": "profile_file",
+                    "action": "assert_absent",
+                    "target": str(target),
+                },
+                {
+                    "id": "create_profile_file",
+                    "resource": "profile_file",
+                    "action": "create_file",
+                    "atomic": True,
+                    "source": str(source),
+                    "sourceSha256": artifact_contract.sha256_file(source),
+                    "target": str(target),
+                },
+            ]
+            profile_identity = {
+                "profileId": "the-lab",
+                "profileSha256": "a" * 64,
+            }
+
+            def crash(step_id: str, phase: str) -> None:
+                if step_id == "create_profile_file" and phase == "after-mutation":
+                    raise SimulatedCrash("fixture crash")
+
+            with self.assertRaises(SimulatedCrash):
+                fixture.executor(
+                    "install",
+                    operations,
+                    failure_injector=crash,
+                    plan_identity=profile_identity,
+                ).execute()
+            mismatched = fixture.executor(
+                "install",
+                operations,
+                plan_identity={
+                    "profileId": "the-lab",
+                    "profileSha256": "b" * 64,
+                },
+            )
+            with self.assertRaises(TransactionError) as mismatch:
+                mismatched.recover()
+            self.assertEqual(mismatch.exception.code, "transaction.journal_mismatch")
+
+            recovered = fixture.executor(
+                "install",
+                operations,
+                plan_identity=profile_identity,
+            ).recover()
+            self.assertEqual(recovered.state, "rolled-back")
+            self.assertFalse(target.exists())
 
     def test_exchange_rollback_resumes_interrupted_original_cleanup(self) -> None:
         with fixture_layout() as fixture:

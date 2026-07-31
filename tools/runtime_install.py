@@ -13,6 +13,7 @@ from typing import Any, Callable, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
 import runtime_descriptor
+import runtime_profile
 import runtime_transaction
 from runtime_control import (
     LIVE_STATES,
@@ -33,11 +34,28 @@ CAPACITY_ENTRY_BYTES = 4096
 INCOMPLETE_TRANSACTION_STATES = frozenset({"prepared", "running", "rolling-back"})
 TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PROFILE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 INSTALL_CONTAINER_IDS = (
     "backup_root",
     "runtime_state",
     "bridge_bundle_root",
 )
+PROFILE_GAME_RESOURCES = frozenset(
+    {
+        "game_openvr",
+        "custom_openvr_runtime",
+        "dxvk_d3d11",
+        "dxvk_dxgi",
+        "game_wine_bridge_windows",
+    }
+)
+PROFILE_RESOURCE_FILENAMES = {
+    "game_openvr": "openvr_api.dll",
+    "custom_openvr_runtime": "openvr_api.real.dll",
+    "dxvk_d3d11": "d3d11.dll",
+    "dxvk_dxgi": "dxgi.dll",
+    "game_wine_bridge_windows": "alvr_iosurface_bridge.dll",
+}
 
 
 class RuntimeInstallError(Exception):
@@ -127,6 +145,21 @@ class LifecyclePaths:
     allowed_roots: tuple[pathlib.Path, ...]
 
 
+@dataclass(frozen=True)
+class ProfilePlanBinding:
+    id: str
+    sha256: str
+    install_root: pathlib.Path
+    targets: tuple[runtime_profile.ResolvedProfileTarget, ...]
+
+    @property
+    def plan_identity(self) -> dict[str, str]:
+        return {
+            "profileId": self.id,
+            "profileSha256": self.sha256,
+        }
+
+
 def _absolute(path: pathlib.Path | str) -> pathlib.Path:
     return pathlib.Path(os.path.abspath(pathlib.Path(path).expanduser()))
 
@@ -136,6 +169,10 @@ def _artifact_error(error: artifact_contract.ArtifactError) -> RuntimeInstallErr
 
 
 def _descriptor_error(error: runtime_descriptor.DescriptorError) -> RuntimeInstallError:
+    return RuntimeInstallError(error.code, error.message, **error.context)
+
+
+def _profile_error(error: runtime_profile.ProfileError) -> RuntimeInstallError:
     return RuntimeInstallError(error.code, error.message, **error.context)
 
 
@@ -340,15 +377,248 @@ def lifecycle_paths(plan: dict[str, Any]) -> LifecyclePaths:
     return paths
 
 
+def _project_profile_plan_binding(
+    context: RuntimeContext,
+    manifest: dict[str, Any],
+    artifact: pathlib.Path,
+    profile_id: str,
+) -> tuple[ProfilePlanBinding, dict[str, str]]:
+    try:
+        bindings = artifact_contract.resolve_bindings(
+            manifest,
+            context.bindings_path,
+            "plan",
+        )
+        loaded = runtime_profile.load_curated_profile(profile_id, manifest, artifact)
+        install_root = runtime_profile.resolve_profile_install_root(loaded.data, bindings)
+        targets = tuple(
+            runtime_profile.ResolvedProfileTarget(
+                id=target["id"],
+                role=target["role"],
+                executable=runtime_profile.resolve_under(
+                    install_root,
+                    target["executable"],
+                    f"target.{target['id']}.executable",
+                ),
+                working_directory=runtime_profile.resolve_under(
+                    install_root,
+                    target["workingDirectory"],
+                    f"target.{target['id']}.workingDirectory",
+                ),
+                openvr_directory=runtime_profile.resolve_under(
+                    install_root,
+                    target["openvrDirectory"],
+                    f"target.{target['id']}.openvrDirectory",
+                ),
+                graphics_directory=runtime_profile.resolve_under(
+                    install_root,
+                    target["graphicsDirectory"],
+                    f"target.{target['id']}.graphicsDirectory",
+                ),
+                stock_openvr_sha256=target["stockOpenvrSha256"],
+                process_pattern=target["processPattern"],
+            )
+            for target in runtime_profile.ordered_targets(loaded.data)
+        )
+    except artifact_contract.ArtifactError as error:
+        raise _artifact_error(error) from error
+    except runtime_profile.ProfileError as error:
+        raise _profile_error(error) from error
+    if not targets:
+        raise RuntimeInstallError(
+            "profile.invalid",
+            "Profile-aware lifecycle planning requires at least one runtime target",
+            profile=loaded.data["id"],
+        )
+    openvr_directories = {target.openvr_directory for target in targets}
+    graphics_directories = {target.graphics_directory for target in targets}
+    if len(openvr_directories) != len(targets) or len(graphics_directories) != len(targets):
+        raise RuntimeInstallError(
+            "profile.artifact_mismatch",
+            "Profile runtime targets must own distinct OpenVR and graphics directories",
+            profile=loaded.data["id"],
+        )
+    return (
+        ProfilePlanBinding(
+            id=loaded.data["id"],
+            sha256=loaded.sha256,
+            install_root=install_root,
+            targets=targets,
+        ),
+        bindings,
+    )
+
+
+def _profile_backup_path(
+    backup_root: pathlib.Path,
+    profile: ProfilePlanBinding,
+    target: runtime_profile.ResolvedProfileTarget,
+) -> pathlib.Path:
+    return backup_root / (
+        f"game_openvr-{profile.id}-{target.id}-{target.stock_openvr_sha256}.dll"
+    )
+
+
+def _profile_operation_template(
+    item: dict[str, Any],
+    profile: ProfilePlanBinding,
+    target: runtime_profile.ResolvedProfileTarget,
+    backup_root: pathlib.Path,
+) -> dict[str, Any]:
+    resource = item.get("resource")
+    identifier = item.get("id")
+    action = item.get("action")
+    if (
+        not isinstance(resource, str)
+        or resource not in PROFILE_GAME_RESOURCES
+        or not isinstance(identifier, str)
+        or not isinstance(action, str)
+    ):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Profile-aware lifecycle operation is invalid",
+            operation=identifier,
+        )
+    suffix = target.id.replace("-", "_")
+    result = dict(item)
+    result["id"] = f"{identifier}_{suffix}"
+    result["resource"] = f"{resource}_{suffix}"
+    backup = _profile_backup_path(backup_root, profile, target)
+    if resource == "game_openvr" and action == "retain":
+        result["target"] = str(backup)
+    else:
+        target_root = (
+            target.openvr_directory
+            if resource in {"game_openvr", "custom_openvr_runtime"}
+            else target.graphics_directory
+        )
+        result["target"] = str(target_root / PROFILE_RESOURCE_FILENAMES[resource])
+    if "backup" in result:
+        result["backup"] = str(backup)
+    if "expectedSha256" in result and resource == "game_openvr":
+        result["expectedSha256"] = target.stock_openvr_sha256
+    return result
+
+
+def _materialize_profile_plan(
+    plan: dict[str, Any],
+    manifest: dict[str, Any],
+    artifact: pathlib.Path,
+    profile: ProfilePlanBinding,
+    bindings: dict[str, str],
+) -> dict[str, Any]:
+    allowed_root_values = plan.get("allowedTargetRoots")
+    if not isinstance(allowed_root_values, list) or not all(
+        isinstance(value, str) for value in allowed_root_values
+    ):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Resolved plan is missing its allowed target roots",
+        )
+    allowed_roots = [pathlib.Path(value) for value in allowed_root_values]
+    backup_root = _state_path(_mutable_state_index(plan), "backup_root")
+    requires_sealing = plan.get("requiresSealing") is not False
+    materialized = dict(plan)
+    materialized["schemaVersion"] = 2
+    materialized["profile"] = {
+        "id": profile.id,
+        "sha256": profile.sha256,
+        "installRoot": str(profile.install_root),
+        "targets": [
+            {
+                "id": target.id,
+                "openvrDirectory": str(target.openvr_directory),
+                "graphicsDirectory": str(target.graphics_directory),
+                "stockOpenvrSha256": target.stock_openvr_sha256,
+            }
+            for target in profile.targets
+        ],
+    }
+    for kind, manifest_key in (("install", "installPlan"), ("uninstall", "uninstallPlan")):
+        templates = manifest.get(manifest_key)
+        resolved_operations = plan.get(kind)
+        if not isinstance(templates, list) or not isinstance(resolved_operations, list):
+            raise RuntimeInstallError(
+                "plan.invalid",
+                "Resolved plan is missing lifecycle operations",
+                kind=kind,
+            )
+        resolved_by_id = {
+            operation["id"]: operation
+            for operation in resolved_operations
+            if isinstance(operation, dict) and isinstance(operation.get("id"), str)
+        }
+        if len(resolved_by_id) != len(resolved_operations):
+            raise RuntimeInstallError(
+                "plan.invalid",
+                "Resolved lifecycle operations do not have unique identifiers",
+                kind=kind,
+            )
+        target_resources = {
+            item.get("resource")
+            for item in templates
+            if isinstance(item, dict) and item.get("resource") in PROFILE_GAME_RESOURCES
+        }
+        if target_resources != PROFILE_GAME_RESOURCES:
+            raise RuntimeInstallError(
+                "profile.artifact_mismatch",
+                "Artifact does not contain the complete profile-aware game overlay contract",
+                kind=kind,
+                resources=sorted(str(resource) for resource in target_resources),
+            )
+        expanded: list[dict[str, Any]] = []
+        for item in templates:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise RuntimeInstallError(
+                    "plan.invalid",
+                    "Lifecycle operation template is invalid",
+                    kind=kind,
+                )
+            if item.get("resource") not in PROFILE_GAME_RESOURCES:
+                resolved = resolved_by_id.get(item["id"])
+                if resolved is None:
+                    raise RuntimeInstallError(
+                        "plan.invalid",
+                        "Resolved lifecycle operation is missing",
+                        kind=kind,
+                        operation=item["id"],
+                    )
+                expanded.append(dict(resolved))
+                continue
+            for target in profile.targets:
+                operation = _profile_operation_template(
+                    item,
+                    profile,
+                    target,
+                    backup_root,
+                )
+                try:
+                    expanded.append(
+                        artifact_contract.resolve_plan_operation(
+                            operation,
+                            artifact,
+                            bindings,
+                            allowed_roots,
+                            allow_missing_sources=requires_sealing,
+                        )
+                    )
+                except artifact_contract.ArtifactError as error:
+                    raise _artifact_error(error) from error
+        materialized[kind] = expanded
+        _refresh_plan_readiness(materialized, cast(MutationKind, kind))
+    return materialized
+
+
 def _build_plan(
     context: RuntimeContext,
     artifact: pathlib.Path,
     manifest: dict[str, Any],
     manifest_hash: str,
     lock_hash: str,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
     try:
-        return artifact_contract.build_plan(
+        plan = artifact_contract.build_plan(
             manifest,
             artifact,
             context.bindings_path,
@@ -357,6 +627,15 @@ def _build_plan(
         )
     except artifact_contract.ArtifactError as error:
         raise _artifact_error(error) from error
+    if profile_id is None:
+        return plan
+    profile, bindings = _project_profile_plan_binding(
+        context,
+        manifest,
+        artifact,
+        profile_id,
+    )
+    return _materialize_profile_plan(plan, manifest, artifact, profile, bindings)
 
 
 def _refresh_plan_readiness(plan: dict[str, Any], kind: MutationKind) -> None:
@@ -377,6 +656,80 @@ def _refresh_plan_readiness(plan: dict[str, Any], kind: MutationKind) -> None:
     sealing_blockers = ["artifact.sealing_required"] if plan.get("requiresSealing") is not False else []
     plan[f"{kind}Ready"] = not sealing_blockers and not blockers
     plan[f"{kind}Blockers"] = [*sealing_blockers, *blockers]
+
+
+def _profile_plan_identity(plan: dict[str, Any]) -> dict[str, str] | None:
+    profile = plan.get("profile")
+    if profile is None:
+        return None
+    if (
+        not isinstance(profile, dict)
+        or not isinstance(profile.get("id"), str)
+        or PROFILE_ID_PATTERN.fullmatch(profile["id"]) is None
+        or not isinstance(profile.get("sha256"), str)
+        or SHA256_PATTERN.fullmatch(profile["sha256"]) is None
+    ):
+        raise RuntimeInstallError(
+            "plan.invalid",
+            "Resolved profile-aware plan identity is invalid",
+        )
+    return {
+        "profileId": profile["id"],
+        "profileSha256": profile["sha256"],
+    }
+
+
+def _admit_profile_plan(
+    command: MutationKind,
+    context: RuntimeContext,
+    manifest: dict[str, Any],
+    artifact: pathlib.Path,
+    plan: dict[str, Any],
+) -> None:
+    identity = _profile_plan_identity(plan)
+    if identity is None:
+        return
+    profile = plan["profile"]
+    try:
+        bindings = artifact_contract.resolve_bindings(
+            manifest,
+            context.bindings_path,
+            "plan",
+        )
+        loaded = runtime_profile.load_curated_profile(
+            identity["profileId"],
+            manifest,
+            artifact,
+        )
+        install_root, _, _ = runtime_profile.verify_steam_identity(loaded.data, bindings)
+        targets = runtime_profile.resolve_profile_targets(
+            loaded.data,
+            install_root,
+            require_stock_openvr=command == "install",
+        )
+    except artifact_contract.ArtifactError as error:
+        raise _artifact_error(error) from error
+    except runtime_profile.ProfileError as error:
+        raise _profile_error(error) from error
+    expected_targets = [
+        {
+            "id": target.id,
+            "openvrDirectory": str(target.openvr_directory),
+            "graphicsDirectory": str(target.graphics_directory),
+            "stockOpenvrSha256": target.stock_openvr_sha256,
+        }
+        for target in targets
+    ]
+    if (
+        loaded.sha256 != identity["profileSha256"]
+        or profile.get("installRoot") != str(install_root)
+        or profile.get("targets") != expected_targets
+    ):
+        raise RuntimeInstallError(
+            "profile.artifact_mismatch",
+            "Resolved profile targets differ from the lifecycle operation set",
+            profile=identity["profileId"],
+        )
 
 
 def _inspect_stable_bundle(
@@ -475,6 +828,7 @@ def _executor(
         transaction_root=paths.transaction_root,
         allowed_roots=paths.allowed_roots,
         tree_ownership_validator=tree_ownership_validator,
+        plan_identity=_profile_plan_identity(plan),
     )
 
 
@@ -521,6 +875,34 @@ def _archive_terminal_journal(
     return destination
 
 
+def _journal_plan_identity(journal: dict[str, Any]) -> dict[str, str] | None:
+    schema_version = journal.get("schemaVersion")
+    if schema_version == 2:
+        return None
+    if schema_version != 3:
+        raise RuntimeInstallError(
+            "transaction.journal_invalid",
+            "Transaction journal schema is invalid",
+        )
+    identity = journal.get("planIdentity")
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != {"profileId", "profileSha256"}
+        or not isinstance(identity.get("profileId"), str)
+        or PROFILE_ID_PATTERN.fullmatch(identity["profileId"]) is None
+        or not isinstance(identity.get("profileSha256"), str)
+        or SHA256_PATTERN.fullmatch(identity["profileSha256"]) is None
+    ):
+        raise RuntimeInstallError(
+            "transaction.journal_invalid",
+            "Transaction journal plan identity is invalid",
+        )
+    return {
+        "profileId": identity["profileId"],
+        "profileSha256": identity["profileSha256"],
+    }
+
+
 def _archive_prior_committed_journal(
     paths: LifecyclePaths,
     journal: dict[str, Any],
@@ -541,12 +923,14 @@ def _archive_prior_committed_journal(
         "cleanupFailures",
         "cleanupInProgress",
     }
+    identity = _journal_plan_identity(journal)
+    if identity is not None:
+        expected_keys.add("planIdentity")
     transaction_id = journal.get("transactionId")
     plan_digest = journal.get("planDigest")
     steps = journal.get("steps")
     if (
         set(journal) != expected_keys
-        or journal.get("schemaVersion") != 2
         or journal.get("kind") not in {"install", "uninstall"}
         or journal.get("state") != "committed"
         or not isinstance(transaction_id, str)
@@ -1257,6 +1641,7 @@ def _mutate_runtime(
     command: MutationKind,
     context: RuntimeContext,
     artifact_path: pathlib.Path,
+    profile_id: str | None = None,
 ) -> MutationReport:
     artifact: dict[str, Any] | None = None
     plan_digest: str | None = None
@@ -1282,7 +1667,14 @@ def _mutate_runtime(
                 artifact=artifact,
             )
         admission_plan = _qualify_stable_bundles(
-            _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+            _build_plan(
+                context,
+                artifact_path,
+                manifest,
+                manifest_hash,
+                lock_hash,
+                profile_id,
+            ),
             manifest,
         )
         if admission_plan.get("requiresSealing") is not False:
@@ -1315,7 +1707,7 @@ def _mutate_runtime(
             live_status.ok
             and live_status.state in LIVE_STATES
             and isinstance(live_record, dict)
-            and live_record.get("schemaVersion") in {2, 3, 4, 5}
+            and live_record.get("schemaVersion") in {2, 3, 4, 5, 6}
         ):
             pre_lock_stop = stop_runtime(context)
             stop_actions = pre_lock_stop.actions
@@ -1338,7 +1730,14 @@ def _mutate_runtime(
         )
         with global_lifecycle_lock(global_lock, (global_lock_root,)):
             plan = _qualify_stable_bundles(
-                _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+                _build_plan(
+                    context,
+                    artifact_path,
+                    manifest,
+                    manifest_hash,
+                    lock_hash,
+                    profile_id,
+                ),
                 manifest,
             )
             if plan.get("requiresSealing") is not False:
@@ -1392,6 +1791,17 @@ def _mutate_runtime(
                     )
                 existing_executor = executors[cast(MutationKind, existing_kind)]
                 if active_journal.get("planDigest") != existing_executor.plan_digest:
+                    journal_identity = _journal_plan_identity(active_journal)
+                    if active_journal.get("kind") == "install" and (
+                        journal_identity is not None
+                        or existing_executor.plan_identity is not None
+                    ):
+                        raise RuntimeInstallError(
+                            "transaction.journal_mismatch",
+                            "Profile-bound installed state must be uninstalled with its exact plan",
+                            activePlanIdentity=journal_identity,
+                            requestedPlanIdentity=existing_executor.plan_identity,
+                        )
                     archived_journal = _archive_prior_committed_journal(paths, active_journal)
                     active_journal = None
                 else:
@@ -1451,6 +1861,7 @@ def _mutate_runtime(
                     journal=paths.journal,
                     archived_journal=archived_journal,
                 )
+            _admit_profile_plan(command, context, manifest, artifact_path, plan)
             _capacity_checks(plan, command, paths)
             if command == "install":
                 doctor = doctor_runtime(context, artifact_path)
@@ -1499,7 +1910,14 @@ def _mutate_runtime(
             if command == "install":
                 _provision_install_directories(plan, paths)
             live_plan = _qualify_stable_bundles(
-                _build_plan(context, artifact_path, manifest, manifest_hash, lock_hash),
+                _build_plan(
+                    context,
+                    artifact_path,
+                    manifest,
+                    manifest_hash,
+                    lock_hash,
+                    profile_id,
+                ),
                 manifest,
             )
             live_paths = lifecycle_paths(live_plan)
@@ -1514,6 +1932,11 @@ def _mutate_runtime(
                 live_paths,
                 tree_ownership_validator=tree_ownership_validator,
             )
+            if profile_id is not None and executor.plan_digest != executors[command].plan_digest:
+                raise RuntimeInstallError(
+                    "plan.drift",
+                    "Profile-aware lifecycle operations changed while the global lock was held",
+                )
             plan_digest = executor.plan_digest
             live_blockers = _admission_blockers(live_plan, command)
             if live_plan.get(f"{command}Ready") is not True or live_blockers:
@@ -1530,6 +1953,7 @@ def _mutate_runtime(
                     archived_journal=archived_journal,
                     stop_actions=stop_actions,
                 )
+            _admit_profile_plan(command, context, manifest, artifact_path, live_plan)
             _ensure_targets_closed(context, live_plan, command)
             capacity = _capacity_checks(live_plan, command, live_paths)
             report = executor.execute()
@@ -1569,9 +1993,17 @@ def _mutate_runtime(
         )
 
 
-def install_runtime(context: RuntimeContext, artifact: pathlib.Path) -> MutationReport:
-    return _mutate_runtime("install", context, artifact)
+def install_runtime(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    profile_id: str | None = None,
+) -> MutationReport:
+    return _mutate_runtime("install", context, artifact, profile_id)
 
 
-def uninstall_runtime(context: RuntimeContext, artifact: pathlib.Path) -> MutationReport:
-    return _mutate_runtime("uninstall", context, artifact)
+def uninstall_runtime(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    profile_id: str | None = None,
+) -> MutationReport:
+    return _mutate_runtime("uninstall", context, artifact, profile_id)

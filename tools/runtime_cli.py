@@ -90,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(install_parser)
     install_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="runtime artifact")
+    install_parser.add_argument(
+        "--profile",
+        help="curated profile whose complete target set receives the game overlay",
+    )
 
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -97,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(uninstall_parser)
     uninstall_parser.add_argument("--artifact", required=True, type=pathlib.Path, help="runtime artifact")
+    uninstall_parser.add_argument(
+        "--profile",
+        help="curated profile whose complete target set is restored",
+    )
     return parser
 
 
@@ -268,7 +276,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0 if status_report.ok else 1
         if arguments.command == "install":
-            install_report = install_runtime(context, arguments.artifact)
+            install_report = install_runtime(
+                context,
+                arguments.artifact,
+                arguments.profile,
+            )
             emit(
                 install_report.to_dict(),
                 as_json=arguments.json,
@@ -276,7 +288,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0 if install_report.ok else 1
         if arguments.command == "uninstall":
-            uninstall_report = uninstall_runtime(context, arguments.artifact)
+            uninstall_report = uninstall_runtime(
+                context,
+                arguments.artifact,
+                arguments.profile,
+            )
             emit(
                 uninstall_report.to_dict(),
                 as_json=arguments.json,
