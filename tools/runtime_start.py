@@ -253,6 +253,28 @@ class ProducerIdentity:
 
 
 @dataclass(frozen=True)
+class OwnedProducerIdentity:
+    target_id: str
+    identity: ProducerIdentity
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"targetId": self.target_id, **self.identity.to_dict()}
+
+
+@dataclass(frozen=True)
+class _OwnedProducerObservation:
+    identities: tuple[OwnedProducerIdentity, ...]
+    process_ids: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _OwnedProducerTransition:
+    live: tuple[OwnedProducerIdentity, ...]
+    retained: tuple[OwnedProducerIdentity, ...]
+    deadline: float | None
+
+
+@dataclass(frozen=True)
 class ClientTelemetry:
     sequence: int
     client_state: int
@@ -1568,6 +1590,109 @@ def _launching_producer_record(
     }
 
 
+def _declared_owned_processes(
+    profile: ProfileStartAdmission,
+) -> tuple[runtime_profile.ResolvedOwnedProcess, ...]:
+    owned_processes = profile.installed.owned_processes
+    if len(owned_processes) <= 1:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Multi-target producer helpers require more than one declared target",
+        )
+    target_ids: set[str] = set()
+    for owned_process in owned_processes:
+        target_id = owned_process.target_id
+        if target_id is None or target_id in target_ids:
+            raise ControlError(
+                "producer.identity_unavailable",
+                "Multi-target producer declaration is incomplete or duplicated",
+            )
+        target_ids.add(target_id)
+    return owned_processes
+
+
+def _ordered_owned_producer_identities(
+    profile: ProfileStartAdmission,
+    identities: Sequence[OwnedProducerIdentity],
+) -> tuple[OwnedProducerIdentity, ...]:
+    target_order = {
+        owned_process.target_id: index
+        for index, owned_process in enumerate(_declared_owned_processes(profile))
+    }
+    ordered: dict[str, OwnedProducerIdentity] = {}
+    pids: set[int] = set()
+    for identity in identities:
+        if identity.target_id not in target_order or identity.target_id in ordered:
+            raise ControlError(
+                "producer.identity_changed",
+                "Multi-target producer identities are undeclared or duplicated",
+                targetId=identity.target_id,
+            )
+        if identity.identity.pid in pids:
+            raise ControlError(
+                "producer.identity_changed",
+                "One PID cannot own multiple producer targets",
+                pid=identity.identity.pid,
+            )
+        ordered[identity.target_id] = identity
+        pids.add(identity.identity.pid)
+    return tuple(sorted(ordered.values(), key=lambda item: target_order[item.target_id]))
+
+
+def _owned_producer_record(
+    profile: ProfileStartAdmission,
+    status: str,
+    launcher_pid: int,
+    launcher_birth_token: int,
+    launcher_started_at: str,
+    process_group_id: int,
+    producer_log: pathlib.Path,
+    identities: Sequence[OwnedProducerIdentity],
+) -> dict[str, Any]:
+    owned_processes = _declared_owned_processes(profile)
+    ordered_identities = _ordered_owned_producer_identities(profile, identities)
+    return {
+        "status": status,
+        "launcher": {
+            "pid": launcher_pid,
+            "birthToken": launcher_birth_token,
+            "startedAt": launcher_started_at,
+            "processGroupId": process_group_id,
+        },
+        "expectedOwnedProcesses": [
+            {
+                "targetId": owned_process.target_id,
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            for owned_process in owned_processes
+        ],
+        "ownedProcesses": [identity.to_dict() for identity in ordered_identities],
+        "log": str(producer_log),
+    }
+
+
+def _launching_owned_producer_record(
+    profile: ProfileStartAdmission,
+    producer_log: pathlib.Path,
+) -> dict[str, Any]:
+    owned_processes = _declared_owned_processes(profile)
+    return {
+        "status": "launching",
+        "launcher": None,
+        "expectedOwnedProcesses": [
+            {
+                "targetId": owned_process.target_id,
+                "executable": str(owned_process.executable),
+                "processPattern": owned_process.process_pattern,
+            }
+            for owned_process in owned_processes
+        ],
+        "ownedProcesses": [],
+        "log": str(producer_log),
+    }
+
+
 def _state_payload(
     admission: StartAdmission,
     run_dir: pathlib.Path,
@@ -1584,7 +1709,7 @@ def _state_payload(
     if service.snapshot.pid is None or service.file_identity is None or admission.profile is None:
         raise ControlError("runtime.start_failed", "Live service identity is incomplete")
     return {
-        "schemaVersion": 5,
+        "schemaVersion": 6 if "expectedOwnedProcesses" in producer else 5,
         "state": state,
         "generation": generation,
         "ownerPid": os.getpid(),
@@ -1795,6 +1920,554 @@ def _owned_process_candidates(
             )
         )
     return candidates
+
+
+def _process_owned_target_mappings(
+    pid: int,
+    owned_processes: Sequence[runtime_profile.ResolvedOwnedProcess],
+    runner: CommandRunner,
+) -> tuple[tuple[runtime_profile.ResolvedOwnedProcess, ...] | None, str | None]:
+    result = runner.run(
+        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "txt", "-Fn"],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        return None, "Owned process executable mapping could not be inspected"
+    mappings = tuple(
+        _absolute(pathlib.Path(line[1:]))
+        for line in result.stdout.splitlines()
+        if line.startswith("n") and len(line) > 1
+    )
+    return (
+        tuple(
+            owned_process
+            for owned_process in owned_processes
+            if any(paths_match(mapping, owned_process.executable) for mapping in mappings)
+        ),
+        None,
+    )
+
+
+def _owned_producer_observation(
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> _OwnedProducerObservation:
+    owned_processes = _declared_owned_processes(profile)
+    patterns = {
+        owned_process.target_id: re.compile(owned_process.process_pattern)
+        for owned_process in owned_processes
+    }
+    result = runner.run(
+        [
+            "/usr/bin/env",
+            "LC_ALL=C",
+            "/bin/ps",
+            "-ww",
+            "-axo",
+            "pid=,pgid=,command=",
+        ],
+        timeout=5.0,
+    )
+    if result.error is not None or result.returncode != 0:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer process table could not be inspected",
+        )
+    process_ids: set[int] = set()
+    candidates: dict[str, OwnedProducerIdentity] = {}
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(maxsplit=2)
+        if len(fields) < 2:
+            continue
+        try:
+            pid = int(fields[0])
+            process_group = int(fields[1])
+        except ValueError:
+            continue
+        process_ids.add(pid)
+        if len(fields) != 3:
+            continue
+        command = fields[2]
+        pattern_matches = tuple(
+            owned_process
+            for owned_process in owned_processes
+            if patterns[owned_process.target_id].search(command)
+        )
+        if not pattern_matches:
+            continue
+        mapped_targets, mapping_error = _process_owned_target_mappings(
+            pid,
+            owned_processes,
+            runner,
+        )
+        if mapped_targets is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                mapping_error or "Owned process executable mapping is unavailable",
+                pid=pid,
+            )
+        exact_matches = tuple(
+            owned_process
+            for owned_process in mapped_targets
+            if owned_process in pattern_matches
+        )
+        if not exact_matches:
+            continue
+        if (
+            len(pattern_matches) > 1
+            or len(mapped_targets) > 1
+            or len(exact_matches) > 1
+        ):
+            raise ControlError(
+                "producer.identity_changed",
+                "One PID ambiguously matches multiple declared producer targets",
+                pid=pid,
+                targetIds=sorted(
+                    owned_process.target_id
+                    for owned_process in pattern_matches
+                    if owned_process.target_id is not None
+                ),
+            )
+        owned_process = exact_matches[0]
+        target_id = owned_process.target_id
+        assert target_id is not None
+        if target_id in candidates:
+            raise ControlError(
+                "producer.identity_changed",
+                "Multiple exact candidates were discovered for one producer target",
+                targetId=target_id,
+                pids=sorted((candidates[target_id].identity.pid, pid)),
+            )
+        started_at, start_error = process_start_time(pid, runner)
+        if started_at is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                start_error or "Producer process start time is unavailable",
+                pid=pid,
+            )
+        birth_token, birth_error = birth_token_reader(pid)
+        if birth_token is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                birth_error or "Producer process birth token is unavailable",
+                pid=pid,
+            )
+        pid_version, pid_version_error = pid_version_reader(pid)
+        if pid_version is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                pid_version_error or "Producer process PID version is unavailable",
+                pid=pid,
+            )
+        candidates[target_id] = OwnedProducerIdentity(
+            target_id,
+            ProducerIdentity(
+                pid,
+                birth_token,
+                pid_version,
+                started_at,
+                process_group,
+                command,
+                owned_process.executable,
+            ),
+        )
+    return _OwnedProducerObservation(
+        _ordered_owned_producer_identities(profile, tuple(candidates.values())),
+        frozenset(process_ids),
+    )
+
+
+def _owned_producer_candidates(
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> list[OwnedProducerIdentity]:
+    return list(
+        _owned_producer_observation(
+            profile,
+            runner,
+            birth_token_reader,
+            pid_version_reader,
+        ).identities
+    )
+
+
+def _inspect_owned_producer_observation(
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> _OwnedProducerObservation:
+    launcher_started = _process_start_datetime(launcher_started_at)
+    if launcher_started is None:
+        raise ControlError(
+            "producer.identity_unavailable",
+            "Producer launcher start time could not be parsed",
+        )
+    observation = _owned_producer_observation(
+        profile,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    )
+    for candidate in observation.identities:
+        identity = candidate.identity
+        candidate_started = _process_start_datetime(identity.started_at)
+        if candidate_started is None:
+            raise ControlError(
+                "producer.identity_unavailable",
+                "Producer process start time could not be parsed",
+                targetId=candidate.target_id,
+                pid=identity.pid,
+            )
+        if candidate_started < launcher_started:
+            raise ControlError(
+                "producer.identity_changed",
+                "Exact owned process predates the active launcher",
+                targetId=candidate.target_id,
+                pid=identity.pid,
+            )
+        if identity.process_group_id not in {
+            identity.pid,
+            launcher_process_group_id,
+        }:
+            raise ControlError(
+                "producer.identity_changed",
+                "Exact owned process is not in an admitted process group",
+                targetId=candidate.target_id,
+                pid=identity.pid,
+                processGroupId=identity.process_group_id,
+            )
+    return observation
+
+
+def _inspect_owned_producer_identities(
+    profile: ProfileStartAdmission,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+) -> tuple[OwnedProducerIdentity, ...]:
+    return _inspect_owned_producer_observation(
+        profile,
+        launcher_started_at,
+        launcher_process_group_id,
+        runner,
+        birth_token_reader,
+        pid_version_reader,
+    ).identities
+
+
+def _revalidate_owned_producer_identity(
+    expected: OwnedProducerIdentity,
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+    *,
+    error_code: str = "producer.quiesce_failed",
+) -> OwnedProducerIdentity:
+    owned_by_id = {
+        owned_process.target_id: owned_process
+        for owned_process in _declared_owned_processes(profile)
+    }
+    owned_process = owned_by_id.get(expected.target_id)
+    identity = expected.identity
+    if owned_process is None:
+        raise ControlError(
+            error_code,
+            "Recorded producer target is no longer declared",
+            targetId=expected.target_id,
+        )
+    birth_token, birth_error = birth_token_reader(identity.pid)
+    pid_version, pid_version_error = pid_version_reader(identity.pid)
+    started_at, start_error = process_start_time(identity.pid, runner)
+    current_group, group_error = process_group_id(identity.pid, runner)
+    command, command_error = process_command(identity.pid, runner)
+    exact_matches, executable_error = _process_owned_target_mappings(
+        identity.pid,
+        tuple(owned_by_id.values()),
+        runner,
+    )
+    confirmed_started_at, confirmed_start_error = process_start_time(identity.pid, runner)
+    confirmed_birth_token, confirmed_birth_error = birth_token_reader(identity.pid)
+    confirmed_pid_version, confirmed_pid_version_error = pid_version_reader(identity.pid)
+    if birth_token != identity.birth_token:
+        detail = birth_error or "Owned process birth token changed"
+    elif pid_version != identity.pid_version:
+        detail = pid_version_error or "Owned process PID version changed"
+    elif started_at != identity.started_at:
+        detail = start_error or "Owned process start time changed"
+    elif current_group != identity.process_group_id:
+        detail = group_error or "Owned process group changed"
+    elif command != identity.command:
+        detail = command_error or "Owned process command changed"
+    elif executable_error is not None:
+        detail = executable_error
+    elif exact_matches != (owned_process,):
+        detail = "Owned process executable mapping changed"
+    elif not paths_match(identity.executable, owned_process.executable):
+        detail = "Recorded owned process executable is not the declared target"
+    elif confirmed_started_at != identity.started_at:
+        detail = confirmed_start_error or "Owned process lifetime changed during validation"
+    elif confirmed_birth_token != identity.birth_token:
+        detail = confirmed_birth_error or "Owned process birth token changed during validation"
+    elif confirmed_pid_version != identity.pid_version:
+        detail = (
+            confirmed_pid_version_error
+            or "Owned process PID version changed during validation"
+        )
+    else:
+        detail = None
+    if detail is not None:
+        raise ControlError(
+            error_code,
+            detail,
+            targetId=expected.target_id,
+            pid=identity.pid,
+        )
+    assert confirmed_started_at is not None
+    assert confirmed_birth_token is not None
+    assert confirmed_pid_version is not None
+    assert current_group is not None
+    assert command is not None
+    return OwnedProducerIdentity(
+        expected.target_id,
+        ProducerIdentity(
+            identity.pid,
+            confirmed_birth_token,
+            confirmed_pid_version,
+            confirmed_started_at,
+            current_group,
+            command,
+            owned_process.executable,
+        ),
+    )
+
+
+def _confirm_owned_producer_observation(
+    observation: _OwnedProducerObservation,
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+    *,
+    error_code: str = "producer.identity_changed",
+) -> _OwnedProducerObservation:
+    confirmed = tuple(
+        _revalidate_owned_producer_identity(
+            identity,
+            profile,
+            runner,
+            birth_token_reader,
+            pid_version_reader,
+            error_code=error_code,
+        )
+        for identity in observation.identities
+    )
+    if confirmed != observation.identities:
+        raise ControlError(
+            error_code,
+            "Owned process collection changed during exact validation",
+        )
+    return _OwnedProducerObservation(confirmed, observation.process_ids)
+
+
+def _confirm_owned_producer_identities(
+    expected: Sequence[OwnedProducerIdentity],
+    profile: ProfileStartAdmission,
+    runner: CommandRunner,
+    birth_token_reader: Callable[[int], tuple[int | None, str | None]],
+    pid_version_reader: Callable[[int], tuple[int | None, str | None]],
+    *,
+    error_code: str = "producer.identity_changed",
+) -> tuple[OwnedProducerIdentity, ...]:
+    ordered = _ordered_owned_producer_identities(profile, expected)
+    return tuple(
+        _revalidate_owned_producer_identity(
+            identity,
+            profile,
+            runner,
+            birth_token_reader,
+            pid_version_reader,
+            error_code=error_code,
+        )
+        for identity in ordered
+    )
+
+
+def _owned_producer_handshake_intersection(
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    identities: Sequence[OwnedProducerIdentity],
+) -> tuple[OwnedProducerIdentity, ...]:
+    try:
+        payload = bridge_log.read_text(errors="replace")
+    except OSError:
+        return ()
+    handshake = re.compile(
+        "^native_source producer handshake accepted "
+        f"service={re.escape(service_label)} nonce={generation} "
+        f"bridge_pid={bridge_pid} producer_pid=([1-9][0-9]*) "
+        "producer_pidversion=([1-9][0-9]*) "
+        "producer_start_token=([1-9][0-9]*) source=[1-9][0-9]*x[1-9][0-9]*$",
+        re.MULTILINE,
+    )
+    self_tests = "native_source startup self-tests passed slots=3"
+    if payload.count(self_tests) != 1:
+        return ()
+    authenticated = {
+        (int(pid), int(pid_version), int(birth_token))
+        for pid, pid_version, birth_token in handshake.findall(payload)
+    }
+    return tuple(
+        identity
+        for identity in identities
+        if (
+            identity.identity.pid,
+            identity.identity.pid_version,
+            identity.identity.birth_token,
+        )
+        in authenticated
+    )
+
+
+def _owned_producer_markers_ready(
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    identities: Sequence[OwnedProducerIdentity],
+) -> tuple[OwnedProducerIdentity, ...]:
+    return _owned_producer_handshake_intersection(
+        bridge_log,
+        service_label,
+        generation,
+        bridge_pid,
+        identities,
+    )
+
+
+def _require_owned_producer_absence(
+    expected: OwnedProducerIdentity,
+    observation: _OwnedProducerObservation,
+    launcher_process_group_id: int,
+    group_live: Callable[[int], bool],
+    *,
+    error_code: str = "producer.identity_changed",
+) -> None:
+    if expected in observation.identities:
+        return
+    identity = expected.identity
+    if identity.pid in observation.process_ids:
+        raise ControlError(
+            error_code,
+            "Outgoing producer PID remains live without its exact identity",
+            targetId=expected.target_id,
+            pid=identity.pid,
+        )
+    if (
+        identity.process_group_id != launcher_process_group_id
+        and group_live(identity.process_group_id)
+    ):
+        raise ControlError(
+            error_code,
+            "Outgoing detached producer group remains live after its exact identity disappeared",
+            targetId=expected.target_id,
+            processGroupId=identity.process_group_id,
+        )
+
+
+def _merge_owned_producer_evidence(
+    profile: ProfileStartAdmission,
+    retained: Sequence[OwnedProducerIdentity],
+    authenticated: Sequence[OwnedProducerIdentity],
+    observation: _OwnedProducerObservation,
+    launcher_process_group_id: int,
+    group_live: Callable[[int], bool],
+    *,
+    error_code: str = "producer.identity_changed",
+) -> tuple[OwnedProducerIdentity, ...]:
+    retained_by_target = {identity.target_id: identity for identity in retained}
+    for identity in authenticated:
+        previous = retained_by_target.get(identity.target_id)
+        if previous is not None and previous != identity:
+            _require_owned_producer_absence(
+                previous,
+                observation,
+                launcher_process_group_id,
+                group_live,
+                error_code=error_code,
+            )
+        retained_by_target[identity.target_id] = identity
+    return _ordered_owned_producer_identities(
+        profile,
+        tuple(retained_by_target.values()),
+    )
+
+
+def _reconcile_owned_producer_transition(
+    profile: ProfileStartAdmission,
+    previous: _OwnedProducerTransition,
+    observation: _OwnedProducerObservation,
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    launcher_process_group_id: int,
+    now: float,
+    transition_timeout: float,
+    group_live: Callable[[int], bool],
+) -> _OwnedProducerTransition:
+    for identity in previous.live:
+        if identity not in observation.identities:
+            _require_owned_producer_absence(
+                identity,
+                observation,
+                launcher_process_group_id,
+                group_live,
+            )
+    authenticated = _owned_producer_handshake_intersection(
+        bridge_log,
+        service_label,
+        generation,
+        bridge_pid,
+        observation.identities,
+    )
+    retained = _merge_owned_producer_evidence(
+        profile,
+        previous.retained,
+        authenticated,
+        observation,
+        launcher_process_group_id,
+        group_live,
+    )
+    pending = (
+        len(observation.identities) != 1
+        or len(authenticated) != len(observation.identities)
+    )
+    transition_deadline = previous.deadline
+    if pending:
+        if transition_deadline is None:
+            transition_deadline = now + transition_timeout
+        if now >= transition_deadline:
+            raise ControlError(
+                "producer.transition_timeout",
+                "Declared producer targets did not complete one exact authenticated transition before the profile deadline",
+                liveTargetIds=[identity.target_id for identity in observation.identities],
+                authenticatedTargetIds=[identity.target_id for identity in authenticated],
+            )
+    else:
+        transition_deadline = None
+    return _OwnedProducerTransition(authenticated, retained, transition_deadline)
 
 
 def _inspect_producer_identity(
@@ -2271,6 +2944,265 @@ def _quiesce_producer(
             pids=sorted(candidate.pid for candidate in remaining),
         )
     return target
+
+
+def _quiesce_owned_producers(
+    process: ProducerProcess,
+    launcher_birth_token: int,
+    launcher_started_at: str,
+    launcher_process_group_id: int,
+    identities: Sequence[OwnedProducerIdentity],
+    profile: ProfileStartAdmission,
+    bridge_log: pathlib.Path,
+    service_label: str,
+    generation: int,
+    bridge_pid: int,
+    context: RuntimeContext,
+    monotonic: Callable[[], float],
+    group_id: Callable[[int], int],
+    group_signaler: Callable[[int, int], None],
+    group_live: Callable[[int], bool],
+    *,
+    transition_deadline: float | None = None,
+) -> tuple[OwnedProducerIdentity, ...]:
+    transition_timeout = float(
+        profile.installed.loaded.data["launch"]["transitionTimeoutSeconds"]
+    )
+    quiesce_deadline = monotonic() + max(
+        PRODUCER_QUIESCE_TIMEOUT_SECONDS,
+        transition_timeout + PRODUCER_QUIESCE_MARGIN_SECONDS,
+    )
+    quiesce_runner = DeadlineRunner(context.runner, quiesce_deadline, monotonic)
+    retained = _ordered_owned_producer_identities(profile, identities)
+    term_signaled: set[int] = set()
+    kill_signaled: set[int] = set()
+    absence_deadline = transition_deadline
+    absence_observed = False
+
+    def observe() -> _OwnedProducerObservation:
+        observation = _inspect_owned_producer_observation(
+            profile,
+            launcher_started_at,
+            launcher_process_group_id,
+            quiesce_runner,
+            context.birth_token_reader,
+            context.pid_version_reader,
+        )
+        return _confirm_owned_producer_observation(
+            observation,
+            profile,
+            quiesce_runner,
+            context.birth_token_reader,
+            context.pid_version_reader,
+            error_code="producer.quiesce_failed",
+        )
+
+    def launcher_is_live() -> bool:
+        if process.poll() is not None:
+            return False
+        current_birth_token, birth_error = context.birth_token_reader(process.pid)
+        current_started_at, start_error = process_start_time(process.pid, quiesce_runner)
+        try:
+            current_group_id = group_id(process.pid)
+        except OSError as error:
+            if process.poll() is not None:
+                return False
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Producer launcher process group could not be revalidated",
+                detail=str(error),
+            ) from error
+        if (
+            current_birth_token != launcher_birth_token
+            or current_started_at != launcher_started_at
+            or current_group_id != launcher_process_group_id
+        ):
+            raise ControlError(
+                "producer.quiesce_failed",
+                birth_error
+                or start_error
+                or "Producer launcher identity changed before stop",
+            )
+        return process.poll() is None
+
+    def signal_group(process_group: int, signal_number: int) -> None:
+        try:
+            group_signaler(process_group, signal_number)
+        except ProcessLookupError:
+            return
+        except OSError as error:
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Owned producer process group could not be signaled",
+                processGroupId=process_group,
+                signal=signal_number,
+                detail=str(error),
+            ) from error
+
+    def wait_for_groups(process_groups: set[int], duration: float) -> None:
+        deadline = min(monotonic() + duration, quiesce_deadline)
+        while monotonic() < deadline and any(
+            group_live(process_group) for process_group in process_groups
+        ):
+            context.sleeper(MONITOR_INTERVAL_SECONDS)
+
+    while monotonic() < quiesce_deadline:
+        observation = observe()
+        for identity in retained:
+            if identity not in observation.identities:
+                _require_owned_producer_absence(
+                    identity,
+                    observation,
+                    launcher_process_group_id,
+                    group_live,
+                    error_code="producer.quiesce_failed",
+                )
+        authenticated = _owned_producer_handshake_intersection(
+            bridge_log,
+            service_label,
+            generation,
+            bridge_pid,
+            observation.identities,
+        )
+        if len(authenticated) != len(observation.identities):
+            authenticated_set = set(authenticated)
+            unauthenticated = [
+                identity
+                for identity in observation.identities
+                if identity not in authenticated_set
+            ]
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Exact producer targets without a current authenticated handshake cannot be signaled",
+                targetIds=[identity.target_id for identity in unauthenticated],
+                pids=[identity.identity.pid for identity in unauthenticated],
+            )
+        retained = _merge_owned_producer_evidence(
+            profile,
+            retained,
+            authenticated,
+            observation,
+            launcher_process_group_id,
+            group_live,
+            error_code="producer.quiesce_failed",
+        )
+        launcher_live = launcher_is_live()
+        current_groups = {
+            identity.identity.process_group_id
+            for identity in authenticated
+            if group_live(identity.identity.process_group_id)
+        }
+        if launcher_live:
+            if not group_live(launcher_process_group_id):
+                raise ControlError(
+                    "producer.quiesce_failed",
+                    "Live producer launcher is missing from its exact process group",
+                    processGroupId=launcher_process_group_id,
+                )
+            current_groups.add(launcher_process_group_id)
+        elif (
+            group_live(launcher_process_group_id)
+            and launcher_process_group_id not in current_groups
+        ):
+            raise ControlError(
+                "producer.quiesce_failed",
+                "Producer launcher group remains live without an exact authenticated anchor",
+                processGroupId=launcher_process_group_id,
+            )
+        if not current_groups:
+            final_observation = observe()
+            final_authenticated = _owned_producer_handshake_intersection(
+                bridge_log,
+                service_label,
+                generation,
+                bridge_pid,
+                final_observation.identities,
+            )
+            if len(final_authenticated) != len(final_observation.identities):
+                raise ControlError(
+                    "producer.quiesce_failed",
+                    "A late exact producer target lacks an authenticated handshake",
+                    targetIds=[
+                        identity.target_id
+                        for identity in final_observation.identities
+                        if identity not in set(final_authenticated)
+                    ],
+                )
+            if final_observation.identities or launcher_is_live():
+                retained = _merge_owned_producer_evidence(
+                    profile,
+                    retained,
+                    final_authenticated,
+                    final_observation,
+                    launcher_process_group_id,
+                    group_live,
+                    error_code="producer.quiesce_failed",
+                )
+                continue
+            if group_live(launcher_process_group_id):
+                raise ControlError(
+                    "producer.quiesce_failed",
+                    "Owned launcher process group remained live after bounded stop",
+                    processGroupId=launcher_process_group_id,
+                )
+            now = monotonic()
+            if not absence_observed:
+                if absence_deadline is None:
+                    absence_deadline = now + transition_timeout
+                absence_deadline = min(
+                    max(absence_deadline, now + MONITOR_INTERVAL_SECONDS),
+                    quiesce_deadline,
+                )
+                absence_observed = True
+            assert absence_deadline is not None
+            if now < absence_deadline:
+                context.sleeper(
+                    min(MONITOR_INTERVAL_SECONDS, absence_deadline - now)
+                )
+                continue
+            return retained
+
+        new_term_groups = current_groups - term_signaled
+        if new_term_groups:
+            for process_group in sorted(new_term_groups):
+                signal_group(process_group, signal.SIGTERM)
+                term_signaled.add(process_group)
+            wait_for_groups(new_term_groups, PRODUCER_STOP_GRACE_SECONDS)
+            continue
+
+        new_kill_groups = {
+            process_group
+            for process_group in current_groups - kill_signaled
+            if group_live(process_group)
+        }
+        if new_kill_groups:
+            anchored_groups = {
+                identity.identity.process_group_id for identity in authenticated
+            }
+            if launcher_live:
+                anchored_groups.add(launcher_process_group_id)
+            unanchored = new_kill_groups - anchored_groups
+            if unanchored:
+                raise ControlError(
+                    "producer.quiesce_failed",
+                    "Owned producer group lost every exact anchor before escalation",
+                    processGroupIds=sorted(unanchored),
+                )
+            for process_group in sorted(new_kill_groups):
+                signal_group(process_group, signal.SIGKILL)
+                kill_signaled.add(process_group)
+            wait_for_groups(new_kill_groups, PRODUCER_KILL_WAIT_SECONDS)
+            continue
+
+        raise ControlError(
+            "producer.quiesce_failed",
+            "One or more exact owned producer groups remained live after bounded termination",
+            processGroupIds=sorted(current_groups),
+        )
+    raise ControlError(
+        "producer.quiesce_failed",
+        "Multi-target producer quiescence exceeded its bounded deadline",
+    )
 
 
 def _service_ready(
@@ -2911,6 +3843,8 @@ def supervise_runtime(
     launcher_started_at: str | None = None
     process_group_id: int | None = None
     producer_identity: ProducerIdentity | None = None
+    owned_producer_transition = _OwnedProducerTransition((), (), None)
+    multi_target_producer = False
     producer_state: dict[str, Any] | None = None
     client_monitor: ClientTelemetryMonitor | None = None
     published_client_state: str | None = None
@@ -2960,6 +3894,9 @@ def supervise_runtime(
                         else None
                     ),
                 )
+            multi_target_producer = len(
+                profile_admission.installed.owned_processes
+            ) > 1
             _remaining_timeout(deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
             host_deadline = min(deadline, monotonic() + STARTUP_TIMEOUT_SECONDS)
             startup_runner = DeadlineRunner(context.runner, host_deadline, monotonic)
@@ -2981,17 +3918,31 @@ def supervise_runtime(
                     "Runtime control state already exists; run stop before starting",
                     path=str(active_admission.paths.state_path),
                 )
-            existing_owned_processes = _owned_process_candidates(
-                profile_admission,
-                startup_runner,
-                context.birth_token_reader,
-                context.pid_version_reader,
-            )
-            if existing_owned_processes:
+            if multi_target_producer:
+                existing_owned_process_pids = [
+                    candidate.identity.pid
+                    for candidate in _owned_producer_candidates(
+                        profile_admission,
+                        startup_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
+                ]
+            else:
+                existing_owned_process_pids = [
+                    candidate.pid
+                    for candidate in _owned_process_candidates(
+                        profile_admission,
+                        startup_runner,
+                        context.birth_token_reader,
+                        context.pid_version_reader,
+                    )
+                ]
+            if existing_owned_process_pids:
                 raise ControlError(
                     "producer.already_running",
                     "An exact owned-process candidate was already live before launch",
-                    pids=sorted(candidate.pid for candidate in existing_owned_processes),
+                    pids=sorted(existing_owned_process_pids),
                 )
             _remaining_timeout(host_deadline, STARTUP_TIMEOUT_SECONDS, monotonic)
             _create_owner_lock(active_admission.paths, run_dir)
@@ -3062,10 +4013,16 @@ def supervise_runtime(
                         "Ready launchd service has no live PID",
                     )
                 producer_log = run_dir / PRODUCER_LOG_NAME
-                producer_state = _launching_producer_record(
-                    profile_admission,
-                    producer_log,
-                )
+                if multi_target_producer:
+                    producer_state = _launching_owned_producer_record(
+                        profile_admission,
+                        producer_log,
+                    )
+                else:
+                    producer_state = _launching_producer_record(
+                        profile_admission,
+                        producer_log,
+                    )
                 launching_payload = _state_payload(
                     active_admission,
                     run_dir,
@@ -3123,16 +4080,28 @@ def supervise_runtime(
                         pid=producer_process.pid,
                         processGroupId=process_group_id,
                     )
-                producer_state = _producer_record(
-                    profile_admission,
-                    "starting",
-                    producer_process.pid,
-                    launcher_birth_token,
-                    launcher_started_at,
-                    process_group_id,
-                    producer_log,
-                    None,
-                )
+                if multi_target_producer:
+                    producer_state = _owned_producer_record(
+                        profile_admission,
+                        "starting",
+                        producer_process.pid,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_log,
+                        (),
+                    )
+                else:
+                    producer_state = _producer_record(
+                        profile_admission,
+                        "starting",
+                        producer_process.pid,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_log,
+                        None,
+                    )
                 starting_payload = _state_payload(
                     active_admission,
                     run_dir,
@@ -3153,36 +4122,72 @@ def supervise_runtime(
                 producer_quiesced = False
 
                 def quiesce_and_publish() -> None:
+                    nonlocal owned_producer_transition
                     nonlocal producer_identity, producer_quiesced, producer_state
                     if not producer_quiesced:
-                        producer_identity = _quiesce_producer(
-                            producer_process,
+                        if multi_target_producer:
+                            retained = _quiesce_owned_producers(
+                                producer_process,
+                                launcher_birth_token,
+                                launcher_started_at,
+                                process_group_id,
+                                owned_producer_transition.retained,
+                                profile_admission,
+                                bridge_log,
+                                active_admission.paths.service_label,
+                                generation,
+                                bridge_pid,
+                                context,
+                                monotonic,
+                                group_id,
+                                group_signaler,
+                                group_live,
+                                transition_deadline=owned_producer_transition.deadline,
+                            )
+                            owned_producer_transition = _OwnedProducerTransition(
+                                (), retained, None
+                            )
+                        else:
+                            producer_identity = _quiesce_producer(
+                                producer_process,
+                                launcher_birth_token,
+                                launcher_started_at,
+                                process_group_id,
+                                producer_identity,
+                                profile_admission,
+                                bridge_log,
+                                active_admission.paths.service_label,
+                                generation,
+                                bridge_pid,
+                                context,
+                                monotonic,
+                                group_id,
+                                group_signaler,
+                                group_live,
+                            )
+                        producer_quiesced = True
+                    if multi_target_producer:
+                        producer_state = _owned_producer_record(
+                            profile_admission,
+                            "quiesced",
+                            producer_process.pid,
                             launcher_birth_token,
                             launcher_started_at,
                             process_group_id,
-                            producer_identity,
-                            profile_admission,
-                            bridge_log,
-                            active_admission.paths.service_label,
-                            generation,
-                            bridge_pid,
-                            context,
-                            monotonic,
-                            group_id,
-                            group_signaler,
-                            group_live,
+                            producer_log,
+                            owned_producer_transition.retained,
                         )
-                        producer_quiesced = True
-                    producer_state = _producer_record(
-                        profile_admission,
-                        "quiesced",
-                        producer_process.pid,
-                        launcher_birth_token,
-                        launcher_started_at,
-                        process_group_id,
-                        producer_log,
-                        producer_identity,
-                    )
+                    else:
+                        producer_state = _producer_record(
+                            profile_admission,
+                            "quiesced",
+                            producer_process.pid,
+                            launcher_birth_token,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_log,
+                            producer_identity,
+                        )
                     quiesced_payload = _state_payload(
                         active_admission,
                         run_dir,
@@ -3209,6 +4214,11 @@ def supervise_runtime(
 
                 stop_requested = False
                 provisional_identity: ProducerIdentity | None = None
+                producer_transition_timeout = float(
+                    profile_admission.installed.loaded.data["launch"][
+                        "transitionTimeoutSeconds"
+                    ]
+                )
                 producer_deadline = min(
                     deadline,
                     monotonic()
@@ -3223,6 +4233,53 @@ def supervise_runtime(
                     producer_deadline,
                     monotonic,
                 )
+
+                def await_multi_target_ready() -> None:
+                    nonlocal owned_producer_transition
+                    while monotonic() < producer_deadline:
+                        if producer_process.poll() is not None:
+                            raise ControlError(
+                                "producer.exited",
+                                "CrossOver producer exited before authenticated readiness",
+                            )
+                        observation = _inspect_owned_producer_observation(
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        observation = _confirm_owned_producer_observation(
+                            observation,
+                            profile_admission,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        owned_producer_transition = (
+                            _reconcile_owned_producer_transition(
+                                profile_admission,
+                                owned_producer_transition,
+                                observation,
+                                bridge_log,
+                                active_admission.paths.service_label,
+                                generation,
+                                bridge_pid,
+                                process_group_id,
+                                monotonic(),
+                                producer_transition_timeout,
+                                group_live,
+                            )
+                        )
+                        if owned_producer_transition.live:
+                            return
+                        context.sleeper(MONITOR_INTERVAL_SECONDS)
+                    raise ControlError(
+                        "producer.start_timeout",
+                        "No authenticated declared producer target stabilized before the startup deadline",
+                    )
+
                 while monotonic() < producer_deadline:
                     if (
                         _receive_control_request(
@@ -3239,6 +4296,61 @@ def supervise_runtime(
                             "producer.exited",
                             "CrossOver producer exited before authenticated readiness",
                         )
+                    if multi_target_producer:
+                        try:
+                            observation = _inspect_owned_producer_observation(
+                                profile_admission,
+                                launcher_started_at,
+                                process_group_id,
+                                producer_runner,
+                                context.birth_token_reader,
+                                context.pid_version_reader,
+                            )
+                            observation = _confirm_owned_producer_observation(
+                                observation,
+                                profile_admission,
+                                producer_runner,
+                                context.birth_token_reader,
+                                context.pid_version_reader,
+                            )
+                        except ControlError as error:
+                            if (
+                                error.code == "producer.identity_unavailable"
+                                and monotonic() >= producer_deadline
+                            ):
+                                break
+                            raise
+                        authenticated = _owned_producer_handshake_intersection(
+                            bridge_log,
+                            active_admission.paths.service_label,
+                            generation,
+                            bridge_pid,
+                            observation.identities,
+                        )
+                        if not authenticated:
+                            continue
+                        retained = _merge_owned_producer_evidence(
+                            profile_admission,
+                            (),
+                            authenticated,
+                            observation,
+                            process_group_id,
+                            group_live,
+                        )
+                        transition_pending = (
+                            len(observation.identities) != 1
+                            or len(authenticated) != len(observation.identities)
+                        )
+                        owned_producer_transition = _OwnedProducerTransition(
+                            authenticated,
+                            retained,
+                            (
+                                monotonic() + producer_transition_timeout
+                                if transition_pending
+                                else None
+                            ),
+                        )
+                        break
                     try:
                         observed = _inspect_producer_identity(
                             profile_admission,
@@ -3301,7 +4413,12 @@ def supervise_runtime(
                         )
                         break
                 if not stop_requested:
-                    if producer_identity is None:
+                    if (
+                        multi_target_producer
+                        and not owned_producer_transition.live
+                    ) or (
+                        not multi_target_producer and producer_identity is None
+                    ):
                         raise ControlError(
                             "producer.start_timeout",
                             "Exact producer and authenticated bridge readiness did not complete before the profile deadline",
@@ -3320,25 +4437,39 @@ def supervise_runtime(
                         starting_payload["bridgeExecutableSha256"],
                         producer_runner,
                     )
-                    producer_identity = _confirm_producer_identity(
-                        producer_identity,
-                        profile_admission,
-                        launcher_started_at,
-                        process_group_id,
-                        producer_runner,
-                        context.birth_token_reader,
-                        context.pid_version_reader,
-                    )
-                    producer_state = _producer_record(
-                        profile_admission,
-                        "ready",
-                        producer_process.pid,
-                        launcher_birth_token,
-                        launcher_started_at,
-                        process_group_id,
-                        producer_log,
-                        producer_identity,
-                    )
+                    if multi_target_producer:
+                        await_multi_target_ready()
+                        producer_state = _owned_producer_record(
+                            profile_admission,
+                            "ready",
+                            producer_process.pid,
+                            launcher_birth_token,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_log,
+                            owned_producer_transition.live,
+                        )
+                    else:
+                        assert producer_identity is not None
+                        producer_identity = _confirm_producer_identity(
+                            producer_identity,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
+                        producer_state = _producer_record(
+                            profile_admission,
+                            "ready",
+                            producer_process.pid,
+                            launcher_birth_token,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_log,
+                            producer_identity,
+                        )
                     client_monitor = ClientTelemetryMonitor(generation, bridge_pid)
                     telemetry_deadline = min(
                         deadline,
@@ -3354,6 +4485,18 @@ def supervise_runtime(
                     next_client_snapshot = (
                         monotonic() + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
                     )
+                    if multi_target_producer:
+                        await_multi_target_ready()
+                        producer_state = _owned_producer_record(
+                            profile_admission,
+                            "ready",
+                            producer_process.pid,
+                            launcher_birth_token,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_log,
+                            owned_producer_transition.live,
+                        )
                     live_payload = _state_payload(
                         active_admission,
                         run_dir,
@@ -3380,15 +4523,135 @@ def supervise_runtime(
                         starting_payload["bridgeExecutableSha256"],
                         producer_runner,
                     )
-                    producer_identity = _confirm_producer_identity(
-                        producer_identity,
-                        profile_admission,
-                        launcher_started_at,
-                        process_group_id,
-                        producer_runner,
-                        context.birth_token_reader,
-                        context.pid_version_reader,
-                    )
+                    if multi_target_producer:
+                        while True:
+                            confirmation_observation = (
+                                _inspect_owned_producer_observation(
+                                    profile_admission,
+                                    launcher_started_at,
+                                    process_group_id,
+                                    producer_runner,
+                                    context.birth_token_reader,
+                                    context.pid_version_reader,
+                                )
+                            )
+                            confirmation_observation = (
+                                _confirm_owned_producer_observation(
+                                    confirmation_observation,
+                                    profile_admission,
+                                    producer_runner,
+                                    context.birth_token_reader,
+                                    context.pid_version_reader,
+                                )
+                            )
+                            confirmed_transition = (
+                                _reconcile_owned_producer_transition(
+                                    profile_admission,
+                                    owned_producer_transition,
+                                    confirmation_observation,
+                                    bridge_log,
+                                    active_admission.paths.service_label,
+                                    generation,
+                                    bridge_pid,
+                                    process_group_id,
+                                    monotonic(),
+                                    producer_transition_timeout,
+                                    group_live,
+                                )
+                            )
+                            if (
+                                confirmed_transition.live
+                                == owned_producer_transition.live
+                            ):
+                                owned_producer_transition = confirmed_transition
+                                break
+                            owned_producer_transition = confirmed_transition
+                            if not owned_producer_transition.live:
+                                producer_state = _owned_producer_record(
+                                    profile_admission,
+                                    "starting",
+                                    producer_process.pid,
+                                    launcher_birth_token,
+                                    launcher_started_at,
+                                    process_group_id,
+                                    producer_log,
+                                    (),
+                                )
+                                transition_payload = _state_payload(
+                                    active_admission,
+                                    run_dir,
+                                    generation,
+                                    service,
+                                    owner_started_at,
+                                    control_socket,
+                                    plist_sha256,
+                                    "idle",
+                                    "starting-producer-transition",
+                                    producer_state,
+                                )
+                                _write_json_atomic(
+                                    active_admission.paths.state_root,
+                                    active_admission.paths.state_path,
+                                    transition_payload,
+                                )
+                                await_multi_target_ready()
+                            producer_state = _owned_producer_record(
+                                profile_admission,
+                                "ready",
+                                producer_process.pid,
+                                launcher_birth_token,
+                                launcher_started_at,
+                                process_group_id,
+                                producer_log,
+                                owned_producer_transition.live,
+                            )
+                            assert client_monitor is not None
+                            published_client_state, published_client_record = (
+                                client_monitor.observe(
+                                    telemetry_reader(),
+                                    monotonic(),
+                                )
+                            )
+                            corrected_payload = _state_payload(
+                                active_admission,
+                                run_dir,
+                                generation,
+                                service,
+                                owner_started_at,
+                                control_socket,
+                                plist_sha256,
+                                published_client_state,
+                                CLIENT_STATE_PHASES[published_client_state],
+                                producer_state,
+                                published_client_record,
+                            )
+                            _write_json_atomic(
+                                active_admission.paths.state_root,
+                                active_admission.paths.state_path,
+                                corrected_payload,
+                            )
+                            next_client_snapshot = (
+                                monotonic() + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
+                            )
+                            service = _revalidate_waiting_service(
+                                active_admission,
+                                bridge_pid,
+                                service_runs,
+                                plist_sha256,
+                                starting_payload["bridgeExecutableSha256"],
+                                producer_runner,
+                            )
+                    else:
+                        assert producer_identity is not None
+                        producer_identity = _confirm_producer_identity(
+                            producer_identity,
+                            profile_admission,
+                            launcher_started_at,
+                            process_group_id,
+                            producer_runner,
+                            context.birth_token_reader,
+                            context.pid_version_reader,
+                        )
                     report = StartReport(
                         True,
                         published_client_state,
@@ -3421,6 +4684,7 @@ def supervise_runtime(
                     if not stop_requested and now < next_status_check:
                         continue
                     next_status_check = now + SERVICE_STATUS_INTERVAL_SECONDS
+                    producer_state_changed = False
                     if not producer_quiesced:
                         if producer_process.poll() is not None:
                             failure = start_failure(
@@ -3437,17 +4701,69 @@ def supervise_runtime(
                             )
                             _write_supervisor_exit(run_dir, failure)
                             return failure
+                        current_producer = producer_identity
                         try:
-                            assert producer_identity is not None
-                            current_producer = _confirm_producer_identity(
-                                producer_identity,
-                                profile_admission,
-                                launcher_started_at,
-                                process_group_id,
-                                context.runner,
-                                context.birth_token_reader,
-                                context.pid_version_reader,
-                            )
+                            if multi_target_producer:
+                                observation = _inspect_owned_producer_observation(
+                                    profile_admission,
+                                    launcher_started_at,
+                                    process_group_id,
+                                    context.runner,
+                                    context.birth_token_reader,
+                                    context.pid_version_reader,
+                                )
+                                observation = _confirm_owned_producer_observation(
+                                    observation,
+                                    profile_admission,
+                                    context.runner,
+                                    context.birth_token_reader,
+                                    context.pid_version_reader,
+                                )
+                                next_transition = (
+                                    _reconcile_owned_producer_transition(
+                                        profile_admission,
+                                        owned_producer_transition,
+                                        observation,
+                                        bridge_log,
+                                        active_admission.paths.service_label,
+                                        generation,
+                                        bridge_pid,
+                                        process_group_id,
+                                        now,
+                                        producer_transition_timeout,
+                                        group_live,
+                                    )
+                                )
+                                next_producer_state = _owned_producer_record(
+                                    profile_admission,
+                                    (
+                                        "ready"
+                                        if next_transition.live
+                                        else "starting"
+                                    ),
+                                    producer_process.pid,
+                                    launcher_birth_token,
+                                    launcher_started_at,
+                                    process_group_id,
+                                    producer_log,
+                                    next_transition.live,
+                                )
+                                producer_state_changed = (
+                                    next_producer_state != producer_state
+                                )
+                                owned_producer_transition = next_transition
+                                producer_state = next_producer_state
+                            else:
+                                assert producer_identity is not None
+                                current_producer = _confirm_producer_identity(
+                                    producer_identity,
+                                    profile_admission,
+                                    launcher_started_at,
+                                    process_group_id,
+                                    context.runner,
+                                    context.birth_token_reader,
+                                    context.pid_version_reader,
+                                )
                         except ControlError as error:
                             failure = start_failure(
                                 error.code,
@@ -3463,7 +4779,10 @@ def supervise_runtime(
                             )
                             _write_supervisor_exit(run_dir, failure)
                             return failure
-                        if current_producer != producer_identity:
+                        if (
+                            not multi_target_producer
+                            and current_producer != producer_identity
+                        ):
                             failure = start_failure(
                                 "producer.identity_changed",
                                 "Owned producer identity changed after startup",
@@ -3595,58 +4914,85 @@ def supervise_runtime(
                         )
                         _write_supervisor_exit(run_dir, failure)
                         return failure
-                    assert client_monitor is not None
-                    assert published_client_state is not None
-                    assert published_client_record is not None
-                    try:
-                        observed_client_state, observed_client_record = client_monitor.observe(
-                            telemetry_reader(),
-                            now,
-                        )
-                    except ControlError as error:
-                        failure = start_failure(
-                            error.code,
-                            error.message,
-                            artifact=active_admission.artifact,
-                            generation=generation,
-                            owner_pid=os.getpid(),
-                            run_dir=run_dir,
-                            supervisor_log=supervisor_log,
-                            actions=actions,
-                            profile=_profile_record(profile_admission),
-                            producer=producer_state,
-                        )
-                        _write_supervisor_exit(run_dir, failure)
-                        return failure
-                    if (
-                        observed_client_state != published_client_state
-                        or observed_client_record["streamEpoch"]
-                        != published_client_record["streamEpoch"]
-                        or now >= next_client_snapshot
-                    ):
-                        client_payload = _state_payload(
-                            active_admission,
-                            run_dir,
-                            generation,
-                            service,
-                            owner_started_at,
-                            control_socket,
-                            plist_sha256,
-                            observed_client_state,
-                            CLIENT_STATE_PHASES[observed_client_state],
-                            producer_state,
-                            observed_client_record,
-                        )
-                        _write_json_atomic(
-                            active_admission.paths.state_root,
-                            active_admission.paths.state_path,
-                            client_payload,
-                        )
-                        published_client_state = observed_client_state
-                        published_client_record = observed_client_record
-                        next_client_snapshot = (
-                            now + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
-                        )
+                    producer_ready = (
+                        not multi_target_producer
+                        or producer_state.get("status") == "ready"
+                    )
+                    if not producer_ready:
+                        if producer_state_changed:
+                            transition_payload = _state_payload(
+                                active_admission,
+                                run_dir,
+                                generation,
+                                service,
+                                owner_started_at,
+                                control_socket,
+                                plist_sha256,
+                                "idle",
+                                "starting-producer-transition",
+                                producer_state,
+                            )
+                            _write_json_atomic(
+                                active_admission.paths.state_root,
+                                active_admission.paths.state_path,
+                                transition_payload,
+                            )
+                    else:
+                        assert client_monitor is not None
+                        assert published_client_state is not None
+                        assert published_client_record is not None
+                        try:
+                            observed_client_state, observed_client_record = (
+                                client_monitor.observe(
+                                    telemetry_reader(),
+                                    now,
+                                )
+                            )
+                        except ControlError as error:
+                            failure = start_failure(
+                                error.code,
+                                error.message,
+                                artifact=active_admission.artifact,
+                                generation=generation,
+                                owner_pid=os.getpid(),
+                                run_dir=run_dir,
+                                supervisor_log=supervisor_log,
+                                actions=actions,
+                                profile=_profile_record(profile_admission),
+                                producer=producer_state,
+                            )
+                            _write_supervisor_exit(run_dir, failure)
+                            return failure
+                        if (
+                            producer_state_changed
+                            or observed_client_state != published_client_state
+                            or observed_client_record["streamEpoch"]
+                            != published_client_record["streamEpoch"]
+                            or now >= next_client_snapshot
+                        ):
+                            client_payload = _state_payload(
+                                active_admission,
+                                run_dir,
+                                generation,
+                                service,
+                                owner_started_at,
+                                control_socket,
+                                plist_sha256,
+                                observed_client_state,
+                                CLIENT_STATE_PHASES[observed_client_state],
+                                producer_state,
+                                observed_client_record,
+                            )
+                            _write_json_atomic(
+                                active_admission.paths.state_root,
+                                active_admission.paths.state_path,
+                                client_payload,
+                            )
+                            published_client_state = observed_client_state
+                            published_client_record = observed_client_record
+                            next_client_snapshot = (
+                                now + CLIENT_STATE_SNAPSHOT_INTERVAL_SECONDS
+                            )
                     if now < next_identity_check:
                         continue
                     next_identity_check = now + SERVICE_IDENTITY_INTERVAL_SECONDS
@@ -3711,23 +5057,43 @@ def supervise_runtime(
             and admission.profile is not None
         ):
             try:
-                _quiesce_producer(
-                    producer_process,
-                    launcher_birth_token,
-                    launcher_started_at,
-                    process_group_id,
-                    producer_identity,
-                    admission.profile,
-                    run_dir / BRIDGE_LOG_NAME,
-                    admission.paths.service_label,
-                    generation,
-                    bridge_pid,
-                    context,
-                    monotonic,
-                    group_id,
-                    group_signaler,
-                    group_live,
-                )
+                if multi_target_producer:
+                    _quiesce_owned_producers(
+                        producer_process,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        owned_producer_transition.retained,
+                        admission.profile,
+                        run_dir / BRIDGE_LOG_NAME,
+                        admission.paths.service_label,
+                        generation,
+                        bridge_pid,
+                        context,
+                        monotonic,
+                        group_id,
+                        group_signaler,
+                        group_live,
+                        transition_deadline=owned_producer_transition.deadline,
+                    )
+                else:
+                    _quiesce_producer(
+                        producer_process,
+                        launcher_birth_token,
+                        launcher_started_at,
+                        process_group_id,
+                        producer_identity,
+                        admission.profile,
+                        run_dir / BRIDGE_LOG_NAME,
+                        admission.paths.service_label,
+                        generation,
+                        bridge_pid,
+                        context,
+                        monotonic,
+                        group_id,
+                        group_signaler,
+                        group_live,
+                    )
             except (ControlError, OSError) as cleanup_error:
                 cleanup_failures.append(str(cleanup_error))
             else:

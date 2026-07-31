@@ -1840,6 +1840,48 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(self.paths.lock_path.exists())
         self.assertTrue(run_dir.exists())
 
+    def test_dead_schema_six_owner_matches_pattern_without_executable_basename(
+        self,
+    ) -> None:
+        self.create_bridge()
+        self.create_plist()
+        run_dir = self.paths.state_root / "r-0000000000000001"
+        run_dir.mkdir(parents=True)
+        self.create_lock("2000", run_dir=str(run_dir))
+        record = self.create_state(
+            state="waiting",
+            owner_pid=2000,
+            schema_version=6,
+            run_dir=run_dir,
+            producer_live=False,
+        )
+        producer = record["producer"]
+        assert isinstance(producer, dict)
+        expected = producer["expectedOwnedProcesses"]
+        assert isinstance(expected, list)
+        robot = expected[2]
+        assert isinstance(robot, dict)
+        executable_value = robot["executable"]
+        assert isinstance(executable_value, str)
+        executable = pathlib.Path(executable_value)
+        robot["processPattern"] = "RobotRepair"
+        self.paths.state_path.write_text(json.dumps(record))
+        self.runner.processes[7004] = {
+            "birthToken": 7004001,
+            "pidVersion": 404,
+            "startedAt": "Sat Jul 18 03:00:04 2026",
+            "pgid": 7004,
+            "command": "RobotRepair transition host",
+            "executable": executable,
+        }
+        self.set_service()
+        stopped = stop_runtime(self.context)
+        self.assertFalse(stopped.ok)
+        self.assertEqual(stopped.reason_code, "producer.orphaned")
+        self.assertTrue(self.paths.state_path.exists())
+        self.assertTrue(self.paths.lock_path.exists())
+        self.assertTrue(run_dir.exists())
+
     def test_dead_schema_six_owner_ignores_pattern_only_foreign_process(self) -> None:
         self.create_bridge()
         self.create_plist()

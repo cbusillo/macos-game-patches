@@ -137,10 +137,16 @@ machinery only when a fixture demonstrates a real gap.
 Each slice must remain reviewable and leave production start fail-closed until
 its complete authority chain is present.
 
-As of July 31, 2026, slices 1 and 2 are complete in hardware-free fixtures.
-Schema v6 is admitted by state inspection, status, dead-owner cleanup, and
-cooperative stop, but production start still publishes schema v5 and rejects
-The Lab until the supervisor and installation slices are complete.
+As of July 31, 2026, slices 1 through 3 are complete in hardware-free fixtures.
+Schema v6 is admitted by state inspection, status, dead-owner cleanup,
+cooperative stop, and the additive multi-target supervisor lane selected only
+when a resolved profile owns more than one target. Discovery uses one process
+snapshot per collection observation and exact executable mappings; transitions
+publish only current authenticated identities and share one non-resetting
+deadline; quiescence validates every target before deduplicating and signaling
+groups. All 68 start and 67 control fixtures pass. Singleton profiles retain
+schema-v5 behavior, and production admission still rejects The Lab until the
+profile-aware installation slice lands.
 
 ## Hardware-Free Fixture Matrix
 
