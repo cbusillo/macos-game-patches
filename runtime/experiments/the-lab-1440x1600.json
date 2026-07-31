@@ -1,0 +1,193 @@
+{
+  "controller": {
+    "gameplayChecks": [
+      "complete a Robot Repair interaction",
+      "interact in Secret Shop",
+      "select a hub destination"
+    ],
+    "profile": "PSVR2Sense",
+    "requiredInputs": [
+      "button",
+      "grip",
+      "pose",
+      "thumbstick",
+      "trigger"
+    ],
+    "trackedRoles": [
+      "left",
+      "right"
+    ]
+  },
+  "geometry": {
+    "adaptiveViewport": {
+      "enabled": false,
+      "fillRateStepPercent": 0,
+      "maximumDimension": 1800,
+      "maximumScale": 1.0,
+      "minimumScale": 1.0
+    },
+    "allowedStereoTransitions": [],
+    "eyeMappings": [
+      "separate-textures",
+      "side-by-side-left-first"
+    ],
+    "maximumStereo": {
+      "height": 1800,
+      "width": 3240
+    },
+    "recommendedPerEye": {
+      "height": 1600,
+      "width": 1440
+    },
+    "sourceMode": "fixed-with-transitions",
+    "targetStereo": {
+      "height": 1792,
+      "width": 2880
+    }
+  },
+  "id": "the-lab-1440x1600",
+  "launch": {
+    "arguments": [
+      "-popupwindow",
+      "-hub",
+      "-noaq",
+      "-msaa",
+      "2"
+    ],
+    "entrypointTarget": "hub",
+    "environment": {
+      "ALVR_FAKE_RENDER_TARGET_HEIGHT": "1600",
+      "ALVR_FAKE_RENDER_TARGET_WIDTH": "1440"
+    },
+    "installRoot": "${STEAM_BOTTLE}/drive_c/Program Files (x86)/Steam/steamapps/common/The Lab",
+    "ownedProcess": null,
+    "processPattern": "([T]heLab\\.exe|[S]ecretShop\\.exe|RobotRepair.*[v]r\\.exe)",
+    "startupTimeoutSeconds": 180,
+    "transitionTimeoutSeconds": 600
+  },
+  "name": "The Lab 1440x1600 Experiment",
+  "runtime": {
+    "graphicsApi": "d3d11",
+    "openvrRuntime": "custom-openvr-sidecar",
+    "targets": [
+      {
+        "executable": "TheLab/win64/TheLab.exe",
+        "graphicsDirectory": "TheLab/win64",
+        "id": "hub",
+        "openvrDirectory": "TheLab/win64/TheLab_Data/Plugins/x86_64",
+        "processPattern": "[T]heLab\\.exe",
+        "role": "hub",
+        "stockOpenvrSha256": "bd7a7958bdb647096e5e22cb4d020dd99720983f3af1cd500e8b570cfa9f017b",
+        "workingDirectory": "TheLab/win64"
+      },
+      {
+        "executable": "SecretShop/win64/SecretShop.exe",
+        "graphicsDirectory": "SecretShop/win64",
+        "id": "secret-shop",
+        "openvrDirectory": "SecretShop/win64/SecretShop_Data/Plugins",
+        "processPattern": "[S]ecretShop\\.exe",
+        "role": "experience",
+        "stockOpenvrSha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c",
+        "workingDirectory": "SecretShop/win64"
+      },
+      {
+        "executable": "RobotRepair/bin/win64/vr.exe",
+        "graphicsDirectory": "RobotRepair/bin/win64",
+        "id": "robot-repair",
+        "openvrDirectory": "RobotRepair/bin/win64",
+        "processPattern": "RobotRepair.*[v]r\\.exe",
+        "role": "experience",
+        "stockOpenvrSha256": "103f7759a07fe95ef9d0456f39081e303983ab714b4ab9eecf048967f082aa79",
+        "workingDirectory": "RobotRepair/bin/win64"
+      }
+    ]
+  },
+  "schemaVersion": 1,
+  "source": {
+    "appId": "450390",
+    "buildId": "7242747",
+    "depots": [
+      {
+        "id": "450391",
+        "manifest": "7552577434957620257",
+        "sizeBytes": 16625763869
+      }
+    ],
+    "installedSizeBytes": 16625763869,
+    "officialUnmodified": true,
+    "payload": {
+      "criticalFiles": [
+        {
+          "path": "TheLab/win64/TheLab.exe",
+          "sha256": "b3f408caf2ccffc10690861afd95463fe75e2db624a7ec374274dd38aed45515"
+        },
+        {
+          "path": "TheLab/win64/UnityPlayer.dll",
+          "sha256": "3fed850aa942145ac786369b25590ababa2afd58ee9718ff086c3be3ae67ca81"
+        },
+        {
+          "path": "TheLab/win64/TheLab_Data/Plugins/x86_64/openvr_api.dll",
+          "sha256": "bd7a7958bdb647096e5e22cb4d020dd99720983f3af1cd500e8b570cfa9f017b"
+        },
+        {
+          "path": "SecretShop/win64/SecretShop.exe",
+          "sha256": "989cc0a5a414c5c6317495b3d6f9d3499fb3387b6c8d4602e808ebf9a077604b"
+        },
+        {
+          "path": "SecretShop/win64/SecretShop_Data/Plugins/openvr_api.dll",
+          "sha256": "d793e2a76a61296dc5bce5e6b8dc32f4f3096743aba10c5bac2eb465e635850c"
+        },
+        {
+          "path": "RobotRepair/bin/win64/vr.exe",
+          "sha256": "1214786c66dbda7cd139817ea4e45a3f55ce0d0eb42fcf4c13036f1c210f1ea5"
+        },
+        {
+          "path": "RobotRepair/bin/win64/openvr_api.dll",
+          "sha256": "103f7759a07fe95ef9d0456f39081e303983ab714b4ab9eecf048967f082aa79"
+        },
+        {
+          "path": "RobotRepair/bin/win64/rendersystemdx11.dll",
+          "sha256": "0b8b2c14864896d668de883a0f88a048f58255c0390051eb8976aa9e51147a68"
+        },
+        {
+          "path": "RobotRepair/bin/win64/rendersystemvulkan.dll",
+          "sha256": "519bc3e7347d26645f73e27fcb29ef272c2bb8fe75ca27f1b861be69d75d3a0f"
+        }
+      ],
+      "fileCount": 1665,
+      "treeSha256": "26a731b4cdf532724df23eab23eaf863361b3698438cab981d68be3950d75011"
+    },
+    "provider": "steam"
+  },
+  "validation": {
+    "cadence": {
+      "maximumFps": 90.5,
+      "minimumFps": 89.5,
+      "targetFps": 90.0
+    },
+    "cleanup": {
+      "requireNoOwnedState": true,
+      "requireStockHashes": true
+    },
+    "drops": {
+      "native": 0,
+      "producer": 0
+    },
+    "frameCounts": {
+      "disconnected": 5400,
+      "physical": 81000,
+      "smoke": 300
+    },
+    "human": {
+      "clearAndSmooth": true
+    },
+    "pose": {
+      "exactPairing": true,
+      "maximumGenerationGaps": 0
+    },
+    "recovery": {
+      "clientRelaunch": true,
+      "headsetReentry": true
+    }
+  }
+}
