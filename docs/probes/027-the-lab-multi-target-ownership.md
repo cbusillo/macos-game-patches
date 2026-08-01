@@ -254,6 +254,23 @@ foreign cleanup records, and any installed-layout mismatch. A fixture produces
 the state through a real guarded file replacement and simulated post-commit
 cleanup crash rather than hand-authoring journal JSON.
 
+Source commit `0dc9ddf95d190f82d73c7e3deea7b9437a58155f` produced two
+independent dev14 builds with shared unsealed seal
+`5caffea7e69b608345630d9ea85816abee5726371a3f76474abe32d29e66a2e9`.
+Preserved-bundle sealing produced verified artifact
+`03cbbf52e090660c2a32686ab4d322fadd07c8a99091ca7e7cf6601491161763`
+with Developer ID CDHash `1731a67fa327ca7c1576f63a084cc3b39f095b41`
+unchanged. All 18 doctor checks and the 15 profile, 75 start, 67 control, 30
+install, 31 transaction, and 2 cleanup fixtures pass.
+
+No dev14 live or disconnected claim is made yet. The August 1 preflight found
+Factorio had restarted after a graceful quit and sustained host load averages of
+`36.71 36.86 40.55`, so execution stopped before game/runtime mutation rather
+than recording contaminated evidence. The prior dev13 lifecycle and cadence
+evidence remains historical; dev14 live reconfirmation waits for a genuinely
+quiet host, and physical Secret Shop and Robot Repair transitions still require
+the owner and headset.
+
 ## Hardware-Free Fixture Matrix
 
 - existing singleton profile/state/start/stop/install fixtures remain green;
