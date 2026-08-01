@@ -232,10 +232,27 @@ without a drop. Final status was `runtime.ready`, default cleanup matched no
 process, all created overlays were absent, and all three stock OpenVR hashes
 matched.
 
-All 15 profile, 74 start, 67 control, 30 install, 31 transaction, and 2 cleanup
+All 15 profile, 75 start, 67 control, 30 install, 31 transaction, and 2 cleanup
 fixtures pass with artifact checks and self-tests. The production hub lifecycle,
 simulated transition contract, and disconnected cadence are qualified. Physical
 Secret Shop and Robot Repair transitions remain owner/headset gates.
+
+### Post-Commit Cleanup Admission
+
+On August 1, 2026, a detached review exposed one start-admission mismatch after
+the cadence slice merged. A transaction can be durably `committed` before a
+crash interrupts deletion of its rollback payloads. The transaction executor
+already validates and recovers that journal state, but start additionally
+required `cleanupInProgress` to be empty and incorrectly returned
+`runtime.not_installed` for the exact installed layout.
+
+Start now accepts non-empty cleanup progress only after the executor validates
+the complete journal schema, semantic plan digest, profile identity, and every
+journal-owned cleanup path and identity manifest. It still rejects noncommitted
+state, recorded cleanup or rollback failures, transaction failure, malformed or
+foreign cleanup records, and any installed-layout mismatch. A fixture produces
+the state through a real guarded file replacement and simulated post-commit
+cleanup crash rather than hand-authoring journal JSON.
 
 ## Hardware-Free Fixture Matrix
 
