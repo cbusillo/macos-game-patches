@@ -16,7 +16,7 @@
     "description": "Deterministic payload with a preserved Developer ID bridge bundle for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev13"
+    "version": "1.0.0-dev14"
   },
   "artifacts": [
     {
@@ -802,7 +802,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "dae1258283e9ae591b26314c3a0b0099cf7c5032c3e27ca5c92b1cc5dbac06aa",
+      "sha256": "5b9a32d80f1bcea2272cbad09483c1a18631bc0add9e71064325c8f3421fb6c5",
       "supplyClass": "repo-source"
     },
     {
@@ -838,7 +838,7 @@
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "988ba718cf07f955a62d864e93d29a86ce9a480dcb0502125b1e2c9de3279d76",
+      "sha256": "2b512589f56257b9d39933c03138b6b99c38283806116209478e1f29f6828b08",
       "supplyClass": "repo-source"
     },
     {

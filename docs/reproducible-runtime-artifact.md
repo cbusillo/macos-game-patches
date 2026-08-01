@@ -380,15 +380,18 @@ python3 tools/runtime_cli.py stop \
   --bindings .code/runtime-bindings.json
 ```
 
-The dev13 source contract pins the profile validator, JSON Schema, and explicit
+The dev14 source contract pins the profile validator, JSON Schema, and explicit
 curated certification profiles. Public start accepts an identifier rather than
 an arbitrary path, requires the exact sealed profile hash, verifies Steam
 app/build/depot identity, and projects the installed game tree through the exact
 uninstall substitutions and removals before launch. It materializes the same
 profile-aware filesystem plan used by explicit install and uninstall, then
-requires the executor's complete terminal journal schema plus the exact profile
-ID, profile SHA-256, semantic plan digest, and journal-v3 committed identity
-before admitting a profile-bound install. Legacy
+requires the executor's complete journal schema plus the exact profile ID,
+profile SHA-256, semantic plan digest, and journal-v3 committed identity before
+admitting a profile-bound install. Validator-admitted post-commit cleanup
+progress is accepted because the installed effects are already committed and
+revalidated; recorded cleanup failures, rollback failures, transaction failure,
+and every noncommitted state remain rejected. Legacy
 artifact-only singleton journals retain their journal-v2 digest and remain an
 explicit fallback for existing Freedom and Aircar installations. The Lab owns
 the finite `hub`, `secret-shop`, and `robot-repair` target set, so its complete

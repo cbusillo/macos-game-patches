@@ -4094,6 +4094,124 @@ class RuntimeStartTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "exact committed install"):
             _require_committed_install_journal(plan)
 
+    def test_start_accepts_valid_committed_cleanup_progress(self) -> None:
+        lifecycle_root = self.fixture.root / "lifecycle-cleanup-progress"
+        transaction_root = lifecycle_root / "transactions"
+        transaction_root.mkdir(parents=True)
+        journal = transaction_root / "active.json"
+        source = self.fixture.artifact / "payload/replacement.bin"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"replacement payload")
+        target = self.fixture.root / "installed.bin"
+        target.write_bytes(b"stock payload")
+        target_sha256 = runtime_transaction.sha256_file(target)
+        backup_path = self.fixture.root / "backups/installed.bin"
+        backup_path.parent.mkdir()
+        guard = {
+            "id": "assert_installed",
+            "resource": "fixture",
+            "action": "assert_sha256",
+            "target": str(target),
+            "expectedSha256": target_sha256,
+            "actualSha256": target_sha256,
+            "ready": True,
+        }
+        backup = {
+            "id": "backup_installed",
+            "resource": "fixture",
+            "action": "backup",
+            "target": str(target),
+            "backup": str(backup_path),
+            "backupExists": False,
+            "ready": True,
+        }
+        operation = {
+            "id": "replace_installed",
+            "resource": "fixture",
+            "action": "replace_file",
+            "atomic": True,
+            "source": str(source),
+            "sourceSha256": runtime_transaction.sha256_file(source),
+            "target": str(target),
+            "sourceFiles": 1,
+            "ready": True,
+        }
+        retain_backup = {
+            "id": "retain_backup",
+            "resource": "fixture",
+            "action": "retain",
+            "target": str(backup_path),
+            "exists": False,
+            "ready": True,
+        }
+        operations = [guard, backup, operation, retain_backup]
+        plan = {
+            "artifact": str(self.fixture.artifact),
+            "allowedTargetRoots": [str(self.fixture.root)],
+            "mutableState": [
+                {"id": "lifecycle_root", "location": str(lifecycle_root)},
+                {"id": "transaction_root", "location": str(transaction_root)},
+                {
+                    "id": "transaction_history",
+                    "location": str(transaction_root / "history"),
+                },
+                {"id": "transaction_journal", "location": str(journal)},
+                {
+                    "id": "transaction_lock",
+                    "location": str(lifecycle_root / "runtime.lock"),
+                },
+                {
+                    "id": "transaction_journal_lock",
+                    "location": str(journal.with_suffix(".json.lock")),
+                },
+                {
+                    "id": "transaction_undo",
+                    "location": str(journal.with_name("active.json.undo")),
+                },
+            ],
+            "install": operations,
+        }
+        executor = runtime_transaction.TransactionExecutor(
+            kind="install",
+            operations=operations,
+            artifact_root=self.fixture.artifact,
+            journal_path=journal,
+            transaction_root=transaction_root,
+            allowed_roots=(self.fixture.root,),
+        )
+        original_unlink = runtime_transaction.runtime_descriptor.os.unlink
+        cleanup_crashed = False
+
+        class SimulatedCleanupCrash(BaseException):
+            pass
+
+        def unlink_then_crash(path: Any, *args: Any, **kwargs: Any) -> None:
+            nonlocal cleanup_crashed
+            original_unlink(path, *args, **kwargs)
+            if (
+                not cleanup_crashed
+                and kwargs.get("dir_fd") is not None
+                and str(path).endswith(".descriptor-delete")
+            ):
+                cleanup_crashed = True
+                raise SimulatedCleanupCrash("post-commit cleanup crash")
+
+        with mock.patch.object(
+            runtime_transaction.runtime_descriptor.os,
+            "unlink",
+            side_effect=unlink_then_crash,
+        ), self.assertRaises(SimulatedCleanupCrash):
+            executor.execute()
+
+        payload = json.loads(journal.read_text())
+        self.assertEqual(payload["state"], "committed")
+        self.assertEqual(payload["cleanupFailures"], [])
+        self.assertEqual(payload["rollbackFailures"], [])
+        self.assertIsNone(payload["failure"])
+        self.assertEqual(len(payload["cleanupInProgress"]), 1)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        _require_committed_install_journal(plan)
+
     def test_start_rejects_incomplete_or_extended_transaction_journal(self) -> None:
         plan, journal = self.committed_install_plan(
             layout_id="invalid",

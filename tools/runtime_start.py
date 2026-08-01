@@ -857,7 +857,6 @@ def _require_committed_install_journal(plan: dict[str, Any]) -> None:
         or journal.get("cleanupFailures") != []
         or journal.get("rollbackFailures") != []
         or journal.get("failure") is not None
-        or journal.get("cleanupInProgress") != {}
     ):
         raise ControlError(
             "runtime.not_installed",
