@@ -277,6 +277,25 @@ Primary references:
 
 <!-- markdownlint-enable MD013 -->
 
+Steady-state readiness applies the manifest's runtime prerequisite scope.
+Xcode remains required and recorded when artifacts are built and sealed, but a
+verified installed artifact does not invoke `xcodebuild`, `xcrun`, or
+`devicectl` during `doctor`, `start`, reconnect, stop, or uninstall.
+
+When the retained bridge bundle is installed, `doctor` requires one exact
+Launch Services record for its stable path, bundle identifier, Developer ID
+Team ID, and CDHash. Missing, duplicate, unreadable, or mismatched records are
+reported separately. Install omits that repairable check during preflight,
+commits the exact filesystem transaction first, then idempotently establishes
+and verifies registration. Ordinary uninstall retains the bundle and does not
+unregister it.
+
+The start report includes the authenticated client telemetry record. Text mode
+prints `client_status=waiting` plus an operator action to open ALVR on Vision Pro
+and allow Local Network access for the stable bridge when prompted. This state
+does not claim that macOS exposes a supported query for pending versus denied
+Local Network consent; those cases remain a physical qualification gate.
+
 ## Evidence And Cleanup Ownership
 
 - Build evidence owns source commits, patch identities, normalized manifests,

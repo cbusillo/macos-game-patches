@@ -8,7 +8,7 @@ import pathlib
 import re
 import shutil
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal, Sequence, cast
 
 import build_runtime_artifact as artifact_contract
@@ -22,6 +22,7 @@ from runtime_control import (
     doctor_runtime,
     global_lifecycle_lock,
     load_runtime_contract,
+    register_launch_services,
     status_runtime,
     stop_runtime,
     verify_artifact_reference,
@@ -1115,6 +1116,37 @@ def _transaction_report(
     )
 
 
+def _with_launch_services_registration(
+    report: MutationReport,
+    manifest: dict[str, Any],
+    plan: dict[str, Any],
+    context: RuntimeContext,
+) -> MutationReport:
+    if report.command != "install" or not report.ok:
+        return report
+    registration = register_launch_services(
+        manifest,
+        _state_path(_mutable_state_index(plan), "bridge_bundle"),
+        context.runner,
+    )
+    if registration.status == "pass":
+        return report
+    return replace(
+        report,
+        ok=False,
+        reason_code="launch_services.registration_failed",
+        message="Runtime install committed, but stable Launch Services readiness failed",
+        blockers=(
+            {
+                "id": registration.id,
+                "reason": registration.message,
+                "remediation": registration.remediation,
+                "details": registration.details,
+            },
+        ),
+    )
+
+
 def _settle_active_journal(
     command: MutationKind,
     artifact: dict[str, Any],
@@ -1893,7 +1925,12 @@ def _mutate_runtime(
             if settled_archive is not None:
                 archived_journal = settled_archive
             if settled is not None:
-                return settled
+                return _with_launch_services_registration(
+                    settled,
+                    manifest,
+                    plan,
+                    context,
+                )
             initial_blockers = _admission_blockers(plan, command)
             if plan.get(f"{command}Ready") is not True or initial_blockers:
                 return MutationReport(
@@ -1911,7 +1948,11 @@ def _mutate_runtime(
             _admit_profile_plan(command, context, manifest, artifact_path, plan)
             _capacity_checks(plan, command, paths)
             if command == "install":
-                doctor = doctor_runtime(context, artifact_path)
+                doctor = doctor_runtime(
+                    context,
+                    artifact_path,
+                    include_launch_services=False,
+                )
                 if not doctor.ok:
                     blockers = tuple(
                         {
@@ -2005,7 +2046,7 @@ def _mutate_runtime(
             capacity = _capacity_checks(live_plan, command, live_paths)
             report = executor.execute()
             _validate_private_file(live_paths.journal, 0o600)
-            return _transaction_report(
+            mutation = _transaction_report(
                 command,
                 report,
                 artifact,
@@ -2016,6 +2057,12 @@ def _mutate_runtime(
                 archived_journal=archived_journal,
                 stop_actions=stop_actions,
                 capacity=capacity,
+            )
+            return _with_launch_services_registration(
+                mutation,
+                manifest,
+                live_plan,
+                context,
             )
     except artifact_contract.ArtifactError as error:
         converted = _artifact_error(error)

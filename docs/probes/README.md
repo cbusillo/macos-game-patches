@@ -114,3 +114,4 @@ Use this shape:
 - [025 - Aperture Hand Lab Index-input classification](025-aperture-hand-lab-classification.md)
 - [026 - Fixed-resolution profile qualification](026-fixed-resolution-profile-qualification.md)
 - [027 - The Lab multi-target runtime ownership](027-the-lab-multi-target-ownership.md)
+- [028 - macOS runtime readiness](028-macos-runtime-readiness.md)

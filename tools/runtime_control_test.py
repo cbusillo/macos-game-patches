@@ -20,6 +20,7 @@ import build_runtime_artifact as artifact_contract
 import runtime_cli
 
 from runtime_control import (
+    LSREGISTER_PATH,
     SUPERVISOR_PING_TIMEOUT_SECONDS,
     SUPERVISOR_STOP_TIMEOUT_SECONDS,
     CheckResult,
@@ -28,10 +29,13 @@ from runtime_control import (
     DoctorReport,
     RuntimeContext,
     StatusReport,
+    check_launch_services_registration,
     doctor_runtime,
     evaluate_command_prerequisite,
     evaluate_plist_prerequisite,
+    evaluate_runtime_prerequisite,
     load_control_state,
+    register_launch_services,
     request_supervisor_ping,
     request_supervisor_stop,
     resolve_context_paths,
@@ -207,6 +211,20 @@ class PrerequisiteTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "unknown")
 
+    def test_build_only_prerequisite_is_not_executed_at_runtime(self) -> None:
+        runner = mock.Mock()
+        result = evaluate_runtime_prerequisite(
+            {
+                **self.command_item(contains="Build version fixture"),
+                "runtimeRequired": False,
+            },
+            {},
+            runner,
+        )
+        self.assertEqual(result.status, "pass")
+        self.assertFalse(result.details["evaluated"])
+        runner.run.assert_not_called()
+
     def test_plist_prerequisite_states(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-control-plist-") as temp:
             root = pathlib.Path(temp).resolve()
@@ -236,6 +254,132 @@ class PrerequisiteTests(unittest.TestCase):
             self.assertEqual(invalid.status, "unknown")
 
 
+class LaunchServicesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="ls-ready-", dir=CODE_ROOT)
+        self.root = pathlib.Path(self.temporary.name).resolve()
+        self.bundle = self.root / "ALVRMacOSBridge.app"
+        self.bundle.mkdir()
+        self.manifest = {
+            "sealing": {
+                "bundleId": "com.alvr.macos-bridge.iosurface",
+                "teamId": "MM5YXC7T6E",
+                "signature": {
+                    "cdhash": "1731a67fa327ca7c1576f63a084cc3b39f095b41",
+                },
+            }
+        }
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def record(
+        self,
+        *,
+        path: pathlib.Path | None = None,
+        team_id: str = "MM5YXC7T6E",
+        cdhash: str = "1731a67fa327ca7c1576f63a084cc3b39f095b41",
+    ) -> str:
+        return (
+            "bundle id:                  ALVRMacOSBridge (0x24dc)\n"
+            f"path:                       {path or self.bundle} (0x3538)\n"
+            f"teamID:                     {team_id}\n"
+            "identifier:                 com.alvr.macos-bridge.iosurface\n"
+            f"trustedCodeSignatures:      {cdhash}\n"
+        )
+
+    def test_exact_registration_passes(self) -> None:
+        result = check_launch_services_registration(
+            self.manifest,
+            self.bundle,
+            StaticRunner(CommandResult((str(LSREGISTER_PATH), "-dump"), 0, self.record())),
+        )
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.details["records"][0]["path"], str(self.bundle))
+
+    def test_missing_duplicate_and_identity_mismatch_fail(self) -> None:
+        separator = "-" * 80
+        alias = self.root / "Alias.app"
+        alias.symlink_to(self.bundle, target_is_directory=True)
+        cases = {
+            "missing": "",
+            "duplicate": f"{self.record()}{separator}\n{self.record()}",
+            "wrong-path": self.record(path=self.root / "Other.app"),
+            "same-inode-alias": self.record(path=alias),
+            "wrong-team": self.record(team_id="WRONGTEAM"),
+            "wrong-cdhash": self.record(cdhash="0" * 40),
+            "missing-fields": (
+                "identifier:                 com.alvr.macos-bridge.iosurface\n"
+            ),
+        }
+        expected_ids = {
+            "missing": "launch_services.missing",
+            "duplicate": "launch_services.ambiguous",
+            "wrong-path": "launch_services.identity_mismatch",
+            "same-inode-alias": "launch_services.identity_mismatch",
+            "wrong-team": "launch_services.identity_mismatch",
+            "wrong-cdhash": "launch_services.identity_mismatch",
+            "missing-fields": "launch_services.identity_mismatch",
+        }
+        for name, output in cases.items():
+            with self.subTest(name=name):
+                result = check_launch_services_registration(
+                    self.manifest,
+                    self.bundle,
+                    StaticRunner(CommandResult((str(LSREGISTER_PATH), "-dump"), 0, output)),
+                )
+                self.assertEqual(result.status, "fail")
+                self.assertEqual(result.id, expected_ids[name])
+
+    def test_query_failure_is_unknown(self) -> None:
+        result = check_launch_services_registration(
+            self.manifest,
+            self.bundle,
+            StaticRunner(
+                CommandResult(
+                    (str(LSREGISTER_PATH), "-dump"),
+                    None,
+                    stderr="fixture timeout",
+                    error="timeout",
+                )
+            ),
+        )
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.id, "launch_services.query_failed")
+
+    def test_registration_forces_stable_bundle_then_verifies(self) -> None:
+        runner = mock.Mock()
+        runner.run.side_effect = (
+            CommandResult((str(LSREGISTER_PATH), "-dump"), 0),
+            CommandResult(
+                (str(LSREGISTER_PATH), "-f", str(self.bundle)),
+                1,
+                stderr="fixture nonzero",
+            ),
+            CommandResult((str(LSREGISTER_PATH), "-dump"), 0, self.record()),
+        )
+        result = register_launch_services(self.manifest, self.bundle, runner)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            runner.run.call_args_list[1].args[0],
+            [str(LSREGISTER_PATH), "-f", str(self.bundle)],
+        )
+
+    def test_registration_never_mutates_missing_or_symlinked_bundle(self) -> None:
+        real_bundle = self.root / "Real.app"
+        real_bundle.mkdir()
+        cases = ("missing", "symlink")
+        for name in cases:
+            with self.subTest(name=name):
+                candidate = self.root / f"{name}.app"
+                if name == "symlink":
+                    candidate.symlink_to(real_bundle, target_is_directory=True)
+                runner = mock.Mock()
+                result = register_launch_services(self.manifest, candidate, runner)
+                self.assertEqual(result.status, "fail")
+                runner.run.assert_not_called()
+
+
 class CliTests(unittest.TestCase):
     def test_json_usage_error_is_machine_readable(self) -> None:
         stderr = io.StringIO()
@@ -257,6 +401,7 @@ class CliTests(unittest.TestCase):
             9000,
             pathlib.Path("/tmp/run"),
             pathlib.Path("/tmp/run/supervisor.log"),
+            client={"status": "waiting"},
         )
         stdout = io.StringIO()
         with mock.patch("runtime_cli.start_runtime", return_value=report), contextlib.redirect_stdout(
@@ -276,6 +421,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["state"], "waiting")
+        self.assertEqual(payload["client"]["status"], "waiting")
+        rendered = runtime_cli.render_start(report)
+        self.assertIn("client_status=waiting", rendered)
+        self.assertIn("client_action=open ALVR on Vision Pro", rendered)
 
 
 class LifecycleTests(unittest.TestCase):

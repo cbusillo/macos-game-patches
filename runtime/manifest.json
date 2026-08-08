@@ -662,7 +662,8 @@
       "argv": ["/usr/bin/xcodebuild", "-version"],
       "contains": "Build version 27A5194q",
       "id": "xcode_build",
-      "kind": "command"
+      "kind": "command",
+      "runtimeRequired": false
     },
     {
       "equals": "26.2",
@@ -706,7 +707,7 @@
     {
       "id": "scope_record",
       "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
-      "sha256": "083ba8780d116ded3e678a3a64387df4776a264b2dcc5218ed56d905151637f3",
+      "sha256": "712189cc6dbd83c492df89bc001fc6c9efefed4b484003cfa10e2fd284e9888a",
       "supplyClass": "repo-source"
     },
     {
@@ -808,7 +809,7 @@
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "6124ad9132c892973dafffe4d7791c0de3fe0d90c299ea4443c40e062621b605",
+      "sha256": "7354715a6e856e232eec26a4634d958e050b18b9f3162a70adbc44a8f0adc07f",
       "supplyClass": "repo-source"
     },
     {
@@ -826,19 +827,19 @@
     {
       "id": "runtime_install",
       "path": "${REPO_ROOT}/tools/runtime_install.py",
-      "sha256": "bb7351d883dc14bd7ff1e352debcc0216989319227f4b2ce578b194bf3dea4b9",
+      "sha256": "a5e0f93d9945532d1f9bf31beceae712d4a6cc47a2196b5cd9fe180323890769",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "091e96777065c2ad8cab95168ad552ba8dfe6bf6ef63c881218726e5ceea0b06",
+      "sha256": "c4db10414ace1f188abc3e628206f5a4a3ef18c5c7bc76c3e8be80e7ebc05d8e",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "2b512589f56257b9d39933c03138b6b99c38283806116209478e1f29f6828b08",
+      "sha256": "259725a29d4ce3b2d3ce45c2cee7d435eca4ef9e9e61991b4955c60db80126f4",
       "supplyClass": "repo-source"
     },
     {
@@ -874,7 +875,7 @@
     {
       "id": "runtime_cli",
       "path": "${REPO_ROOT}/tools/runtime_cli.py",
-      "sha256": "8c3c19c56512a04c1bb73fa8ddd5ea377ded3d857888f90c03b1eb2a969190a4",
+      "sha256": "cda41c2110c98500302359f339534aff87d00d7e680ba41a8ff7339f1335f820",
       "supplyClass": "repo-source"
     },
     {

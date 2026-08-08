@@ -676,6 +676,7 @@ class StartReport:
     actions: tuple[str, ...] = ()
     profile: dict[str, Any] | None = None
     producer: dict[str, Any] | None = None
+    client: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -695,6 +696,7 @@ class StartReport:
             "actions": list(self.actions),
             "profile": self.profile,
             "producer": self.producer,
+            "client": self.client,
         }
 
 
@@ -710,6 +712,7 @@ def start_failure(
     actions: Sequence[str] = (),
     profile: dict[str, Any] | None = None,
     producer: dict[str, Any] | None = None,
+    client: dict[str, Any] | None = None,
 ) -> StartReport:
     return StartReport(
         False,
@@ -724,6 +727,7 @@ def start_failure(
         tuple(actions),
         profile,
         producer,
+        client,
     )
 
 
@@ -3354,7 +3358,11 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         "profile",
         "producer",
     }
-    if set(value) != required or value.get("schemaVersion") != 1 or value.get("command") != "start":
+    if (
+        set(value) not in {frozenset(required), frozenset((*required, "client"))}
+        or value.get("schemaVersion") != 1
+        or value.get("command") != "start"
+    ):
         return None
     if (
         not isinstance(value.get("ok"), bool)
@@ -3374,6 +3382,7 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         or not pathlib.Path(value["supervisorLog"]).is_absolute()
         or (value.get("profile") is not None and not isinstance(value.get("profile"), dict))
         or (value.get("producer") is not None and not isinstance(value.get("producer"), dict))
+        or (value.get("client") is not None and not isinstance(value.get("client"), dict))
         or (value["ok"] and value["state"] not in LEGACY_LIVE_STATES)
         or (value["ok"] and not isinstance(value.get("profile"), dict))
         or (value["ok"] and not isinstance(value.get("producer"), dict))
@@ -3396,6 +3405,7 @@ def _parse_start_report(value: dict[str, Any]) -> StartReport | None:
         tuple(actions),
         value["profile"],
         value["producer"],
+        value.get("client"),
     )
 
 
@@ -3425,6 +3435,7 @@ def _idempotent_live_start(
             ),
             profile=profile_record if isinstance(profile_record, dict) else None,
             producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+            client=record.get("client") if isinstance(record.get("client"), dict) else None,
         )
     try:
         manifest, _, _, _ = load_runtime_contract(context)
@@ -3449,6 +3460,7 @@ def _idempotent_live_start(
             ),
             profile=profile_record,
             producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+            client=record.get("client") if isinstance(record.get("client"), dict) else None,
         )
     if current_profile.sha256 != profile_record.get("sha256"):
         return start_failure(
@@ -3464,6 +3476,7 @@ def _idempotent_live_start(
             ),
             profile=profile_record,
             producer=record.get("producer") if isinstance(record.get("producer"), dict) else None,
+            client=record.get("client") if isinstance(record.get("client"), dict) else None,
         )
     return StartReport(
         True,
@@ -3483,6 +3496,7 @@ def _idempotent_live_start(
         (),
         profile_record,
         record.get("producer") if isinstance(record.get("producer"), dict) else None,
+        record.get("client") if isinstance(record.get("client"), dict) else None,
     )
 
 
@@ -4708,6 +4722,7 @@ def supervise_runtime(
                         tuple(actions),
                         _profile_record(profile_admission),
                         producer_state,
+                        published_client_record,
                     )
                     _write_startup_result(run_dir, report)
                 live_pid = bridge_pid
