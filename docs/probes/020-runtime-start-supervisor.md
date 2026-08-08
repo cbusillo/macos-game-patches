@@ -195,11 +195,12 @@ streaming, controllers, or headset-visible quality.
 
 ## Issue Routing
 
-GitHub issue #60. Issue #62 retains Launch Services, Local Network consent,
-reboot, logout/login, and update/rollback integration.
+GitHub issue #60 owns this completed supervisor. Issue #62 now validates the
+stable Launch Services identity before start and exposes the client waiting
+record in CLI output. Local Network consent, reboot, logout/login, and
+update/rollback remain physical integration gates.
 
 ## Next Action
 
-Implement the host-only supervisor and fixtures, review its identity and cleanup
-boundaries, merge it, then add profile/game ownership and the remaining live
-state transitions as the next #60 slice.
+Continue through probe 028's physical Local Network and persistence matrix
+without weakening this supervisor's identity or cleanup boundaries.

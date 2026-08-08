@@ -191,6 +191,13 @@ def render_start(report: StartReport) -> str:
         lines.append(f"profile={report.profile['id']}")
     if report.producer is not None and report.producer.get("status"):
         lines.append(f"producer_status={report.producer['status']}")
+    if report.client is not None and report.client.get("status"):
+        lines.append(f"client_status={report.client['status']}")
+        if report.client["status"] == "waiting":
+            lines.append(
+                "client_action=open ALVR on Vision Pro and allow Local Network access "
+                "for ALVR macOS Bridge if prompted"
+            )
     for action in report.actions:
         lines.append(f"action={action}")
     return "\n".join(lines)

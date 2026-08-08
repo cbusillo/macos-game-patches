@@ -295,6 +295,7 @@ class LifecycleFixture:
         ]
         mutable_state = [
             self._state("backup_root", "directory", self.backup_root),
+            self._state("bridge_bundle", "directory", self.bridge_bundle),
             self._state("bridge_bundle_root", "directory", self.bridge_root),
             self._state("lifecycle_root", "directory", self.lifecycle_root),
             self._state("runtime_state", "directory", self.runtime_state),
@@ -683,6 +684,16 @@ def patched_lifecycle(
             },
         ),
         mock.patch.object(runtime_install, "doctor_runtime", return_value=doctor) as doctor_mock,
+        mock.patch.object(
+            runtime_install,
+            "register_launch_services",
+            return_value=CheckResult(
+                "launch_services.registration",
+                "pass",
+                "fixture registration is exact",
+                "none",
+            ),
+        ),
         mock.patch.object(runtime_install, "status_runtime", return_value=status),
         mock.patch.object(runtime_install, "stop_runtime", return_value=stop) as stop_mock,
     ):
@@ -690,6 +701,43 @@ def patched_lifecycle(
 
 
 class RuntimeInstallTests(unittest.TestCase):
+    def test_install_retries_launch_services_after_committed_failure(self) -> None:
+        failed = CheckResult(
+            "launch_services.registration",
+            "fail",
+            "fixture registration failed",
+            "retry install",
+            {"error": "fixture"},
+        )
+        passed = CheckResult(
+            "launch_services.registration",
+            "pass",
+            "fixture registration is exact",
+            "none",
+        )
+        with lifecycle_fixture() as fixture:
+            with (
+                patched_lifecycle(fixture) as (context, _, _),
+                mock.patch.object(
+                    runtime_install,
+                    "register_launch_services",
+                    side_effect=(failed, passed),
+                ) as registration,
+            ):
+                committed = runtime_install.install_runtime(context, fixture.artifact_root)
+                self.assertFalse(committed.ok)
+                self.assertEqual(committed.state, "committed")
+                self.assertEqual(
+                    committed.reason_code,
+                    "launch_services.registration_failed",
+                )
+                self.assertEqual(fixture.stock.read_bytes(), b"patched payload")
+
+                replay = runtime_install.install_runtime(context, fixture.artifact_root)
+                self.assertTrue(replay.ok)
+                self.assertEqual(replay.state, "already-committed")
+                self.assertEqual(registration.call_count, 2)
+
     def test_live_supervisor_stops_before_both_lifecycle_directions(self) -> None:
         states = {2: "idle", 3: "waiting", 4: "waiting", 5: "streaming"}
         for schema_version, state in states.items():
@@ -789,7 +837,11 @@ class RuntimeInstallTests(unittest.TestCase):
                 report = runtime_install.install_runtime(context, fixture.artifact_root)
                 self.assertTrue(report.ok)
                 self.assertEqual(report.reason_code, "transaction.committed")
-            doctor_mock.assert_called_once()
+            doctor_mock.assert_called_once_with(
+                context,
+                fixture.artifact_root,
+                include_launch_services=False,
+            )
             stop_mock.assert_called_once()
             self.assertEqual(fixture.stock.read_bytes(), b"patched payload")
 

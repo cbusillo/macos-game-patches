@@ -425,7 +425,14 @@ def validate_prerequisites(items: Any, binding_names: set[str]) -> None:
                 raw_item,
                 location,
                 required={"id", "kind", "argv"},
-                allowed={"id", "kind", "argv", "equals", "contains"},
+                allowed={
+                    "id",
+                    "kind",
+                    "argv",
+                    "equals",
+                    "contains",
+                    "runtimeRequired",
+                },
             )
             if ("equals" in item) == ("contains" in item):
                 raise ArtifactError("manifest.invalid", "Command prerequisite needs exactly one matcher", location=location)
@@ -443,7 +450,7 @@ def validate_prerequisites(items: Any, binding_names: set[str]) -> None:
                 raw_item,
                 location,
                 required={"id", "kind", "path", "key", "equals"},
-                allowed={"id", "kind", "path", "key", "equals"},
+                allowed={"id", "kind", "path", "key", "equals", "runtimeRequired"},
             )
             require_string(item["path"], f"{location}.path")
             require_string(item["key"], f"{location}.key")
@@ -456,6 +463,12 @@ def validate_prerequisites(items: Any, binding_names: set[str]) -> None:
                 )
         else:
             raise ArtifactError("manifest.invalid", "Prerequisite kind is invalid", location=location, kind=kind)
+        if "runtimeRequired" in item and not isinstance(item["runtimeRequired"], bool):
+            raise ArtifactError(
+                "manifest.invalid",
+                "Prerequisite runtimeRequired must be a boolean",
+                location=location,
+            )
 
 
 def validate_source_files(items: Any, binding_names: set[str]) -> set[str]:

@@ -35,6 +35,10 @@ DEFAULT_LIFECYCLE_LOCK = (
     / "mac-alvr-runtime"
     / "runtime.lock"
 )
+LSREGISTER_PATH = pathlib.Path(
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+    "LaunchServices.framework/Support/lsregister"
+)
 CONTROL_STATE_NAME = "runtime-state.json"
 CONTROL_SOCKET_NAME = "c.sock"
 MAX_RUNTIME_GENERATION = (1 << 63) - 1
@@ -656,6 +660,221 @@ def evaluate_plist_prerequisite(item: dict[str, Any], bindings: dict[str, str]) 
     )
 
 
+def evaluate_runtime_prerequisite(
+    item: dict[str, Any],
+    bindings: dict[str, str] | None,
+    runner: CommandRunner,
+) -> CheckResult:
+    if item.get("runtimeRequired", True) is False:
+        return CheckResult(
+            f"prerequisite.{item['id']}",
+            "pass",
+            "Build-only prerequisite is not required for steady-state runtime use",
+            prerequisite_remediation(item),
+            {"evaluated": False, "runtimeRequired": False},
+        )
+    if item["kind"] == "command":
+        return evaluate_command_prerequisite(item, runner)
+    if bindings is None:
+        return CheckResult(
+            f"prerequisite.{item['id']}",
+            "unknown",
+            "Prerequisite could not be evaluated because bindings failed",
+            prerequisite_remediation(item),
+            {"kind": item["kind"]},
+        )
+    return evaluate_plist_prerequisite(item, bindings)
+
+
+def _launch_services_field(record: str, key: str) -> str | None:
+    match = re.search(rf"^\s*{re.escape(key)}:\s*(.*?)\s*$", record, flags=re.MULTILINE)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if key == "path":
+        value = re.sub(r"\s+\(0x[0-9a-fA-F]+\)$", "", value)
+    return value
+
+
+def _launch_services_records(payload: str, bundle_id: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for raw_record in re.split(r"^-{40,}\s*$", payload, flags=re.MULTILINE):
+        if _launch_services_field(raw_record, "identifier") != bundle_id:
+            continue
+        signatures = sorted(
+            set(
+                re.findall(
+                    r"\b[0-9a-fA-F]{40}\b",
+                    _launch_services_field(raw_record, "trustedCodeSignatures") or "",
+                )
+            )
+        )
+        records.append(
+            {
+                "identifier": bundle_id,
+                "path": _launch_services_field(raw_record, "path"),
+                "teamId": _launch_services_field(raw_record, "teamID"),
+                "cdHashes": [value.lower() for value in signatures],
+            }
+        )
+    return records
+
+
+def check_launch_services_registration(
+    manifest: dict[str, Any],
+    bridge_bundle: pathlib.Path,
+    runner: CommandRunner,
+) -> CheckResult:
+    remediation = (
+        "Re-run runtime install to register the exact retained bridge bundle, then retry."
+    )
+    try:
+        metadata = bridge_bundle.lstat()
+    except FileNotFoundError:
+        return CheckResult(
+            "launch_services.registration",
+            "pass",
+            "Stable bridge bundle is not installed; install will establish registration",
+            remediation,
+            {"installed": False, "path": str(bridge_bundle)},
+        )
+    except OSError as error:
+        return CheckResult(
+            "launch_services.query_failed",
+            "unknown",
+            "Stable bridge bundle could not be inspected",
+            remediation,
+            {"path": str(bridge_bundle), "error": str(error)},
+        )
+    if bridge_bundle.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        return CheckResult(
+            "launch_services.identity_mismatch",
+            "fail",
+            "Stable bridge bundle path is not a real directory",
+            remediation,
+            {"path": str(bridge_bundle)},
+        )
+
+    sealing = manifest["sealing"]
+    signature = sealing["signature"]
+    expected = {
+        "identifier": sealing["bundleId"],
+        "path": str(bridge_bundle),
+        "teamId": sealing["teamId"],
+        "cdHash": signature["cdhash"],
+    }
+    result = runner.run([str(LSREGISTER_PATH), "-dump"], timeout=30.0)
+    if result.error is not None or result.returncode != 0:
+        return CheckResult(
+            "launch_services.query_failed",
+            "unknown",
+            "Launch Services registration could not be inspected",
+            remediation,
+            {
+                "argv": list(result.argv),
+                "exitCode": result.returncode,
+                "errorKind": result.error,
+                "error": result.stderr.strip(),
+                "expected": expected,
+            },
+        )
+    records = _launch_services_records(result.stdout, expected["identifier"])
+    if not records:
+        return CheckResult(
+            "launch_services.missing",
+            "fail",
+            "Stable bridge bundle is missing from Launch Services",
+            remediation,
+            {"expected": expected, "records": []},
+        )
+    if len(records) != 1:
+        return CheckResult(
+            "launch_services.ambiguous",
+            "fail",
+            "Stable bridge bundle has ambiguous Launch Services registrations",
+            remediation,
+            {"expected": expected, "records": records},
+        )
+    record = records[0]
+    matches = (
+        record["path"] is not None
+        and os.path.abspath(pathlib.Path(record["path"]).expanduser())
+        == os.path.abspath(bridge_bundle)
+        and record["teamId"] == expected["teamId"]
+        and expected["cdHash"] in record["cdHashes"]
+    )
+    if not matches:
+        return CheckResult(
+            "launch_services.identity_mismatch",
+            "fail",
+            "Launch Services registration does not match the stable bridge identity",
+            remediation,
+            {"expected": expected, "records": records},
+        )
+    return CheckResult(
+        "launch_services.registration",
+        "pass",
+        "Launch Services has one exact stable bridge registration",
+        remediation,
+        {"expected": expected, "records": records},
+    )
+
+
+def register_launch_services(
+    manifest: dict[str, Any],
+    bridge_bundle: pathlib.Path,
+    runner: CommandRunner,
+) -> CheckResult:
+    try:
+        metadata = bridge_bundle.lstat()
+    except FileNotFoundError:
+        return CheckResult(
+            "launch_services.bundle_missing",
+            "fail",
+            "Committed stable bridge bundle is missing before registration",
+            "Restore the exact installed bundle and re-run runtime install.",
+            {"path": str(bridge_bundle)},
+        )
+    except OSError as error:
+        return CheckResult(
+            "launch_services.query_failed",
+            "unknown",
+            "Committed stable bridge bundle could not be inspected",
+            "Resolve the path inspection failure and re-run runtime install.",
+            {"path": str(bridge_bundle), "error": str(error)},
+        )
+    if bridge_bundle.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+        return CheckResult(
+            "launch_services.identity_mismatch",
+            "fail",
+            "Committed stable bridge bundle path is not a real directory",
+            "Restore the exact installed bundle and re-run runtime install.",
+            {"path": str(bridge_bundle)},
+        )
+    existing = check_launch_services_registration(manifest, bridge_bundle, runner)
+    if existing.status == "pass":
+        return existing
+    result = runner.run([str(LSREGISTER_PATH), "-f", str(bridge_bundle)], timeout=30.0)
+    verified = check_launch_services_registration(manifest, bridge_bundle, runner)
+    if verified.status == "pass":
+        return verified
+    return CheckResult(
+        verified.id,
+        verified.status,
+        verified.message,
+        verified.remediation,
+        {
+            **verified.details,
+            "registrationCommand": {
+                "argv": list(result.argv),
+                "exitCode": result.returncode,
+                "errorKind": result.error,
+                "error": result.stderr.strip(),
+            },
+        },
+    )
+
+
 def check_control_tool(check_id: str, path: pathlib.Path) -> CheckResult:
     if path.is_file() and os.access(path, os.X_OK):
         return CheckResult(
@@ -729,7 +948,12 @@ def check_state_root(paths: RuntimePaths) -> CheckResult:
     )
 
 
-def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorReport:
+def doctor_runtime(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    *,
+    include_launch_services: bool = True,
+) -> DoctorReport:
     checks: list[CheckResult] = []
     artifact_summary: dict[str, Any] | None = None
     try:
@@ -944,20 +1168,7 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
                 )
 
     for item in manifest["prerequisites"]:
-        if item["kind"] == "command":
-            checks.append(evaluate_command_prerequisite(item, context.runner))
-        elif bindings is None:
-            checks.append(
-                CheckResult(
-                    f"prerequisite.{item['id']}",
-                    "unknown",
-                    "Prerequisite could not be evaluated because bindings failed",
-                    prerequisite_remediation(item),
-                    {"kind": item["kind"]},
-                )
-            )
-        else:
-            checks.append(evaluate_plist_prerequisite(item, bindings))
+        checks.append(evaluate_runtime_prerequisite(item, bindings, context.runner))
 
     for tool_id, tool_path in (
         ("launchctl", pathlib.Path("/bin/launchctl")),
@@ -992,6 +1203,14 @@ def doctor_runtime(context: RuntimeContext, artifact: pathlib.Path) -> DoctorRep
             )
         else:
             checks.append(check_state_root(paths))
+            if include_launch_services:
+                checks.append(
+                    check_launch_services_registration(
+                        manifest,
+                        paths.bridge_bundle,
+                        context.runner,
+                    )
+                )
 
     return DoctorReport(tuple(checks), artifact_summary)
 

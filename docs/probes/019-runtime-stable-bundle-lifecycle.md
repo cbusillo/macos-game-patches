@@ -223,9 +223,10 @@ and runtime status is `runtime.ready` with no owner or service present.
 
 ## Issue Routing
 
-GitHub issue #61 owns the transactional migration and exact-restoration gate.
-Issue #62 remains blocked until the retained stable URL is available for Launch
-Services, Local Network, reboot, logout/login, update, and rollback validation.
+GitHub issue #61 owns the completed transactional migration and
+exact-restoration gate. Issue #62 now consumes the retained stable URL through
+production Launch Services inspection and post-commit registration. Local
+Network, reboot, logout/login, update, and rollback remain physical validation.
 
 ## Expected Artifacts
 
@@ -237,8 +238,6 @@ Services, Local Network, reboot, logout/login, update, and rollback validation.
 
 ## Next Action
 
-Merge the cleanup correction and physical evidence, then advance #60 and #62
-against this qualified installed-layout contract. The next runtime work is the
-bounded `start` supervisor plus stable Launch Services and Local Network consent
-validation; full game and controller acceptance remains downstream of those
-control-plane and macOS lifecycle gates.
+Use probe 028 to qualify production Launch Services readiness and the remaining
+Local Network consent matrix against this installed-layout contract. Full game
+and controller acceptance remains downstream of those macOS lifecycle gates.

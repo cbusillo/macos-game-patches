@@ -27,6 +27,7 @@ from runtime_control import (
     ControlError,
     RuntimeContext,
     RuntimePaths,
+    StatusReport,
     load_control_state,
     process_start_time,
     request_supervisor_ping,
@@ -55,8 +56,10 @@ from runtime_start import (
     _group_is_live,
     _install_plan_digest,
     _inspect_profile_admission,
+    _idempotent_live_start,
     _inspect_producer_identity,
     _profile_record,
+    _parse_start_report,
     _producer_markers_ready,
     _quiesce_producer,
     _require_committed_install_journal,
@@ -990,6 +993,7 @@ class ImmediateLauncher:
             (),
             _profile_record(self.profile),
             {"status": "ready"},
+            {"status": "waiting"},
         )
         (run_dir / STARTUP_RESULT_NAME).write_text(json.dumps(report.to_dict()))
         return ImmediateProcess()
@@ -3445,8 +3449,72 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(report.state, "waiting")
         self.assertEqual(report.generation, 7)
+        self.assertEqual(report.client, {"status": "waiting"})
         assert launcher.command is not None
         self.assertTrue(launcher.command[1].endswith("tools/runtime_start.py"))
+
+    def test_start_report_parser_accepts_legacy_v1_without_client(self) -> None:
+        report = StartReport(
+            True,
+            "waiting",
+            "runtime.waiting",
+            "fixture supervisor ready",
+            self.fixture.admission.artifact,
+            7,
+            9000,
+            pathlib.Path("/tmp/run"),
+            pathlib.Path("/tmp/run/supervisor.log"),
+            (),
+            _profile_record(self.fixture.profile),
+            {"status": "ready"},
+        )
+        payload = report.to_dict()
+        payload.pop("client")
+        parsed = _parse_start_report(payload)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIsNone(parsed.client)
+
+    def test_idempotent_live_start_preserves_client_record(self) -> None:
+        profile_record = _profile_record(self.fixture.profile)
+        client = {"status": "waiting", "streamEpoch": 0}
+        run_dir = self.fixture.state_root / "r-0000000000000007"
+        status = StatusReport(
+            "waiting",
+            "runtime.waiting",
+            "fixture runtime is live",
+            self.fixture.admission.artifact,
+            {"present": True},
+            {"alive": True},
+            {
+                "record": {
+                    "generation": 7,
+                    "ownerPid": 9000,
+                    "runDir": str(run_dir),
+                    "artifactPath": str(self.fixture.artifact),
+                    "diagnostic": {"supervisorLog": str(run_dir / "supervisor.log")},
+                    "profile": profile_record,
+                    "producer": {"status": "ready"},
+                    "client": client,
+                }
+            },
+        )
+        with (
+            mock.patch("runtime_start.status_runtime", return_value=status),
+            mock.patch("runtime_start.load_runtime_contract", return_value=({}, {}, "b" * 64, "c" * 64)),
+            mock.patch(
+                "runtime_start.runtime_profile.load_curated_profile",
+                return_value=self.fixture.profile.installed.loaded,
+            ),
+        ):
+            report = _idempotent_live_start(
+                self.fixture.context,
+                self.fixture.artifact,
+                profile_record["id"],
+            )
+        self.assertIsNotNone(report)
+        assert report is not None
+        self.assertEqual(report.client, client)
 
     def test_start_parent_preserves_generation_bound_child_failure(self) -> None:
         launcher = ImmediateFailureLauncher(self.fixture.admission.artifact)
