@@ -3,14 +3,16 @@ import Testing
 @testable import MacOSUIHelper
 
 @Test func parsesStatus() throws {
+    let mixedCaseToken = String(repeating: "0", count: 31) + "A"
+    let normalizedToken = String(repeating: "0", count: 31) + "a"
     #expect(try HelperCommand.parse(["status"]) == HelperInvocation(command: .status, resultToken: nil))
     #expect(
         try HelperCommand.parse(["request-accessibility"])
             == HelperInvocation(command: .requestAccessibility, resultToken: nil)
     )
     #expect(
-        try HelperCommand.parse(["request-screen-recording", "--result-token", "0123456789abcdef0123456789ABCDEF"])
-            == HelperInvocation(command: .requestScreenRecording, resultToken: "0123456789abcdef0123456789abcdef")
+        try HelperCommand.parse(["request-screen-recording", "--result-token", mixedCaseToken])
+            == HelperInvocation(command: .requestScreenRecording, resultToken: normalizedToken)
     )
 }
 
@@ -111,7 +113,7 @@ import Testing
     defer { try? FileManager.default.removeItem(at: temporary) }
 
     let root = OutputRoot(homeURL: temporary)
-    let token = "0123456789abcdef0123456789abcdef"
+    let token = String(repeating: "0", count: 31) + "1"
     let destination = try root.writeResult(Data("{}".utf8), token: token)
     let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
     #expect(destination.lastPathComponent == "\(token).json")

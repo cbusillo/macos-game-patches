@@ -150,8 +150,8 @@ Code `0.6.116` app server launched inside the logged-in Aqua session:
 
 - The final arm64 helper build has bundle ID
   `com.alvr.macos-game-patches.ui-helper`, Team ID `MM5YXC7T6E`, CDHash
-  `c7a74e96af532941888c34cae1ddd38a6e969078`, and Mach-O UUID
-  `A20AFE2B-6E25-3FFE-B839-F51EA08B533E`.
+  `1d5ddc5ec50e229977ee10bfb164a6dd6420669c`, and Mach-O UUID
+  `3EBB7977-9F29-335F-BC0A-7462920DA0D9`.
 - Launch Services execution reported both Accessibility and Screen Recording
   granted to the stable helper identity. Direct child execution is not the
   supported transport because macOS may attribute Screen Recording to the
@@ -163,7 +163,7 @@ Code `0.6.116` app server launched inside the logged-in Aqua session:
   36,656 bytes, created with mode `0600`. Visual review showed only the ALVR
   consent window and no surrounding desktop content.
 - One final-build app-server turn launched foreground consent, revalidated PID
-  `22062`,
+  `22930`,
   observed the exact button, activated only that signed target, and completed
   `AXPress`. The operator answered Apple's subsequent Local Network prompt.
 - The bridge wrote schema-v1 outcome `ready` with `networkAvailable: true` and

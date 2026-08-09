@@ -41,7 +41,7 @@ class ClientTests(unittest.TestCase):
         return status, json.loads(stdout.getvalue())
 
     def test_successful_result_is_validated_and_removed(self) -> None:
-        token = "0123456789abcdef0123456789abcdef"
+        token = "0" * 31 + "1"
 
         def launch(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             self.assertEqual(command[-1], token)
