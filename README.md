@@ -115,6 +115,9 @@ teardown without changing the launchd/Mach data plane:
 
 ```bash
 python3 tools/runtime_cli.py doctor --artifact <artifact>
+python3 tools/runtime_cli.py consent \
+  --artifact <artifact> \
+  --profile freedom-locomotion
 python3 tools/runtime_cli.py start \
   --artifact <artifact> \
   --profile freedom-locomotion
@@ -124,9 +127,11 @@ python3 tools/runtime_profile_test.py
 python3 tools/runtime_start_test.py
 ```
 
-All commands support `--json`. `doctor` performs no mutation, `status` refuses
-to infer live health from stale logs or cached PIDs, and `stop` boots out only an
-exact owned launchd job. `start` accepts a sealed curated profile identifier,
+All commands support `--json`. `doctor` performs no mutation, `consent` launches
+the exact installed bridge through Launch Services for foreground Local Network
+authorization, `status` refuses to infer live health from stale logs or cached
+PIDs, and `stop` boots out only an exact owned launchd job. `start` accepts a
+sealed curated profile identifier,
 projects the transactionally installed game tree back to its stock profile
 identity, launches CrossOver with separate exact launcher and steady-state
 process ownership, and reports `waiting` only after the profile-declared

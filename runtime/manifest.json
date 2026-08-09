@@ -13,12 +13,26 @@
       "--bindings",
       ".code/runtime-bindings.json"
     ],
-    "description": "Deterministic payload with a preserved Developer ID bridge bundle for the owner-operated Mac ALVR runtime",
+    "description": "Deterministic payload with a foreground-consent-capable Developer ID bridge for the owner-operated Mac ALVR runtime",
     "id": "mac-alvr-runtime",
     "supportMatrix": "docs/reproducible-mac-alvr-runtime-v1.md",
-    "version": "1.0.0-dev14"
+    "version": "1.0.0-dev15"
   },
   "artifacts": [
+    {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/MacOS/alvr_macos_bridge",
+      "binary": {
+        "architectures": ["arm64"],
+        "format": "mach-o",
+        "kind": "executable"
+      },
+      "id": "native_bridge",
+      "mode": "0555",
+      "path": "${ALVR_HOST_CHECKOUT}/target/release/alvr_macos_bridge",
+      "recipe": "cargo build --manifest-path ${ALVR_HOST_CHECKOUT}/Cargo.toml -p alvr_macos_bridge --release",
+      "signature": "require-lock",
+      "supplyClass": "pinned-git-build"
+    },
     {
       "artifactPath": "payload/macos/libMoltenVK.dylib",
       "binary": {
@@ -124,6 +138,12 @@
     }
   ],
   "bindings": [
+    {
+      "default": "${REPO_ROOT}/../alvr",
+      "name": "ALVR_HOST_CHECKOUT",
+      "phases": ["validate", "build"],
+      "required": true
+    },
     {
       "default": "${REPO_ROOT}/../alvr-visionos",
       "name": "ALVR_VISIONOS_CHECKOUT",
@@ -245,14 +265,42 @@
       "mode": "0444"
     },
     {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Info.plist",
+      "content": {
+        "CFBundleDisplayName": "ALVR macOS Bridge",
+        "CFBundleExecutable": "alvr_macos_bridge",
+        "CFBundleIdentifier": "com.alvr.macos-bridge.iosurface",
+        "CFBundleName": "ALVRMacOSBridge",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "NSBonjourServices": ["_alvr._tcp"],
+        "NSLocalNetworkUsageDescription": "Connect to the ALVR client on the local network."
+      },
+      "format": "plist",
+      "id": "bridge_info_plist",
+      "mode": "0444"
+    },
+    {
+      "artifactPath": "payload/macos/ALVRMacOSBridge.app/Contents/Resources/runtime-owner.json",
+      "content": {
+        "artifactId": "mac-alvr-runtime",
+        "bundleId": "com.alvr.macos-bridge.iosurface",
+        "ownershipSchemaVersion": 1
+      },
+      "format": "json",
+      "id": "native_bundle_owner",
+      "mode": "0444"
+    },
+    {
       "artifactPath": "config/sealing.json",
       "content": {
         "artifactStages": ["unsealed", "sealed"],
         "bundleId": "com.alvr.macos-bridge.iosurface",
         "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
         "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
-        "mode": "preserved-bundle",
-        "performedBy": "Aircar compatibility issue #101",
+        "mode": "separate-step",
+        "performedBy": "macOS lifecycle and privacy issue #62",
         "signedAttestationPath": "Contents/Resources/runtime-sealing.json",
         "teamId": "MM5YXC7T6E",
         "timestamp": false
@@ -269,6 +317,13 @@
       "path": "${REPO_ROOT}",
       "remote": "https://github.com/cbusillo/macos-game-patches.git",
       "revision": "self"
+    },
+    {
+      "cleanPolicy": "all",
+      "id": "alvr_host",
+      "path": "${ALVR_HOST_CHECKOUT}",
+      "remote": "https://github.com/cbusillo/ALVR.git",
+      "revision": "9bc309546fd1c4cdb229ec2a5f11e304154dfc3d"
     },
     {
       "cleanPolicy": "all",
@@ -683,23 +738,12 @@
   "schemaVersion": 1,
   "sealing": {
     "attestationPath": "Contents/Resources/runtime-sealing.json",
-    "attestationSha256": "9a2bd92ddbb4fa40cb52bb38902a9a8829e286e59064fa82b033f3bc7ec0e11d",
     "bundlePath": "payload/macos/ALVRMacOSBridge.app",
     "bundleId": "com.alvr.macos-bridge.iosurface",
-    "bundleTreeSha256": "2f42d727ba5e8588a0c6434761a2460887bb09e728c5b30492e4dc88c691ca24",
     "codeResourcesPath": "Contents/_CodeSignature/CodeResources",
-    "executablePath": "Contents/MacOS/alvr_macos_bridge",
+    "executableArtifactId": "native_bridge",
     "identity": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
-    "mode": "preserved-bundle",
-    "sealedExecutableSha256": "c456a91b8d4d352e1d3e37e4fd894ef59b96cfa1c68cdb6dbf4e5479728151b4",
-    "signature": {
-      "authority": "Developer ID Application: Shiny Computers Leasing LLC (MM5YXC7T6E)",
-      "cdhash": "1731a67fa327ca7c1576f63a084cc3b39f095b41",
-      "identifier": "com.alvr.macos-bridge.iosurface",
-      "kind": "developer-id",
-      "teamIdentifier": "MM5YXC7T6E",
-      "timestamp": false
-    },
+    "mode": "separate-step",
     "teamId": "MM5YXC7T6E",
     "timestamp": false
   },
@@ -707,7 +751,7 @@
     {
       "id": "scope_record",
       "path": "${REPO_ROOT}/docs/reproducible-mac-alvr-runtime-v1.md",
-      "sha256": "712189cc6dbd83c492df89bc001fc6c9efefed4b484003cfa10e2fd284e9888a",
+      "sha256": "b733d20abb2652e279f6aa83fbe5b457ccfb60732fab58454d330e8b767086fe",
       "supplyClass": "repo-source"
     },
     {
@@ -803,7 +847,7 @@
     {
       "id": "artifact_contract",
       "path": "${REPO_ROOT}/docs/reproducible-runtime-artifact.md",
-      "sha256": "5b9a32d80f1bcea2272cbad09483c1a18631bc0add9e71064325c8f3421fb6c5",
+      "sha256": "4541d090fd4412f0cfc88daaa598fc3931f2a7cfc356375468e8519805a04a11",
       "supplyClass": "repo-source"
     },
     {
@@ -833,13 +877,13 @@
     {
       "id": "runtime_control",
       "path": "${REPO_ROOT}/tools/runtime_control.py",
-      "sha256": "c4db10414ace1f188abc3e628206f5a4a3ef18c5c7bc76c3e8be80e7ebc05d8e",
+      "sha256": "d1157df1cdd52c0c004608474f1f1e959395681f703972040168a29f19fa21e2",
       "supplyClass": "repo-source"
     },
     {
       "id": "runtime_start",
       "path": "${REPO_ROOT}/tools/runtime_start.py",
-      "sha256": "259725a29d4ce3b2d3ce45c2cee7d435eca4ef9e9e61991b4955c60db80126f4",
+      "sha256": "ec315d5457a235d5f5a4b3eab01dca679fb07920ba10bca97ce200eff39d8f81",
       "supplyClass": "repo-source"
     },
     {
@@ -875,7 +919,7 @@
     {
       "id": "runtime_cli",
       "path": "${REPO_ROOT}/tools/runtime_cli.py",
-      "sha256": "cda41c2110c98500302359f339534aff87d00d7e680ba41a8ff7339f1335f820",
+      "sha256": "48ca5933404e940882b88daa02770440b195d2a3d3248b753c291ac922de68e6",
       "supplyClass": "repo-source"
     },
     {

@@ -1,6 +1,16 @@
 {
   "artifacts": [
     {
+      "id": "native_bridge",
+      "sha256": "d19ccc9499ae2c6296f3e21a4723d0eb229bd612e2fe09d7ae283ecc09845582",
+      "signature": {
+        "cdhash": "21caddb72fdd23400b32505fae2c2cff43ae6ad4",
+        "identifier": "alvr_macos_bridge-24ad26bdb543f8e1",
+        "kind": "adhoc",
+        "teamIdentifier": null
+      }
+    },
+    {
       "id": "patched_moltenvk",
       "sha256": "03b2606d35090a5f735056abb5cd941ca7d5517c3e2ede0ab1e3fde331aad34a",
       "signature": {
@@ -35,6 +45,6 @@
       "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
     }
   ],
-  "manifestSha256": "d440100a7d01ba03b8644177a40c2247102338c43f1cde79e58b72fb5cb87fc1",
+  "manifestSha256": "a6497fe9a8867f49a331739d9b41e5192e7634454864ed035496451a2f30ec04",
   "schemaVersion": 1
 }

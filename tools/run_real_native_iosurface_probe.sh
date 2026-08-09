@@ -1420,8 +1420,6 @@ stage_native_bridge_install_tree() {
 		"$native_bridge_install_staging/Contents/Info.plist"
 	/usr/bin/plutil -insert CFBundleShortVersionString -string 1.0 \
 		"$native_bridge_install_staging/Contents/Info.plist"
-	/usr/bin/plutil -insert LSBackgroundOnly -bool true \
-		"$native_bridge_install_staging/Contents/Info.plist"
 	/usr/bin/plutil -insert NSLocalNetworkUsageDescription -string \
 		'Connect to the ALVR client on the local network.' \
 		"$native_bridge_install_staging/Contents/Info.plist"

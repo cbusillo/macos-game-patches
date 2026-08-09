@@ -72,6 +72,7 @@ LaunchServices.framework/Support/lsregister
 ## Known Failure Signatures
 
 - `launch_services.missing`: no record exists for the stable bundle identifier.
+- `launch_services.bundle_missing`: the retained stable app is absent.
 - `launch_services.ambiguous`: multiple records exist for the identifier.
 - `launch_services.identity_mismatch`: path, Team ID, or CDHash differs.
 - `launch_services.registration_failed`: `lsregister -f` did not complete.
@@ -183,6 +184,62 @@ reliably present its first Local Network prompt. A foreground consent trigger
 or explicit System Settings remediation must be product-owned before the
 runtime can promise first-run self-service.
 
+### Foreground Consent Slice Plan
+
+The next bounded implementation keeps one executable identity for both modes:
+
+1. add a foreground `--local-network-consent` mode to the native bridge binary;
+2. package the stable app as foreground-capable while keeping ordinary launchd
+   execution headless;
+3. add a production CLI command that verifies the exact installed bundle and
+   Launch Services record before launching that mode through Launch Services;
+4. cover command construction, identity refusal, result mapping, and legacy
+   report behavior with hardware-free fixtures;
+5. rebuild and seal the bridge, then repeat first prompt, allowed recovery, and
+   exact cleanup on the M2 before any M4 release claim.
+
+A separate helper executable is not acceptable because the physical matrix
+proved that a grant for a different Mach-O UUID does not authorize the bridge.
+The runtime must not rewrite or resign the installed stable app to obtain
+consent.
+
+### Foreground Consent Evidence
+
+On 2026-08-09, the bounded foreground slice passed on `chris-mbp`:
+
+- macOS runtime source `a77fc8f54c2be54f6300c19ba3ef2c650d337eab`
+  pins ALVR host source `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d`;
+- sealed dev15 artifact
+  `5ca1da2e103e2ec084560b2f5810ce7c6e0724183414b9100df14c4e6039f735`
+  verifies on the M2;
+- the installed stable app has bundle ID
+  `com.alvr.macos-bridge.iosurface`, Team ID `MM5YXC7T6E`, CDHash
+  `01b9c2734e227f9b70803956b157dec3766f7569`, and Mach-O UUID
+  `B611B6E5-39AA-356B-AFBE-412F46E630EE`;
+- Launch Services reports exactly one record for that URL and identity;
+- the same executable launched through `open -W -n` registered as a visible,
+  frontmost AppKit application and displayed the product-owned consent alert;
+- its real Network.framework Bonjour browser reported ready, the bridge wrote a
+  private `0600` result with `networkAvailable: true`, and the process exited
+  after Continue;
+- the observation window recorded zero `Local Network blocked` events, and
+  final cleanup found no bridge service or bridge process while retaining the
+  exact stable Launch Services record;
+- all 76 control, 31 install, 82 start, and 31 transaction fixtures pass on the
+  M2 with artifact checks and self-tests; all 30 ALVR bridge library tests pass
+  on the build host.
+
+The post-review rebuild changed only the signed artifact metadata and CDHash;
+the foreground-qualified Mach-O bytes and UUID are unchanged. The final app was
+installed and passed exact Launch Services and doctor verification. A console
+lock interrupted the redundant visible repeat, so the pending foreground test
+process was terminated and no new prompt result is claimed for that repeat.
+
+This proves the visible exact-executable foreground path and the already-allowed
+result. A clean-user first prompt, explicit deny for the final UUID, and
+persistence across reboot, logout/login, update, and rollback remain physical
+follow-up gates.
+
 The M2 lane may qualify Launch Services and Local Network behavior and provide
 secondary compatibility evidence. It does not satisfy the pinned M4 production
 host contract and cannot replace M4 cadence, thermal, game, controller, or
@@ -190,11 +247,11 @@ release qualification.
 
 ## Verdict
 
-Hardware-free slice passes. Stable Launch Services registration and
-steady-state removal of Xcode are implemented and deterministic. The M2 now
-qualifies denied-state evidence and allowed recovery for the exact production
-UUID, while proving that the background launchd path does not surface the first
-consent prompt. Foreground first-run consent, pending-state behavior, and
-persistence across reboot, logout/login, update, rollback, and uninstall remain
-the physical issue-#62 gate. The M4 remains authoritative for release
-qualification.
+Hardware-free and foreground-consent slices pass. Stable Launch Services
+registration, steady-state removal of Xcode, and the exact-executable visible
+consent path are implemented. The M2 qualifies historical denied-state evidence,
+allowed recovery, and a final dev15 foreground `ready` result while preserving
+one stable identity. Clean-user first prompt, explicit deny for the final UUID,
+pending-state behavior, and persistence across reboot, logout/login, update,
+rollback, and uninstall remain physical issue-#62 gates. The M4 remains
+authoritative for release qualification.

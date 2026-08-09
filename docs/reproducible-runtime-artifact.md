@@ -367,6 +367,11 @@ external `codesign` inspection.
 ### Curated Runtime Start
 
 ```bash
+python3 tools/runtime_cli.py consent \
+  --artifact .code/runtime-artifacts/<artifact> \
+  --profile freedom-locomotion \
+  --bindings .code/runtime-bindings.json
+
 python3 tools/runtime_cli.py start \
   --artifact .code/runtime-artifacts/<artifact> \
   --profile freedom-locomotion \
@@ -380,7 +385,15 @@ python3 tools/runtime_cli.py stop \
   --bindings .code/runtime-bindings.json
 ```
 
-The dev14 source contract pins the profile validator, JSON Schema, and explicit
+The dev15 source contract builds and separately seals a foreground-capable
+native bridge whose exact executable handles both launchd streaming and
+Launch-Services-owned Local Network consent. The CLI refuses consent mode unless
+the committed install, retained bundle, inactive service, and exact Launch
+Services record all pass admission. A different helper executable is not an
+acceptable consent surrogate because macOS can scope the decision to the
+Mach-O UUID.
+
+The dev15 source contract pins the profile validator, JSON Schema, and explicit
 curated certification profiles. Public start accepts an identifier rather than
 an arbitrary path, requires the exact sealed profile hash, verifies Steam
 app/build/depot identity, and projects the installed game tree through the exact

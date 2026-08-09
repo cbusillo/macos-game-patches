@@ -1,5 +1,6 @@
 {
   "ALVR_CLIENT_CORE_CHECKOUT": "${ALVR_VISIONOS_CHECKOUT}/ALVR",
+  "ALVR_HOST_CHECKOUT": "${REPO_ROOT}/../alvr",
   "ALVR_VISIONOS_CHECKOUT": "${REPO_ROOT}/../alvr-visionos",
   "CROSSOVER_APP": "/Applications/CrossOver.app",
   "DXVK_BUILD_ROOT": "/path/to/patched/dxvk-build/src",
