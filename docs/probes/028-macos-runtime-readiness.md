@@ -235,10 +235,44 @@ installed and passed exact Launch Services and doctor verification. A console
 lock interrupted the redundant visible repeat, so the pending foreground test
 process was terminated and no new prompt result is claimed for that repeat.
 
+### Post-Merge Persistence Baseline
+
+On 2026-08-09, the clean M2 lane was synchronized to merged `main` at
+`493a83045107578869122c8a0ff7426d40e31688`. Evidence is archived under
+`.code/probes/028-macos-runtime-readiness/persistence-baseline-20260809T051412Z/`:
+
+- sealed artifact
+  `5ca1da2e103e2ec084560b2f5810ce7c6e0724183414b9100df14c4e6039f735`
+  verifies exactly;
+- runtime status is `installed`, with no launchd service or bridge process and
+  exactly one Launch Services record for the final stable URL, bundle ID, Team
+  ID, and CDHash;
+- doctor still reports 18 passes and only the deliberate Mac14,6 versus
+  Mac16,9 host-model failure;
+- the cleaned exploratory lane has no committed transaction journal and no The
+  Lab install root. The production `consent` command therefore stopped safely
+  at `preflight.missing` before launching or mutating the stable app;
+- direct exact-app launches from SSH reached `NSAlert runModal`, but the modal
+  was not exposed to SSH-session accessibility automation. Controlled cleanup
+  produced one `cancelled` result with `networkAvailable: null` and one run with
+  no result; neither run recorded a `Local Network blocked` event, and both
+  ended with no service or bridge process;
+- FileVault is enabled and automatic login is disabled, so an unattended reboot
+  would stop at interactive login. Reboot and logout/login persistence remain
+  deferred until a physical or Screen Sharing operator can restore the same GUI
+  session; and
+- update, rollback, and ordinary uninstall were not attempted without a
+  committed install plan and verified candidate artifacts. The M2 host-model
+  mismatch must not be bypassed to manufacture that state.
+
+These post-merge probes qualify the exact retained identity and cleanup state,
+but they do not add an allowed, denied, pending, reboot, logout/login, update,
+rollback, or uninstall permission verdict.
+
 This proves the visible exact-executable foreground path and the already-allowed
 result. A clean-user first prompt, explicit deny for the final UUID, and
-persistence across reboot, logout/login, update, and rollback remain physical
-follow-up gates.
+persistence across reboot, logout/login, update, rollback, and uninstall remain
+physical follow-up gates.
 
 The M2 lane may qualify Launch Services and Local Network behavior and provide
 secondary compatibility evidence. It does not satisfy the pinned M4 production
