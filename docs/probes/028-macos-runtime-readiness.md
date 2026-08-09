@@ -147,6 +147,42 @@ touching its dirty legacy checkout:
 - production `doctor` reports 18 passes and one deliberate failure:
   `prerequisite.host_model` records actual `Mac14,6` versus required `Mac16,9`.
 
+Physical Local Network qualification then exercised the exact retained bridge
+identity in
+`m2-consent-20260809T005112Z`:
+
+- a native arm64 producer imported all three IOSurface slots, passed all three
+  startup self-tests, and released the startup barrier without requiring the
+  CrossOver bottle or a game process;
+- the untouched stable bridge opened TCP `8082` and IPv4/IPv6 mDNS sockets on
+  `5353`, but its first launchd-owned network attempt showed no visible prompt;
+  `UserEventAgent` repeatedly recorded `Local Network blocked`, allowed state
+  `0`, for production Mach-O UUID
+  `5C137FC7-CC15-3CE2-AC16-D7DC2E532FC8`;
+- a foreground helper with the same bundle identifier and Team ID could show
+  the prompt, but its grant did not transfer because it had a different Mach-O
+  UUID;
+- a temporary foreground-capable copy preserved the exact production Mach-O
+  bytes and UUID while changing only bundle metadata and signature. Launchd
+  still could not present a prompt, but registering that exact UUID made the
+  System Settings entry actionable. Toggling `ALVR macOS Bridge` off and back
+  on authorized the UUID;
+- after restoring the untouched stable app, its original CDHash
+  `1731a67fa327ca7c1576f63a084cc3b39f095b41` completed the same authenticated
+  producer handshake with zero Local Network blocked events during the
+  observation window. The remaining `Host is down`, `No route to host`, or
+  timeout result reflected the offline trusted client and is not used as a
+  permission verdict;
+- cleanup unloaded the test LaunchAgent, stopped the bridge and producer,
+  removed both temporary app copies, and restored exactly one Launch Services
+  record for the stable URL, Team ID, bundle ID, and original CDHash.
+
+This qualifies denied-state detection and allowed-state recovery on the M2. It
+also exposes a production UX blocker: the background-only launchd bridge cannot
+reliably present its first Local Network prompt. A foreground consent trigger
+or explicit System Settings remediation must be product-owned before the
+runtime can promise first-run self-service.
+
 The M2 lane may qualify Launch Services and Local Network behavior and provide
 secondary compatibility evidence. It does not satisfy the pinned M4 production
 host contract and cannot replace M4 cadence, thermal, game, controller, or
@@ -155,8 +191,10 @@ release qualification.
 ## Verdict
 
 Hardware-free slice passes. Stable Launch Services registration and
-steady-state removal of Xcode are implemented and deterministic. Local Network
-pending/denied/allowed behavior and persistence across reboot, logout/login,
-update, rollback, and uninstall remain the physical issue-#62 gate. The M2 is
-ready for exploratory privacy testing while the M4 remains authoritative for
-release qualification.
+steady-state removal of Xcode are implemented and deterministic. The M2 now
+qualifies denied-state evidence and allowed recovery for the exact production
+UUID, while proving that the background launchd path does not surface the first
+consent prompt. Foreground first-run consent, pending-state behavior, and
+persistence across reboot, logout/login, update, rollback, and uninstall remain
+the physical issue-#62 gate. The M4 remains authoritative for release
+qualification.
