@@ -297,6 +297,41 @@ class LaunchServicesTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.details["records"][0]["path"], str(self.bundle))
 
+    def test_separate_step_registration_uses_installed_signed_identity(self) -> None:
+        manifest = {
+            "sealing": {
+                "mode": "separate-step",
+                "bundleId": "com.alvr.macos-bridge.iosurface",
+                "teamId": "MM5YXC7T6E",
+            }
+        }
+        runner = mock.Mock()
+        runner.run.side_effect = (
+            CommandResult(("/usr/bin/codesign", "--verify"), 0),
+            CommandResult(
+                ("/usr/bin/codesign", "-dv"),
+                0,
+                stderr=(
+                    "Identifier=com.alvr.macos-bridge.iosurface\n"
+                    "TeamIdentifier=MM5YXC7T6E\n"
+                    "CDHash=90475abba09fa29e321c4ce7041c064d3c44c686\n"
+                ),
+            ),
+            CommandResult(
+                (str(LSREGISTER_PATH), "-dump"),
+                0,
+                self.record(cdhash="90475abba09fa29e321c4ce7041c064d3c44c686"),
+            ),
+        )
+
+        result = check_launch_services_registration(manifest, self.bundle, runner)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.details["expected"]["cdHash"],
+            "90475abba09fa29e321c4ce7041c064d3c44c686",
+        )
+
     def test_missing_duplicate_and_identity_mismatch_fail(self) -> None:
         separator = "-" * 80
         alias = self.root / "Alias.app"

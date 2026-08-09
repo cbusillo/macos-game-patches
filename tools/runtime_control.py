@@ -756,13 +756,57 @@ def check_launch_services_registration(
         )
 
     sealing = manifest["sealing"]
-    signature = sealing["signature"]
+    signature = sealing.get("signature")
+    if isinstance(signature, dict) and isinstance(signature.get("cdhash"), str):
+        expected_cd_hashes = [signature["cdhash"].lower()]
+    elif sealing.get("mode") == "separate-step":
+        verification_error = verify_codesign_target(bridge_bundle, runner)
+        identity, identity_error = codesign_identity(bridge_bundle, runner)
+        if verification_error is not None or identity is None:
+            return CheckResult(
+                "launch_services.identity_mismatch",
+                "fail",
+                "Stable bridge bundle does not have a valid readable code-sign identity",
+                remediation,
+                {
+                    "path": str(bridge_bundle),
+                    "verificationError": verification_error,
+                    "identityError": identity_error,
+                },
+            )
+        if (
+            identity["Identifier"] != sealing["bundleId"]
+            or identity["TeamIdentifier"] != sealing["teamId"]
+        ):
+            return CheckResult(
+                "launch_services.identity_mismatch",
+                "fail",
+                "Stable bridge bundle code-sign identity does not match the runtime contract",
+                remediation,
+                {
+                    "path": str(bridge_bundle),
+                    "expectedIdentifier": sealing["bundleId"],
+                    "expectedTeamId": sealing["teamId"],
+                    "actual": identity_record(identity),
+                },
+            )
+        expected_cd_hashes = [value.lower() for value in identity["CDHashes"]]
+    else:
+        return CheckResult(
+            "launch_services.identity_mismatch",
+            "fail",
+            "Runtime contract does not declare a usable bridge signature identity",
+            remediation,
+            {"path": str(bridge_bundle), "sealingMode": sealing.get("mode")},
+        )
     expected = {
         "identifier": sealing["bundleId"],
         "path": str(bridge_bundle),
         "teamId": sealing["teamId"],
-        "cdHash": signature["cdhash"],
+        "cdHashes": expected_cd_hashes,
     }
+    if len(expected_cd_hashes) == 1:
+        expected["cdHash"] = expected_cd_hashes[0]
     result = runner.run([str(LSREGISTER_PATH), "-dump"], timeout=30.0)
     if result.error is not None or result.returncode != 0:
         return CheckResult(
@@ -801,7 +845,7 @@ def check_launch_services_registration(
         and os.path.abspath(pathlib.Path(record["path"]).expanduser())
         == os.path.abspath(bridge_bundle)
         and record["teamId"] == expected["teamId"]
-        and expected["cdHash"] in record["cdHashes"]
+        and any(value in record["cdHashes"] for value in expected_cd_hashes)
     )
     if not matches:
         return CheckResult(
