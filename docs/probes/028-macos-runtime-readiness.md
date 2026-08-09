@@ -207,14 +207,14 @@ consent.
 
 On 2026-08-09, the bounded foreground slice passed on `chris-mbp`:
 
-- macOS runtime source `f0f6eb03f38714efa163e76472b5b1e8058fadd0`
+- macOS runtime source `a77fc8f54c2be54f6300c19ba3ef2c650d337eab`
   pins ALVR host source `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d`;
 - sealed dev15 artifact
-  `fa5166c7d92dd67d81a97d035807a74e60bad7a1498d117f53408c84ebb8791d`
+  `5ca1da2e103e2ec084560b2f5810ce7c6e0724183414b9100df14c4e6039f735`
   verifies on the M2;
 - the installed stable app has bundle ID
   `com.alvr.macos-bridge.iosurface`, Team ID `MM5YXC7T6E`, CDHash
-  `6d92956c91a240e0bfa9199fa0513fd9ae1cdf8a`, and Mach-O UUID
+  `01b9c2734e227f9b70803956b157dec3766f7569`, and Mach-O UUID
   `B611B6E5-39AA-356B-AFBE-412F46E630EE`;
 - Launch Services reports exactly one record for that URL and identity;
 - the same executable launched through `open -W -n` registered as a visible,
@@ -225,9 +225,15 @@ On 2026-08-09, the bounded foreground slice passed on `chris-mbp`:
 - the observation window recorded zero `Local Network blocked` events, and
   final cleanup found no bridge service or bridge process while retaining the
   exact stable Launch Services record;
-- all 75 control, 31 install, 82 start, and 31 transaction fixtures pass on the
+- all 76 control, 31 install, 82 start, and 31 transaction fixtures pass on the
   M2 with artifact checks and self-tests; all 30 ALVR bridge library tests pass
   on the build host.
+
+The post-review rebuild changed only the signed artifact metadata and CDHash;
+the foreground-qualified Mach-O bytes and UUID are unchanged. The final app was
+installed and passed exact Launch Services and doctor verification. A console
+lock interrupted the redundant visible repeat, so the pending foreground test
+process was terminated and no new prompt result is claimed for that repeat.
 
 This proves the visible exact-executable foreground path and the already-allowed
 result. A clean-user first prompt, explicit deny for the final UUID, and
