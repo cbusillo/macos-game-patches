@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import plistlib
+import signal
 import tempfile
 import unittest
 from unittest import mock
@@ -165,6 +166,159 @@ gui/501/com.cbusillo.every-code-lab.app-server = {
                 manager.terminate_exact_processes([record], paths, 501)
             kill.assert_not_called()
 
+    def test_pid_reuse_after_signal_counts_original_as_stopped(self) -> None:
+        paths = manager.paths_for(pathlib.Path("/Users/fixture"))
+        record = manager.Listener(
+            pid=42,
+            command_name="code",
+            addresses=("127.0.0.1:8765",),
+            uid=501,
+            command=manager.expected_command(paths),
+            start_token=100,
+        )
+        with mock.patch.object(
+            manager,
+            "process_identity",
+            side_effect=[
+                (501, manager.expected_command(paths), 100),
+                (501, manager.expected_command(paths), 101),
+            ],
+        ), mock.patch.object(manager.os, "kill") as kill:
+            manager.terminate_exact_processes([record], paths, 501)
+
+        kill.assert_called_once_with(42, signal.SIGTERM)
+
+    def test_unknown_birth_token_is_not_counted_as_stopped(self) -> None:
+        paths = manager.paths_for(pathlib.Path("/Users/fixture"))
+        record = manager.Listener(
+            pid=42,
+            command_name="code",
+            addresses=("127.0.0.1:8765",),
+            uid=501,
+            command=manager.expected_command(paths),
+            start_token=100,
+        )
+
+        def kill(pid: int, requested_signal: int) -> None:
+            self.assertEqual(pid, 42)
+            if requested_signal == 0:
+                raise ProcessLookupError
+            self.assertEqual(requested_signal, signal.SIGTERM)
+
+        with mock.patch.object(
+            manager,
+            "process_identity",
+            side_effect=[
+                (501, manager.expected_command(paths), 100),
+                (501, manager.expected_command(paths), None),
+                (None, None, None),
+            ],
+        ) as identity, mock.patch.object(
+            manager.os,
+            "kill",
+            side_effect=kill,
+        ), mock.patch.object(manager.time, "sleep"):
+            manager.terminate_exact_processes([record], paths, 501)
+
+        self.assertEqual(identity.call_count, 3)
+
+    def test_uninstall_ignores_reused_service_pid_after_bootout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            paths = manager.paths_for(home)
+            paths.plist.parent.mkdir(parents=True)
+            paths.state_root.mkdir(parents=True)
+            paths.plist.write_text("fixture")
+            paths.contract.write_text("fixture")
+            service = {
+                "loaded": True,
+                "path": str(paths.plist),
+                "pid": 42,
+                "state": "running",
+            }
+            with mock.patch.object(
+                manager,
+                "validate_host",
+                return_value={"uid": os.getuid()},
+            ), mock.patch.object(
+                manager,
+                "load_managed_installation",
+                return_value={"managed": True},
+            ), mock.patch.object(
+                manager,
+                "launchd_status",
+                side_effect=[
+                    service,
+                    {"loaded": False, "path": None, "pid": None, "state": None},
+                ],
+            ), mock.patch.object(
+                manager,
+                "process_identity",
+                side_effect=[
+                    (os.getuid(), manager.expected_command(paths), 100),
+                    (os.getuid(), manager.expected_command(paths), 101),
+                ],
+            ), mock.patch.object(manager, "bootout") as bootout, mock.patch.object(
+                manager,
+                "listeners",
+                return_value=[],
+            ):
+                result = manager.uninstall(paths)
+
+            self.assertTrue(result["removed"])
+            bootout.assert_called_once_with(os.getuid())
+            self.assertFalse(paths.plist.exists())
+            self.assertFalse(paths.contract.exists())
+
+    def test_uninstall_refuses_remaining_listener_before_removing_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            paths = manager.paths_for(home)
+            paths.plist.parent.mkdir(parents=True)
+            paths.state_root.mkdir(parents=True)
+            paths.plist.write_text("fixture")
+            paths.contract.write_text("fixture")
+            service = {
+                "loaded": True,
+                "path": str(paths.plist),
+                "pid": None,
+                "state": "waiting",
+            }
+            record = manager.Listener(
+                42,
+                "code",
+                ("127.0.0.1:8765",),
+                os.getuid(),
+                manager.expected_command(paths),
+                100,
+            )
+            with mock.patch.object(
+                manager,
+                "validate_host",
+                return_value={"uid": os.getuid()},
+            ), mock.patch.object(
+                manager,
+                "load_managed_installation",
+                return_value={"managed": True},
+            ), mock.patch.object(
+                manager,
+                "launchd_status",
+                side_effect=[
+                    service,
+                    {"loaded": False, "path": None, "pid": None, "state": None},
+                ],
+            ), mock.patch.object(manager, "bootout"), mock.patch.object(
+                manager,
+                "listeners",
+                side_effect=[[], [record]],
+            ):
+                with self.assertRaises(manager.AgentError) as raised:
+                    manager.uninstall(paths)
+
+            self.assertEqual(raised.exception.code, "launchd.bootout_failed")
+            self.assertTrue(paths.plist.exists())
+            self.assertTrue(paths.contract.exists())
+
     def test_first_migration_failure_removes_autoload_plist(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)
@@ -226,6 +380,97 @@ gui/501/com.cbusillo.every-code-lab.app-server = {
             link.symlink_to(target, target_is_directory=True)
             with self.assertRaises(manager.AgentError):
                 manager.reject_symlink_components(link / "child")
+
+    def test_broken_symlinked_component_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            root = pathlib.Path(temporary)
+            link = root / "broken"
+            link.symlink_to(root / "missing", target_is_directory=True)
+            self.assertFalse(link.exists())
+            self.assertTrue(link.is_symlink())
+            with self.assertRaises(manager.AgentError) as raised:
+                manager.reject_symlink_components(link / "child")
+            self.assertEqual(raised.exception.code, "path.symlink")
+
+    def test_plist_write_rejects_symlink_before_creating_target_directory(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            root = pathlib.Path(temporary)
+            home = root / "home"
+            outside = root / "outside"
+            home.mkdir()
+            outside.mkdir()
+            (home / "Library").symlink_to(outside, target_is_directory=True)
+            paths = manager.paths_for(home)
+
+            with self.assertRaises(manager.AgentError) as raised:
+                manager.write_plist_atomic(paths, b"fixture")
+
+            self.assertEqual(raised.exception.code, "path.symlink")
+            self.assertFalse((outside / "LaunchAgents").exists())
+
+    def test_json_write_rejects_symlink_before_chmod_or_write(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            root = pathlib.Path(temporary)
+            home = root / "home"
+            outside = root / "outside"
+            home.mkdir()
+            outside.mkdir()
+            os.chmod(outside, 0o755)
+            (home / ".code").mkdir()
+            paths = manager.paths_for(home)
+            paths.state_root.symlink_to(outside, target_is_directory=True)
+            original_mode = outside.stat().st_mode & 0o777
+
+            with self.assertRaises(manager.AgentError) as raised:
+                manager.write_json_atomic(paths.contract, {}, home=home)
+
+            self.assertEqual(raised.exception.code, "path.symlink")
+            self.assertEqual(outside.stat().st_mode & 0o777, original_mode)
+            self.assertFalse((outside / paths.contract.name).exists())
+
+    def test_operation_lock_rejects_symlink_before_chmod_or_lock(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            root = pathlib.Path(temporary)
+            home = root / "home"
+            outside = root / "outside"
+            home.mkdir()
+            outside.mkdir()
+            os.chmod(outside, 0o755)
+            (home / ".code").mkdir()
+            paths = manager.paths_for(home)
+            paths.state_root.symlink_to(outside, target_is_directory=True)
+            original_mode = outside.stat().st_mode & 0o777
+
+            with self.assertRaises(manager.AgentError) as raised:
+                with manager.operation_lock(paths):
+                    self.fail("symlinked state root should not acquire the lock")
+
+            self.assertEqual(raised.exception.code, "path.symlink")
+            self.assertEqual(outside.stat().st_mode & 0o777, original_mode)
+            self.assertFalse((outside / paths.lock.name).exists())
+
+    def test_private_file_rejects_fifo_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            path = pathlib.Path(temporary) / "log"
+            os.mkfifo(path, 0o600)
+
+            with self.assertRaises(manager.AgentError) as raised:
+                manager.prepare_private_file(path)
+
+            self.assertEqual(raised.exception.code, "path.unsafe")
+
+    def test_operation_lock_rejects_fifo(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            home = pathlib.Path(temporary)
+            paths = manager.paths_for(home)
+            paths.state_root.mkdir(parents=True)
+            os.mkfifo(paths.lock, 0o600)
+
+            with self.assertRaises(manager.AgentError) as raised:
+                with manager.operation_lock(paths):
+                    self.fail("FIFO lock should not be accepted")
+
+            self.assertEqual(raised.exception.code, "path.unsafe")
 
 
 if __name__ == "__main__":
