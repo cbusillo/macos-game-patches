@@ -100,7 +100,7 @@ Services records, service PID, client state timing, and cleanup evidence.
 
 Hardware-free validation on 2026-08-08 passes:
 
-- 72 runtime-control fixtures, including build-only Xcode scoping and exact
+- 73 runtime-control fixtures, including build-only Xcode scoping and exact
   Launch Services missing, duplicate, path, Team ID, CDHash, query, symlink,
   and registration-postcondition cases;
 - 31 install fixtures, including committed registration failure and idempotent
@@ -118,14 +118,45 @@ one matching record for the retained bundle path, bundle identifier
 `com.alvr.macos-bridge.iosurface`, Team ID `MM5YXC7T6E`, and CDHash
 `1731a67fa327ca7c1576f63a084cc3b39f095b41`.
 
-Full artifact input validation intentionally stopped at `git.dirty` because the
-contract source changes are not committed yet. JetBrains changed-file
-inspection was inconclusive because the opened project has no configured Python
-SDK; the helper closed its project lease cleanly and requested no retry.
+After merge, full artifact input validation passed at source commit
+`574b1802abb6b8031d98ac3b3e73bec61bac10ef`. An ignored uv environment now
+provides Python 3.12.11 to IntelliJ, and changed-file JetBrains inspection is
+green with zero findings.
+
+### Secondary M2 Lane
+
+On 2026-08-09, `chris-mbp` was prepared as an exploratory secondary host without
+touching its dirty legacy checkout:
+
+- a clean sibling checkout at `~/Developer/macos-game-patches-m2` is pinned to
+  merge commit `574b1802abb6b8031d98ac3b3e73bec61bac10ef`;
+- an ignored uv environment provides Python 3.12.11;
+- exact CrossOver 26.2 build `26.2.0.39821` is installed under
+  `~/Applications/CrossOver.app` with lane-local bindings;
+- current-contract sealed artifact
+  `e1f253784776501fe33c8c8d6a65e99696869c37db6c84d33e57a1cec8dbd2b1`
+  verifies on the M2;
+- the stable bridge at
+  `~/Developer/macos-game-patches-m2/.code/state/alvr-macos-bridge/`
+  `ALVRMacOSBridge.app` verifies as bundle ID
+  `com.alvr.macos-bridge.iosurface`, Team ID `MM5YXC7T6E`, and CDHash
+  `1731a67fa327ca7c1576f63a084cc3b39f095b41`;
+- Launch Services has exactly one matching record for that stable M2 URL;
+- all 73 control, 31 install, 77 start, and 31 transaction fixtures pass on the
+  M2, together with artifact contract checks and self-tests;
+- production `doctor` reports 18 passes and one deliberate failure:
+  `prerequisite.host_model` records actual `Mac14,6` versus required `Mac16,9`.
+
+The M2 lane may qualify Launch Services and Local Network behavior and provide
+secondary compatibility evidence. It does not satisfy the pinned M4 production
+host contract and cannot replace M4 cadence, thermal, game, controller, or
+release qualification.
 
 ## Verdict
 
 Hardware-free slice passes. Stable Launch Services registration and
 steady-state removal of Xcode are implemented and deterministic. Local Network
 pending/denied/allowed behavior and persistence across reboot, logout/login,
-update, rollback, and uninstall remain the physical issue-#62 gate.
+update, rollback, and uninstall remain the physical issue-#62 gate. The M2 is
+ready for exploratory privacy testing while the M4 remains authoritative for
+release qualification.
