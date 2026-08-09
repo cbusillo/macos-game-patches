@@ -269,6 +269,27 @@ These post-merge probes qualify the exact retained identity and cleanup state,
 but they do not add an allowed, denied, pending, reboot, logout/login, update,
 rollback, or uninstall permission verdict.
 
+### Consent Admission Repair
+
+On 2026-08-09, detached post-merge review found that production `consent`
+required an `installed` detail that the exact Launch Services validator never
+returns on success. Source commit `c3b6f14a5fb9263851f649d7b98b96b647ee2589`
+now admits the validator's `pass` result directly while preserving every
+missing, ambiguous, wrong-path, wrong-Team-ID, wrong-CDHash, query, and active
+service refusal.
+
+- all 82 start, 76 control, 31 install, and 31 transaction fixtures pass;
+- artifact contract checks and all artifact self-tests pass;
+- sealed artifact
+  `c615297f7553f0f92072884a388ad5cce7d3290f49d3578ee7d20c0986f1ab58`
+  verifies with the same foreground-qualified Mach-O UUID
+  `B611B6E5-39AA-356B-AFBE-412F46E630EE`;
+- the rebuilt Developer ID signature has Team ID `MM5YXC7T6E`, bundle ID
+  `com.alvr.macos-bridge.iosurface`, and CDHash
+  `40df4909a1a674f2d6702d024c69d15cc023a475`; and
+- no new Local Network permission verdict is claimed until this exact sealed
+  artifact is installed and exercised from the M2 host-local GUI Lab session.
+
 This proves the visible exact-executable foreground path and the already-allowed
 result. A clean-user first prompt, explicit deny for the final UUID, and
 persistence across reboot, logout/login, update, rollback, and uninstall remain
