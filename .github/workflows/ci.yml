@@ -51,6 +51,9 @@ jobs:
           python3 -m py_compile \
             tools/vr_stack_cleanup.py \
             tools/launch_freedom_crossover.py \
+            tools/build_macos_ui_helper.py \
+            tools/macos_ui_helper_client.py \
+            tools/macos_ui_helper_client_test.py \
             tools/build_runtime_artifact.py \
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
@@ -71,6 +74,9 @@ jobs:
           python3 tools/runtime_profile.py check
           python3 tools/runtime_profile.py self-test
           python3 tools/runtime_profile_test.py
+
+      - name: Validate macOS UI helper client
+        run: python3 tools/macos_ui_helper_client_test.py
 
       - name: Validate runtime control plane
         run: |
@@ -120,9 +126,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate macOS UI helper
+        run: |
+          swift test --package-path tools/macos_ui_helper
+          python3 tools/macos_ui_helper_client_test.py
+          python3 tools/build_macos_ui_helper.py check
+
       - name: Compile lifecycle tools
         run: |
           python3 -m py_compile \
+            tools/build_macos_ui_helper.py \
+            tools/macos_ui_helper_client.py \
+            tools/macos_ui_helper_client_test.py \
             tools/build_runtime_artifact.py \
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
