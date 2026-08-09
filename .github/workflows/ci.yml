@@ -54,6 +54,8 @@ jobs:
             tools/build_macos_ui_helper.py \
             tools/macos_ui_helper_client.py \
             tools/macos_ui_helper_client_test.py \
+            tools/macos_app_server_launch_agent.py \
+            tools/macos_app_server_launch_agent_test.py \
             tools/build_runtime_artifact.py \
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
@@ -75,8 +77,10 @@ jobs:
           python3 tools/runtime_profile.py self-test
           python3 tools/runtime_profile_test.py
 
-      - name: Validate macOS UI helper client
-        run: python3 tools/macos_ui_helper_client_test.py
+      - name: Validate macOS lab helpers
+        run: |
+          python3 tools/macos_ui_helper_client_test.py
+          python3 tools/macos_app_server_launch_agent_test.py
 
       - name: Validate runtime control plane
         run: |
@@ -130,6 +134,7 @@ jobs:
         run: |
           swift test --package-path tools/macos_ui_helper
           python3 tools/macos_ui_helper_client_test.py
+          python3 tools/macos_app_server_launch_agent_test.py
           python3 tools/build_macos_ui_helper.py check
 
       - name: Compile lifecycle tools
@@ -138,6 +143,8 @@ jobs:
             tools/build_macos_ui_helper.py \
             tools/macos_ui_helper_client.py \
             tools/macos_ui_helper_client_test.py \
+            tools/macos_app_server_launch_agent.py \
+            tools/macos_app_server_launch_agent_test.py \
             tools/build_runtime_artifact.py \
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
