@@ -280,7 +280,7 @@ Primary references:
 Steady-state readiness applies the manifest's runtime prerequisite scope.
 Xcode remains required and recorded when artifacts are built and sealed, but a
 verified installed artifact does not invoke `xcodebuild`, `xcrun`, or
-`devicectl` during `doctor`, `start`, reconnect, stop, or uninstall.
+`devicectl` during `doctor`, `consent`, `start`, reconnect, stop, or uninstall.
 
 When the retained bridge bundle is installed, `doctor` requires one exact
 Launch Services record for its stable path, bundle identifier, Developer ID
@@ -290,11 +290,20 @@ commits the exact filesystem transaction first, then idempotently establishes
 and verifies registration. Ordinary uninstall retains the bundle and does not
 unregister it.
 
+The foreground consent command launches the exact installed bridge bundle
+through Launch Services and runs the bridge executable's
+`--local-network-consent` mode. That mode opens an AppKit window and browses the
+declared `_alvr._tcp` Bonjour service without starting IOSurface, encoding, or
+the launchd Mach service. It reports current `ready`, `policy-denied`, `waiting`,
+`failed`, `cancelled`, or `setup-failed` state through a private result file and
+never rewrites or resigns the stable app.
+
 The start report includes the authenticated client telemetry record. Text mode
-prints `client_status=waiting` plus an operator action to open ALVR on Vision Pro
-and allow Local Network access for the stable bridge when prompted. This state
-does not claim that macOS exposes a supported query for pending versus denied
-Local Network consent; those cases remain a physical qualification gate.
+prints `client_status=waiting` plus an operator action to run `consent`, open
+ALVR on Vision Pro, and use System Settings when macOS does not display a prompt.
+Neither command claims that macOS exposes a supported general permission
+database query; persistence and later revocation remain physical qualification
+gates.
 
 ## Evidence And Cleanup Ownership
 

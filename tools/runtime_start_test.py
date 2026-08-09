@@ -23,6 +23,7 @@ import runtime_profile
 import runtime_start
 import runtime_transaction
 from runtime_control import (
+    CheckResult,
     CommandResult,
     ControlError,
     RuntimeContext,
@@ -50,11 +51,14 @@ from runtime_start import (
     STARTUP_RESULT_NAME,
     ProfileStartAdmission,
     StartAdmission,
+    LocalNetworkConsentReport,
     StartReport,
     SubprocessProducerLauncher,
     _confirm_producer_identity,
     _group_is_live,
     _install_plan_digest,
+    _local_network_consent_command,
+    _parse_local_network_consent_result,
     _inspect_profile_admission,
     _idempotent_live_start,
     _inspect_producer_identity,
@@ -68,6 +72,7 @@ from runtime_start import (
     _resolve_crossover_launcher,
     _select_committed_install_plan,
     read_client_telemetry,
+    authorize_local_network,
     start_runtime,
     supervise_runtime,
 )
@@ -1261,6 +1266,161 @@ class RuntimeStartTests(unittest.TestCase):
         timed_out = expired.run(["late"])
         self.assertEqual(timed_out.error, "timeout")
         self.assertEqual(runner.run.call_count, 1)
+
+    def test_local_network_consent_command_uses_exact_installed_bundle(self) -> None:
+        result_path = self.fixture.root / "consent-result.json"
+        self.assertEqual(
+            _local_network_consent_command(self.fixture.paths, result_path),
+            (
+                "/usr/bin/open",
+                "-W",
+                "-n",
+                str(self.fixture.paths.bridge_bundle),
+                "--args",
+                "--local-network-consent",
+                "--result-path",
+                str(result_path),
+            ),
+        )
+
+    def test_local_network_consent_result_requires_private_exact_contract(self) -> None:
+        result_path = self.fixture.root / "consent-result.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "mode": "local-network-consent",
+                    "outcome": "ready",
+                    "networkAvailable": True,
+                    "message": "ready",
+                }
+            )
+        )
+        result_path.chmod(0o600)
+        self.assertEqual(
+            _parse_local_network_consent_result(result_path)["outcome"],
+            "ready",
+        )
+
+        result_path.chmod(0o644)
+        with self.assertRaisesRegex(ControlError, "unsafe ownership"):
+            _parse_local_network_consent_result(result_path)
+
+    def test_authorize_local_network_runs_foreground_exact_identity(self) -> None:
+        fixture = self.fixture
+
+        class ConsentRunner:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, ...]] = []
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                timeout: float = 10.0,
+            ) -> CommandResult:
+                command = tuple(str(item) for item in argv)
+                self.commands.append(command)
+                if command[:2] == ("/bin/launchctl", "print"):
+                    return CommandResult(command, 113, stderr="Could not find service")
+                if command[:3] == ("/usr/bin/open", "-W", "-n"):
+                    result_path = pathlib.Path(command[-1])
+                    result_path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "local-network-consent",
+                                "outcome": "ready",
+                                "networkAvailable": True,
+                                "message": "Bonjour discovery is active.",
+                            }
+                        )
+                    )
+                    result_path.chmod(0o600)
+                    return CommandResult(command, 0)
+                return CommandResult(command, 1)
+
+        runner = ConsentRunner()
+        context = replace(fixture.context, runner=runner)
+        with mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ), mock.patch(
+            "runtime_start.check_launch_services_registration",
+            return_value=CheckResult(
+                "launch_services.registration",
+                "pass",
+                "exact registration",
+                "",
+                {"installed": True},
+            ),
+        ):
+            report = authorize_local_network(
+                context,
+                fixture.artifact,
+                fixture.profile.installed.loaded.data["id"],
+            )
+
+        self.assertIsInstance(report, LocalNetworkConsentReport)
+        self.assertTrue(report.ok)
+        self.assertEqual(report.outcome, "ready")
+        open_command = next(command for command in runner.commands if command[0] == "/usr/bin/open")
+        self.assertEqual(open_command[3], str(fixture.paths.bridge_bundle))
+        self.assertFalse((fixture.paths.state_root / "local-network-consent").exists())
+
+    def test_authorize_local_network_refuses_active_service(self) -> None:
+        service = mock.Mock()
+        service.error_code = None
+        service.message = None
+        service.snapshot.present = True
+        runner = mock.Mock()
+        context = replace(self.fixture.context, runner=runner)
+        with mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ), mock.patch("runtime_start.inspect_service", return_value=service):
+            report = authorize_local_network(
+                context,
+                self.fixture.artifact,
+                self.fixture.profile.installed.loaded.data["id"],
+            )
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.outcome, "service.running")
+        runner.run.assert_not_called()
+
+    def test_authorize_local_network_requires_exact_registration(self) -> None:
+        service = mock.Mock()
+        service.error_code = None
+        service.message = None
+        service.snapshot.present = False
+        runner = mock.Mock()
+        context = replace(self.fixture.context, runner=runner)
+        with mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=self.fixture.admission,
+        ), mock.patch(
+            "runtime_start.inspect_service",
+            return_value=service,
+        ), mock.patch(
+            "runtime_start.check_launch_services_registration",
+            return_value=CheckResult(
+                "launch_services.registration",
+                "fail",
+                "stable registration is missing",
+                "reinstall",
+                {"installed": False},
+            ),
+        ):
+            report = authorize_local_network(
+                context,
+                self.fixture.artifact,
+                self.fixture.profile.installed.loaded.data["id"],
+            )
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.outcome, "launch_services.registration")
+        runner.run.assert_not_called()
 
     def test_profile_admission_matches_every_exact_game_overlay_operation(self) -> None:
         crossover_app = self.fixture.root / "CrossOver.app"

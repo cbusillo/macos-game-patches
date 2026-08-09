@@ -426,6 +426,42 @@ class CliTests(unittest.TestCase):
         self.assertIn("client_status=waiting", rendered)
         self.assertIn("client_action=open ALVR on Vision Pro", rendered)
 
+    def test_consent_json_contract_is_machine_readable(self) -> None:
+        report = runtime_cli.LocalNetworkConsentReport(
+            True,
+            "ready",
+            "Bonjour discovery is active.",
+            {"sealId": "b" * 64},
+            pathlib.Path("/tmp/ALVRMacOSBridge.app"),
+            True,
+            ("/usr/bin/open -W -n /tmp/ALVRMacOSBridge.app",),
+        )
+        stdout = io.StringIO()
+        with mock.patch(
+            "runtime_cli.authorize_local_network",
+            return_value=report,
+        ), contextlib.redirect_stdout(stdout):
+            exit_code = runtime_cli.main(
+                [
+                    "consent",
+                    "--artifact",
+                    "/tmp/artifact",
+                    "--profile",
+                    "freedom-locomotion",
+                    "--json",
+                ]
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["outcome"], "ready")
+        self.assertTrue(payload["networkAvailable"])
+        self.assertEqual(payload["bundle"], "/tmp/ALVRMacOSBridge.app")
+
+        rendered = runtime_cli.render_consent(report)
+        self.assertIn("consent=pass", rendered)
+        self.assertIn("network_available=true", rendered)
+
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self) -> None:

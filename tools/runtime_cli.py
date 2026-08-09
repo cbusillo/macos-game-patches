@@ -20,7 +20,12 @@ from runtime_control import (
     stop_runtime,
 )
 from runtime_install import MutationReport, install_runtime, uninstall_runtime
-from runtime_start import StartReport, start_runtime
+from runtime_start import (
+    LocalNetworkConsentReport,
+    StartReport,
+    authorize_local_network,
+    start_runtime,
+)
 
 
 _JSON_ERRORS = False
@@ -82,6 +87,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         required=True,
         help="curated game profile identifier",
+    )
+
+    consent_parser = subparsers.add_parser(
+        "consent",
+        help="request foreground Local Network consent for the installed bridge identity",
+    )
+    add_common_arguments(consent_parser)
+    consent_parser.add_argument(
+        "--artifact",
+        required=True,
+        type=pathlib.Path,
+        help="sealed runtime artifact",
+    )
+    consent_parser.add_argument(
+        "--profile",
+        required=True,
+        help="curated game profile identifier used by the committed install",
     )
 
     install_parser = subparsers.add_parser(
@@ -203,6 +225,22 @@ def render_start(report: StartReport) -> str:
     return "\n".join(lines)
 
 
+def render_consent(report: LocalNetworkConsentReport) -> str:
+    lines = [
+        f"consent={'pass' if report.ok else 'fail'}",
+        f"outcome={report.outcome}",
+        f"message={report.message}",
+    ]
+    if report.bundle is not None:
+        lines.append(f"bundle={report.bundle}")
+    if report.network_available is not None:
+        lines.append(
+            f"network_available={str(report.network_available).lower()}"
+        )
+    lines.extend(f"action={action}" for action in report.actions)
+    return "\n".join(lines)
+
+
 def render_mutation(report: MutationReport) -> str:
     lines = [
         f"state={report.state}",
@@ -314,6 +352,18 @@ def main(argv: list[str] | None = None) -> int:
                 text=render_start(start_report),
             )
             return 0 if start_report.ok else 1
+        if arguments.command == "consent":
+            consent_report = authorize_local_network(
+                context,
+                arguments.artifact,
+                arguments.profile,
+            )
+            emit(
+                consent_report.to_dict(),
+                as_json=arguments.json,
+                text=render_consent(consent_report),
+            )
+            return 0 if consent_report.ok else 1
         stop_report = stop_runtime(context)
         emit(stop_report.to_dict(), as_json=arguments.json, text=render_stop(stop_report))
         return 0 if stop_report.ok else 1

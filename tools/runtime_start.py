@@ -37,6 +37,7 @@ from runtime_control import (
     ControlError,
     RuntimeContext,
     RuntimePaths,
+    check_launch_services_registration,
     doctor_runtime,
     global_lifecycle_lock,
     identity_record,
@@ -72,6 +73,8 @@ MVK_SHADER_ROOT_NAME = "mvk-shaders"
 STARTUP_TIMEOUT_SECONDS = 30.0
 SERVICE_READY_TIMEOUT_SECONDS = 10.0
 READINESS_SAMPLE_INTERVAL_SECONDS = 0.1
+LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS = 150.0
+LOCAL_NETWORK_CONSENT_RESULT_MAX_BYTES = 16 * 1024
 MONITOR_INTERVAL_SECONDS = 0.25
 SERVICE_STATUS_INTERVAL_SECONDS = 1.0
 SERVICE_IDENTITY_INTERVAL_SECONDS = 30.0
@@ -700,6 +703,112 @@ class StartReport:
         }
 
 
+@dataclass(frozen=True)
+class LocalNetworkConsentReport:
+    ok: bool
+    outcome: str
+    message: str
+    artifact: dict[str, Any] | None = None
+    bundle: pathlib.Path | None = None
+    network_available: bool | None = None
+    actions: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "command": "consent",
+            "ok": self.ok,
+            "outcome": self.outcome,
+            "message": self.message,
+            "artifact": self.artifact,
+            "bundle": str(self.bundle) if self.bundle is not None else None,
+            "networkAvailable": self.network_available,
+            "actions": list(self.actions),
+        }
+
+
+def _local_network_consent_command(
+    paths: RuntimePaths,
+    result_path: pathlib.Path,
+) -> tuple[str, ...]:
+    return (
+        "/usr/bin/open",
+        "-W",
+        "-n",
+        str(paths.bridge_bundle),
+        "--args",
+        "--local-network-consent",
+        "--result-path",
+        str(result_path),
+    )
+
+
+def _parse_local_network_consent_result(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        artifact_contract.reject_symlink_components(path)
+        metadata = path.lstat()
+    except FileNotFoundError as error:
+        raise ControlError(
+            "local_network.result_missing",
+            "Foreground consent mode did not publish a result",
+            path=str(path),
+        ) from error
+    except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    except OSError as error:
+        raise ControlError(
+            "local_network.result_invalid",
+            "Foreground consent result could not be inspected",
+            path=str(path),
+            error=str(error),
+        ) from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > LOCAL_NETWORK_CONSENT_RESULT_MAX_BYTES
+    ):
+        raise ControlError(
+            "local_network.result_invalid",
+            "Foreground consent result has unsafe ownership, type, mode, or size",
+            path=str(path),
+        )
+    try:
+        payload = artifact_contract.load_json(path)
+    except artifact_contract.ArtifactError as error:
+        raise ControlError(error.code, error.message, **error.context) from error
+    if not isinstance(payload, dict):
+        raise ControlError(
+            "local_network.result_invalid",
+            "Foreground consent result is not an object",
+            path=str(path),
+        )
+    allowed_outcomes = {
+        "ready": True,
+        "policy-denied": False,
+        "waiting": None,
+        "failed": None,
+        "cancelled": None,
+        "setup-failed": None,
+    }
+    outcome = payload.get("outcome")
+    if (
+        payload.get("schemaVersion") != 1
+        or payload.get("mode") != "local-network-consent"
+        or not isinstance(outcome, str)
+        or outcome not in allowed_outcomes
+        or payload.get("networkAvailable") is not allowed_outcomes[outcome]
+        or not isinstance(payload.get("message"), str)
+    ):
+        raise ControlError(
+            "local_network.result_invalid",
+            "Foreground consent result does not match the supported contract",
+            path=str(path),
+        )
+    return payload
+
+
 def start_failure(
     code: str,
     message: str,
@@ -1313,6 +1422,93 @@ def _write_new_file(root: pathlib.Path, path: pathlib.Path, payload: bytes, mode
             session.bind(path).write_bytes(payload, mode)
     except runtime_descriptor.DescriptorError as error:
         raise ControlError(error.code, error.message, **error.context) from error
+
+
+def authorize_local_network(
+    context: RuntimeContext,
+    artifact: pathlib.Path,
+    profile_id: str,
+) -> LocalNetworkConsentReport:
+    admission = inspect_start_admission(context, artifact, profile_id)
+    with global_lifecycle_lock(context.lifecycle_lock_path, admission.allowed_roots):
+        admission = inspect_start_admission(context, artifact, profile_id)
+        paths = admission.paths
+        service = inspect_service(paths, context.runner)
+        if service.error_code is not None:
+            return LocalNetworkConsentReport(
+                False,
+                service.error_code,
+                service.message or "Bridge service identity could not be inspected",
+                admission.artifact,
+                paths.bridge_bundle,
+            )
+        if service.snapshot.present:
+            return LocalNetworkConsentReport(
+                False,
+                "service.running",
+                "Stop the active bridge before requesting foreground Local Network consent",
+                admission.artifact,
+                paths.bridge_bundle,
+            )
+        registration = check_launch_services_registration(
+            admission.manifest,
+            paths.bridge_bundle,
+            context.runner,
+        )
+        if registration.status != "pass" or not registration.details.get("installed"):
+            return LocalNetworkConsentReport(
+                False,
+                registration.id,
+                registration.message,
+                admission.artifact,
+                paths.bridge_bundle,
+            )
+
+        consent_root = paths.state_root / "local-network-consent"
+        _make_private_directory(paths.state_root, consent_root)
+        result_path = consent_root / f"result-{secrets.token_hex(8)}.json"
+        command = _local_network_consent_command(paths, result_path)
+        actions = (shlex.join(command),)
+        try:
+            result = context.runner.run(
+                command,
+                timeout=LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS,
+            )
+            if result.error is not None:
+                return LocalNetworkConsentReport(
+                    False,
+                    f"local_network.{result.error}",
+                    "Foreground Local Network consent mode did not complete",
+                    admission.artifact,
+                    paths.bridge_bundle,
+                    actions=actions,
+                )
+            if result.returncode != 0 and not result_path.exists():
+                return LocalNetworkConsentReport(
+                    False,
+                    "local_network.launch_failed",
+                    "Launch Services could not run the installed bridge consent mode",
+                    admission.artifact,
+                    paths.bridge_bundle,
+                    actions=actions,
+                )
+            payload = _parse_local_network_consent_result(result_path)
+            outcome = payload["outcome"]
+            return LocalNetworkConsentReport(
+                outcome == "ready",
+                outcome,
+                payload["message"],
+                admission.artifact,
+                paths.bridge_bundle,
+                payload["networkAvailable"],
+                actions,
+            )
+        finally:
+            result_path.unlink(missing_ok=True)
+            try:
+                consent_root.rmdir()
+            except OSError:
+                pass
 
 
 def _seed_alvr_session(admission: StartAdmission, run_dir: pathlib.Path) -> int:

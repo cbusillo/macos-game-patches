@@ -183,6 +183,25 @@ reliably present its first Local Network prompt. A foreground consent trigger
 or explicit System Settings remediation must be product-owned before the
 runtime can promise first-run self-service.
 
+### Foreground Consent Slice Plan
+
+The next bounded implementation keeps one executable identity for both modes:
+
+1. add a foreground `--local-network-consent` mode to the native bridge binary;
+2. package the stable app as foreground-capable while keeping ordinary launchd
+   execution headless;
+3. add a production CLI command that verifies the exact installed bundle and
+   Launch Services record before launching that mode through Launch Services;
+4. cover command construction, identity refusal, result mapping, and legacy
+   report behavior with hardware-free fixtures;
+5. rebuild and seal the bridge, then repeat first prompt, allowed recovery, and
+   exact cleanup on the M2 before any M4 release claim.
+
+A separate helper executable is not acceptable because the physical matrix
+proved that a grant for a different Mach-O UUID does not authorize the bridge.
+The runtime must not rewrite or resign the installed stable app to obtain
+consent.
+
 The M2 lane may qualify Launch Services and Local Network behavior and provide
 secondary compatibility evidence. It does not satisfy the pinned M4 production
 host contract and cannot replace M4 cadence, thermal, game, controller, or
