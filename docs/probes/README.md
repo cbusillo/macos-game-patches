@@ -116,3 +116,4 @@ Use this shape:
 - [027 - The Lab multi-target runtime ownership](027-the-lab-multi-target-ownership.md)
 - [028 - macOS runtime readiness](028-macos-runtime-readiness.md)
 - [029 - Signed macOS Lab UI helper](029-macos-lab-ui-helper.md)
+- [030 - M2 Every Code app-server LaunchAgent](030-m2-every-code-app-server-launchagent.md)
