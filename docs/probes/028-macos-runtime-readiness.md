@@ -206,15 +206,15 @@ consent.
 
 On 2026-08-09, the bounded foreground slice passed on `chris-mbp`:
 
-- macOS runtime source `3523303c3f8376b07ec03ffab6b1086d0c6161b4`
-  pins ALVR host source `d9cb9bc26b99b7cd7208cf281b50a3f9efa1a81d`;
+- macOS runtime source `f0f6eb03f38714efa163e76472b5b1e8058fadd0`
+  pins ALVR host source `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d`;
 - sealed dev15 artifact
-  `02725f4231aa64848fb2a7d182a87dad598f88b89fa2b3ae684d594f49d57308`
+  `fa5166c7d92dd67d81a97d035807a74e60bad7a1498d117f53408c84ebb8791d`
   verifies on the M2;
 - the installed stable app has bundle ID
   `com.alvr.macos-bridge.iosurface`, Team ID `MM5YXC7T6E`, CDHash
-  `66e978b076d67618721efe3258b6f992dc9411c2`, and Mach-O UUID
-  `F3C3DA5A-0E48-3D8F-9572-3A15558FAAF1`;
+  `6d92956c91a240e0bfa9199fa0513fd9ae1cdf8a`, and Mach-O UUID
+  `B611B6E5-39AA-356B-AFBE-412F46E630EE`;
 - Launch Services reports exactly one record for that URL and identity;
 - the same executable launched through `open -W -n` registered as a visible,
   frontmost AppKit application and displayed the product-owned consent alert;
