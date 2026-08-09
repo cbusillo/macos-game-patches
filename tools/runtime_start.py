@@ -1455,7 +1455,7 @@ def authorize_local_network(
             paths.bridge_bundle,
             context.runner,
         )
-        if registration.status != "pass" or not registration.details.get("installed"):
+        if registration.status != "pass":
             return LocalNetworkConsentReport(
                 False,
                 registration.id,

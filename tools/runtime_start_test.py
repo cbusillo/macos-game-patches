@@ -1352,7 +1352,7 @@ class RuntimeStartTests(unittest.TestCase):
                 "pass",
                 "exact registration",
                 "",
-                {"installed": True},
+                {"expected": {}, "records": [{}]},
             ),
         ):
             report = authorize_local_network(
