@@ -115,3 +115,4 @@ Use this shape:
 - [026 - Fixed-resolution profile qualification](026-fixed-resolution-profile-qualification.md)
 - [027 - The Lab multi-target runtime ownership](027-the-lab-multi-target-ownership.md)
 - [028 - macOS runtime readiness](028-macos-runtime-readiness.md)
+- [029 - Signed macOS Lab UI helper](029-macos-lab-ui-helper.md)

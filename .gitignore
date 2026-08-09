@@ -38,6 +38,8 @@ temp/
 # Build outputs
 **/bin/
 **/obj/
+.build/
+.swiftpm/
 
 # Logs
 *.log
