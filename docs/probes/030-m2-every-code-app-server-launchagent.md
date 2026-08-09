@@ -145,8 +145,27 @@ The M2 transition passed on August 9, 2026:
   enabled `Continue` button, and returned `outcome: ready` with
   `networkAvailable: true`.
 - Post-login cleanup removed the bridge, helper, and transient result files;
-  the M2 checkout remained clean on `main`. Reboot persistence remains the next
-  physical service gate.
+  the M2 checkout remained clean on `main`.
+- A full reboot changed `kern.boottime` from July 25, 2026 to August 9, 2026 at
+  16:22:54 local time. After the operator completed the FileVault/login boundary,
+  a new Aqua session appeared with handle `100022` and `loginwindow` PID `1341`.
+- `RunAtLoad` returned the exact LaunchAgent automatically as PID `1827` with
+  the same Every Code hash, working directory, installed contract, plist
+  contract, and one `127.0.0.1:8765` listener. No manual or SSH-owned server
+  start was used.
+- The reboot correctly ended the old SSH master. A new owner-only tunnel was
+  established as PID `54584`, and the controller created fresh conversation
+  `84151ba1-d825-44ad-a348-a469c8bcd4db` against the returned app server.
+- The signed helper still reported Accessibility and Screen Recording as
+  granted. A post-reboot exact-process bridge exercise used PID `4229`, bounded
+  the AX tree to 88 non-truncated nodes, matched and pressed exactly one enabled
+  `Continue` button, and published a private `0600` result with
+  `outcome: ready` and `networkAvailable: true`.
+- The first Lab orchestration turn timed out because its one-off PID discovery
+  examined the wrong `lsof` path record. Independent exact executable and PID
+  validation continued against the same live app; no privacy dialog was
+  answered by automation. Final cleanup left no bridge, helper, or consent
+  result and the M2 checkout remained clean on `main`.
 
 ## Rollback
 
@@ -175,7 +194,8 @@ command for the operator.
 
 ## Verdict
 
-`pass`: installation, exact status, idempotency, crash restart, logout/login
-return, controller reconnection, owner-only tunnel state, signed-helper TCC
-continuity, and Local Network readiness all pass on the M2 secondary lane.
-Reboot persistence remains unclaimed and is the next physical service gate.
+`pass`: installation, exact status, idempotency, crash restart, logout/login and
+reboot return, controller reconnection, owner-only tunnel state, signed-helper
+TCC continuity, and Local Network readiness all pass on the M2 secondary lane.
+Clean-user prompt, final-UUID deny/pending, update, rollback, and uninstall
+remain issue-level physical gates outside this LaunchAgent persistence probe.
