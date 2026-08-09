@@ -132,9 +132,21 @@ The M2 transition passed on August 9, 2026:
 - An exact `launchctl kill SIGKILL` crash test replaced PID `24729` with PID
   `25125`, restored the loopback listener, and passed status. The controller
   again created a fresh conversation and the signed helper remained ready.
-- No logout or reboot was performed. Return-after-login remains the next
-  physical gate because automatic login is disabled and requires the operator
-  to establish a new Aqua session.
+- The operator logged out and back in, establishing a new Aqua session under
+  `loginwindow` PID `28250`. `RunAtLoad` returned the exact service
+  automatically as PID `28530` with the same code hash, working directory,
+  plist contract, and `127.0.0.1:8765` listener.
+- The owner-only SSH tunnel remained live as PID `13812`, and the controller
+  created fresh post-login conversation
+  `b42db542-f57a-4486-98af-28c4fc72a636` without restarting the service.
+- The signed UI helper still reported Accessibility and Screen Recording as
+  granted after login. A fresh exact-process consent exercise authenticated the
+  installed bridge, bounded the AX tree to 88 nodes, found and pressed the one
+  enabled `Continue` button, and returned `outcome: ready` with
+  `networkAvailable: true`.
+- Post-login cleanup removed the bridge, helper, and transient result files;
+  the M2 checkout remained clean on `main`. Reboot persistence remains the next
+  physical service gate.
 
 ## Rollback
 
@@ -163,7 +175,7 @@ command for the operator.
 
 ## Verdict
 
-`partial-pass`: installation, exact status, idempotency, crash restart,
-controller reconnection, owner-only tunnel state, and signed-helper TCC
-continuity pass in the current Aqua session. Logout/login and reboot persistence
-remain unclaimed until the operator establishes a new graphical login.
+`pass`: installation, exact status, idempotency, crash restart, logout/login
+return, controller reconnection, owner-only tunnel state, signed-helper TCC
+continuity, and Local Network readiness all pass on the M2 secondary lane.
+Reboot persistence remains unclaimed and is the next physical service gate.
