@@ -732,9 +732,9 @@ def check_launch_services_registration(
         metadata = bridge_bundle.lstat()
     except FileNotFoundError:
         return CheckResult(
-            "launch_services.registration",
-            "pass",
-            "Stable bridge bundle is not installed; install will establish registration",
+            "launch_services.bundle_missing",
+            "fail",
+            "Stable bridge bundle is missing",
             remediation,
             {"installed": False, "path": str(bridge_bundle)},
         )

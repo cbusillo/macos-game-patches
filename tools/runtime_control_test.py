@@ -382,6 +382,17 @@ class LaunchServicesTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertEqual(result.id, "launch_services.query_failed")
 
+    def test_missing_bundle_fails_registration_check(self) -> None:
+        self.bundle.rmdir()
+        result = check_launch_services_registration(
+            self.manifest,
+            self.bundle,
+            StaticRunner(CommandResult((str(LSREGISTER_PATH), "-dump"), 0, self.record())),
+        )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.id, "launch_services.bundle_missing")
+        self.assertFalse(result.details["installed"])
+
     def test_registration_forces_stable_bundle_then_verifies(self) -> None:
         runner = mock.Mock()
         runner.run.side_effect = (

@@ -72,6 +72,7 @@ LaunchServices.framework/Support/lsregister
 ## Known Failure Signatures
 
 - `launch_services.missing`: no record exists for the stable bundle identifier.
+- `launch_services.bundle_missing`: the retained stable app is absent.
 - `launch_services.ambiguous`: multiple records exist for the identifier.
 - `launch_services.identity_mismatch`: path, Team ID, or CDHash differs.
 - `launch_services.registration_failed`: `lsregister -f` did not complete.
