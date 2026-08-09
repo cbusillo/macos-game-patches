@@ -104,7 +104,10 @@ lsof -nP -iTCP:8765 -sTCP:LISTEN
 - `session.aqua_unavailable`
 - `code.identity_mismatch`
 - `working_directory.invalid`
+- `path.symlink`
+- `path.unsafe`
 - `listener.foreign`
+- `listener.stop_timeout`
 - `plist.invalid`
 - `launchd.bootstrap_failed`
 - `launchd.service_not_ready`
@@ -166,6 +169,15 @@ The M2 transition passed on August 9, 2026:
   validation continued against the same live app; no privacy dialog was
   answered by automation. Final cleanup left no bridge, helper, or consent
   result and the M2 checkout remained clean on `main`.
+- Detached post-merge review found two manager-only safety gaps. Managed
+  directory preparation now rejects existing and broken symlink components and
+  validates ownership/type/mode before any `mkdir` or `chmod`; exact process
+  termination and bootout waits now treat birth-token lookup failures as
+  unknown, follow captured tokens instead of PID existence, and independently
+  require the launchd label and listener to disappear. Log and lock leaves must
+  be regular owner-owned files. Nineteen deterministic fixtures cover
+  no-mutation symlink refusal, FIFO rejection, unknown/reused PIDs, incomplete
+  uninstall, and the original lifecycle cases.
 
 ## Rollback
 

@@ -176,7 +176,7 @@ def reject_symlink_components(path: pathlib.Path) -> None:
     current = pathlib.Path(path.anchor)
     for component in path.parts[1:]:
         current /= component
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             raise AgentError(
                 "path.symlink",
                 "A managed path contains a symlink component",
@@ -239,6 +239,53 @@ def validate_owned_directory_chain(home: pathlib.Path, target: pathlib.Path, uid
                 "Managed directory has unsafe ownership or mode",
                 path=str(current),
             )
+
+
+def prepare_managed_directory(
+    home: pathlib.Path,
+    target: pathlib.Path,
+    uid: int,
+    *,
+    mode: int | None = None,
+) -> None:
+    home = home.expanduser()
+    target = target.expanduser()
+    reject_symlink_components(home)
+    reject_symlink_components(target)
+    try:
+        relative = target.relative_to(home)
+    except ValueError as error:
+        raise AgentError(
+            "path.unsafe",
+            "Managed path escapes the user home",
+            path=str(target),
+        ) from error
+    current = home
+    for component in (None, *relative.parts):
+        if component is not None:
+            current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            try:
+                os.mkdir(current, 0o700)
+            except FileExistsError:
+                pass
+            metadata = current.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != uid
+            or metadata.st_mode & 0o022
+        ):
+            raise AgentError(
+                "path.unsafe",
+                "Managed directory has unsafe ownership, type, or mode",
+                path=str(current),
+            )
+    if mode is not None:
+        os.chmod(target, mode, follow_symlinks=False)
+    validate_owned_directory_chain(home, target, uid)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -520,12 +567,38 @@ def validate_host(paths: Paths, working_directory: pathlib.Path | None) -> dict[
     }
 
 
+def open_private_file(path: pathlib.Path, flags: int) -> int:
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        code = "path.symlink" if path.is_symlink() else "path.unsafe"
+        raise AgentError(
+            code,
+            "Managed file has unsafe ownership or type",
+            path=str(path),
+            error=str(error),
+        ) from error
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o022
+    ):
+        os.close(descriptor)
+        raise AgentError(
+            "path.unsafe",
+            "Managed file has unsafe ownership or type",
+            path=str(path),
+        )
+    return descriptor
+
+
 def prepare_private_file(path: pathlib.Path) -> None:
-    reject_symlink_components(path.parent)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    validate_owned_directory_chain(pathlib.Path.home(), path.parent, os.getuid())
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    prepare_managed_directory(pathlib.Path.home(), path.parent, os.getuid(), mode=0o700)
+    descriptor = open_private_file(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+    )
     try:
         os.fchmod(descriptor, 0o600)
     finally:
@@ -533,9 +606,7 @@ def prepare_private_file(path: pathlib.Path) -> None:
 
 
 def write_plist_atomic(paths: Paths, payload: bytes) -> bytes | None:
-    paths.plist.parent.mkdir(parents=True, exist_ok=True)
-    reject_symlink_components(paths.plist.parent)
-    validate_owned_directory_chain(paths.home, paths.plist.parent, os.getuid())
+    prepare_managed_directory(paths.home, paths.plist.parent, os.getuid())
     previous: bytes | None = None
     if paths.plist.exists() or paths.plist.is_symlink():
         validate_regular_owner_file(paths.plist, os.getuid())
@@ -565,11 +636,18 @@ def restore_plist(paths: Paths, previous: bytes | None) -> None:
     write_plist_atomic(paths, previous)
 
 
-def write_json_atomic(path: pathlib.Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    reject_symlink_components(path.parent)
-    validate_owned_directory_chain(pathlib.Path.home(), path.parent, os.getuid())
+def write_json_atomic(
+    path: pathlib.Path,
+    payload: dict[str, Any],
+    *,
+    home: pathlib.Path | None = None,
+) -> None:
+    prepare_managed_directory(
+        pathlib.Path.home() if home is None else home,
+        path.parent,
+        os.getuid(),
+        mode=0o700,
+    )
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = pathlib.Path(temporary_name)
     try:
@@ -586,13 +664,10 @@ def write_json_atomic(path: pathlib.Path, payload: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def operation_lock(paths: Paths):
-    paths.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(paths.state_root, 0o700)
-    validate_owned_directory_chain(paths.home, paths.state_root, os.getuid())
-    descriptor = os.open(
+    prepare_managed_directory(paths.home, paths.state_root, os.getuid(), mode=0o700)
+    descriptor = open_private_file(
         paths.lock,
         os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-        0o600,
     )
     try:
         os.fchmod(descriptor, 0o600)
@@ -652,7 +727,16 @@ def terminate_exact_processes(records: list[Listener], paths: Paths, uid: int) -
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 7.0
     while time.monotonic() < deadline:
-        if not any(process_exists(record.pid) for record in records):
+        states = [
+            process_instance_state(
+                record.pid,
+                record.start_token,
+                expected_uid=uid,
+                expected_command=expected_command(paths),
+            )
+            for record in records
+        ]
+        if all(state is False for state in states):
             return
         time.sleep(0.1)
     raise AgentError(
@@ -662,12 +746,27 @@ def terminate_exact_processes(records: list[Listener], paths: Paths, uid: int) -
     )
 
 
-def process_exists(pid: int) -> bool:
+def process_instance_state(
+    pid: int,
+    start_token: int | None,
+    *,
+    expected_uid: int,
+    expected_command: str,
+) -> bool | None:
+    current_uid, current_command, current_start_token = process_identity(pid)
+    if current_start_token is not None and start_token is not None:
+        return current_start_token == start_token
+    if current_uid is not None or current_command is not None:
+        if current_uid != expected_uid or current_command != expected_command:
+            return False
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    return True
+    except OSError:
+        return None
+    return None
 
 
 def wait_ready(paths: Paths, uid: int) -> dict[str, Any]:
@@ -784,7 +883,7 @@ def install(paths: Paths, working_directory: pathlib.Path) -> dict[str, Any]:
                 ),
             ) from error
         raise
-    write_json_atomic(paths.contract, expected_contract)
+    write_json_atomic(paths.contract, expected_contract, home=paths.home)
     return {
         "changed": True,
         "baseline": baseline,
@@ -858,22 +957,56 @@ def uninstall(paths: Paths) -> dict[str, Any]:
                 "Loaded service path does not match the managed plist",
                 path=service.get("path"),
             )
-        bootout(uid)
         service_pid = service.get("pid")
+        service_start_token: int | None = None
         if isinstance(service_pid, int):
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline and process_exists(service_pid):
-                time.sleep(0.1)
-            if process_exists(service_pid):
-                raise AgentError(
-                    "launchd.bootout_failed",
-                    "The managed service process remained after bootout",
-                    pid=service_pid,
+            current_uid, current_command, current_start_token = process_identity(service_pid)
+            if current_uid == uid and current_command == expected_command(paths):
+                service_start_token = current_start_token
+        bootout(uid)
+        deadline = time.monotonic() + 10.0
+        last_service: dict[str, Any] = {}
+        last_remaining: list[int] = []
+        last_process_state: bool | None = None
+        while time.monotonic() < deadline:
+            last_service = launchd_status(uid)
+            last_remaining = validate_listeners(listeners(), paths, uid)
+            last_process_state = (
+                process_instance_state(
+                    service_pid,
+                    service_start_token,
+                    expected_uid=uid,
+                    expected_command=expected_command(paths),
                 )
+                if isinstance(service_pid, int)
+                else False
+            )
+            if (
+                last_service.get("loaded") is False
+                and last_process_state is False
+                and not last_remaining
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            raise AgentError(
+                "launchd.bootout_failed",
+                "The managed service did not fully stop after bootout",
+                pid=service_pid,
+                processState=last_process_state,
+                loaded=last_service.get("loaded"),
+                listenerPids=last_remaining,
+            )
+    remaining = validate_listeners(listeners(), paths, uid)
+    if remaining:
+        raise AgentError(
+            "launchd.bootout_failed",
+            "An app-server listener remained after uninstall",
+            listenerPids=remaining,
+        )
     if managed_installation is not None:
         paths.plist.unlink()
         paths.contract.unlink()
-    remaining = validate_listeners(listeners(), paths, uid)
     return {
         "removed": True,
         "plist": str(paths.plist),
