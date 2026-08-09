@@ -2,9 +2,9 @@
   "artifacts": [
     {
       "id": "native_bridge",
-      "sha256": "3a089a9eeae15df8bc14d2e3c7c120fefce7a1e887bdacb47d5176a0678f0633",
+      "sha256": "d19ccc9499ae2c6296f3e21a4723d0eb229bd612e2fe09d7ae283ecc09845582",
       "signature": {
-        "cdhash": "f19966dfe8a487b1778948070dbda01baa4381f2",
+        "cdhash": "21caddb72fdd23400b32505fae2c2cff43ae6ad4",
         "identifier": "alvr_macos_bridge-24ad26bdb543f8e1",
         "kind": "adhoc",
         "teamIdentifier": null
@@ -45,6 +45,6 @@
       "sha256": "0fe2bb69f837d040bd8dd93d0e1bc894eb8ef32a0a85fc20d33cbcfc12054d35"
     }
   ],
-  "manifestSha256": "fdb3da13fd6c58f9b9dcee6c7f43828c64849e889d1ded2853a2aac9daf58452",
+  "manifestSha256": "89d198f05dd1afb9119201068521d9a1f0ca017c95c3d42fc24fcb20c8d074f5",
   "schemaVersion": 1
 }
