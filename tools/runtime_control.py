@@ -696,7 +696,7 @@ def _launch_services_field(record: str, key: str) -> str | None:
     return value
 
 
-def _launch_services_records(payload: str, bundle_id: str) -> list[dict[str, Any]]:
+def parse_launch_services_records(payload: str, bundle_id: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for raw_record in re.split(r"^-{40,}\s*$", payload, flags=re.MULTILINE):
         if _launch_services_field(raw_record, "identifier") != bundle_id:
@@ -718,6 +718,9 @@ def _launch_services_records(payload: str, bundle_id: str) -> list[dict[str, Any
             }
         )
     return records
+
+
+_launch_services_records = parse_launch_services_records
 
 
 def check_launch_services_registration(
@@ -822,7 +825,7 @@ def check_launch_services_registration(
                 "expected": expected,
             },
         )
-    records = _launch_services_records(result.stdout, expected["identifier"])
+    records = parse_launch_services_records(result.stdout, expected["identifier"])
     if not records:
         return CheckResult(
             "launch_services.missing",

@@ -60,6 +60,8 @@ jobs:
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
             tools/runtime_control.py \
+            tools/macos_consent_matrix.py \
+            tools/macos_consent_matrix_test.py \
             tools/runtime_cli.py \
             tools/runtime_start.py \
             tools/runtime_control_test.py \
@@ -85,6 +87,7 @@ jobs:
       - name: Validate runtime control plane
         run: |
           python3 tools/runtime_control_test.py
+          python3 tools/macos_consent_matrix_test.py
           python3 tools/runtime_start_test.py
           python3 tools/runtime_cli.py --help
 
@@ -149,6 +152,8 @@ jobs:
             tools/runtime_profile.py \
             tools/runtime_profile_test.py \
             tools/runtime_control.py \
+            tools/macos_consent_matrix.py \
+            tools/macos_consent_matrix_test.py \
             tools/runtime_cli.py \
             tools/runtime_start.py \
             tools/runtime_descriptor.py \
@@ -169,6 +174,7 @@ jobs:
           python3 tools/runtime_profile.py self-test
           python3 tools/runtime_profile_test.py
           python3 tools/runtime_control_test.py
+          python3 tools/macos_consent_matrix_test.py
           python3 tools/runtime_start_test.py
           python3 tools/runtime_descriptor_test.py
           python3 tools/runtime_transaction_test.py
