@@ -138,6 +138,50 @@ command is exercised only with an allowed stable identity. Its non-ready result
 mapping therefore remains fixture-backed even after the physical matrix; do not
 describe deny or pending as end-to-end production-command evidence.
 
+### M2 Prompt-Free Staging Plan
+
+A read-only Launch Services dump on 2026-08-10 found ten records for the
+retained production bundle identifier: the intended stable app plus nine
+artifact or probe copies. Throwaway registration is blocked until the retained
+identity is restored to exactly one record. Cleanup must unregister only exact
+non-retained paths under the known runtime-artifact or probe roots, re-dump after
+every mutation, and prove that the stable URL, Team ID, CDHash, Mach-O UUID, and
+bundle tree hash remain unchanged.
+
+The prompt-free staging slice is executed in this order:
+
+1. Add a narrow helper with dry-run, exact duplicate cleanup, evidence, stage,
+   and rollback operations. It must acquire the lifecycle lock, refuse an active
+   bridge service or process, reject symlinks and paths outside explicit roots,
+   and never call `open`, load a launchd job, or access TCC.
+2. From the pinned ALVR commit, relink four real bridge executables with
+   per-lane build input and package them under never-reused bundle identifiers.
+   Every lane must have a bundle identifier and Mach-O UUID distinct from the
+   stable identity and every other lane. Post-build `LC_UUID` mutation is not a
+   supported path; `vtool` does not provide a UUID rewrite operation.
+3. Sign and verify the four bundles on the Mac16,9 build host, transfer them to
+   a private `0700` M2 staging root outside application auto-registration
+   directories, and revalidate SHA-256, plist identity, Team ID, CDHash, UUID,
+   architecture, signature, modes, ownership, and quarantine state.
+4. Register each exact throwaway app path one at a time without launching it.
+   After each registration, require one exact record for that lane and re-prove
+   the unchanged exact-one production record.
+5. Stop before any launch. The operator-present prompt session is a separate
+   slice. Rollback unregisters throwaways in reverse order, verifies zero lane
+   records and one unchanged production record, and removes the staging tree
+   only after those checks pass.
+
+Expected staging evidence includes the initial and final Launch Services record
+sets; stable identity and tree hashes; lane bundle IDs, UUIDs, executable hashes,
+Team IDs, CDHashes, signature results, paths, modes, ownership, and quarantine
+state; every exact unregister/register action; bridge process and service
+absence; and cleanup status. Known failure signatures are
+`consent_stage.active_service`, `consent_stage.duplicate_baseline`,
+`consent_stage.path_refused`, `consent_stage.stable_changed`,
+`consent_stage.identity_collision`, `consent_stage.uuid_collision`,
+`consent_stage.signature_invalid`, `consent_stage.register_failed`, and
+`consent_stage.residue`.
+
 The bridge classifier pinned at ALVR commit
 `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d` uses `NWBrowser` state and its
 error only; it does not inspect `NWPath` or query TCC state:
