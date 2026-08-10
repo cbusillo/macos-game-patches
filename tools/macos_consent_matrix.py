@@ -446,7 +446,11 @@ def _codesign_identity(
             "consent_stage.signature_invalid",
             "Bundle code-sign identity is incomplete",
             path=str(path),
-            fields=fields,
+            fields={
+                key: _bounded_output(value)
+                for key, value in fields.items()
+                if key in {"Identifier", "TeamIdentifier", "CDHash"}
+            },
         )
     return identifier, team_id, cd_hash.lower()
 
@@ -613,7 +617,7 @@ def _query_service(
             target=target,
             returncode=result.returncode,
             error=result.error,
-            stderr=result.stderr.strip(),
+            stderr=_bounded_output(result.stderr.strip()),
         )
     if result.error == "unavailable":
         raise MatrixError(
@@ -1078,7 +1082,7 @@ def _run_cleanup(
             "launchServices": launch_services,
             "lanes": [lane.to_dict() for lane in lanes],
             "plannedActions": [list(argv) for argv in actions],
-            "filesystemRemoval": "separate explicit operator action",
+            "filesystemRemoval": "unregister and verify before separate operator removal",
             "removed": [],
         }
     )
@@ -1135,6 +1139,12 @@ def run_matrix(
     evidence: dict[str, Any] = {"apply": apply}
     command_runner = runner or runtime_control.SubprocessRunner()
     try:
+        if os.geteuid() == 0:
+            raise MatrixError(
+                "consent_stage.path_refused",
+                "Consent matrix operations must run as the logged-in operator, not root",
+                reason="root_forbidden",
+            )
         stable = _path(stable_app, role="stable app")
         lanes = tuple(_path(item, role="lane app") for item in lane_apps)
         roots = tuple(_path(item, role="allowed root") for item in allowed_roots)

@@ -514,6 +514,13 @@ class ConsentMatrixTests(unittest.TestCase):
         )
         self.assertEqual(report["errors"][0]["code"], "consent_stage.lock_failed")
 
+    def test_root_execution_is_refused(self) -> None:
+        with mock.patch.object(matrix.os, "geteuid", return_value=0):
+            report = matrix.run_matrix("inspect", stable_app=self.stable, runner=self.runner)
+        self.assertEqual(report["errors"][0]["code"], "consent_stage.path_refused")
+        self.assertEqual(report["errors"][0]["details"]["reason"], "root_forbidden")
+        self.assertEqual(self.runner.calls, [])
+
     def test_dry_run_never_uses_launch_or_tcc_commands(self) -> None:
         lane = self.make_app(
             "lane.app",
