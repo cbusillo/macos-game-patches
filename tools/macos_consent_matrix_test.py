@@ -134,7 +134,10 @@ class FakeRunner:
 
 class ConsentMatrixTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="consent-matrix-")
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="consent-matrix-",
+            dir=pathlib.Path.home(),
+        )
         self.root = pathlib.Path(self.temporary.name).resolve()
         self.fixture_root = self.root / "fixtures"
         self.fixture_root.mkdir(mode=0o700)
