@@ -78,7 +78,21 @@ LaunchServices.framework/Support/lsregister
 - `launch_services.registration_failed`: `lsregister -f` did not complete.
 - `client.telemetry_missing`: bridge telemetry was not published before the
   bounded startup deadline; do not relabel this as a permission denial.
+- `preflight.missing`: a required profile path such as the Freedom install root
+  is absent before committed-install admission can run.
 - `runtime.not_installed`: no exact committed install journal matches the plan.
+- `local_network.timeout`: the bounded foreground `open -W` command did not
+  complete before the runtime deadline; inspect the bridge and result path
+  before retrying. The private consent directory is retained so a late result
+  cannot recreate it with unsafe permissions and does not block the next run.
+- `local_network.unavailable` or `local_network.os_error`: the bounded system
+  command could not be executed.
+- `local_network.launch_failed`: Launch Services returned nonzero without a
+  valid foreground result.
+- `local_network.result_missing` or `local_network.result_invalid`: the bridge
+  did not publish the exact private result contract.
+- `service.running`: an active bridge service must stop before foreground
+  consent.
 
 ## Cleanup
 
@@ -91,13 +105,118 @@ LaunchServices.framework/Support/lsregister
 
 ## Physical Follow-Up
 
-After deterministic validation lands, qualify the first Local Network prompt,
-allowed/denied/pending behavior, client absence and relaunch, reboot,
-logout/login, update, rollback, and uninstall on the stable Developer ID signed
-bundle. Record exact bundle URL, bundle identifier, Team ID, CDHash, Launch
-Services records, service PID, client state timing, and cleanup evidence.
+After deterministic validation lands, qualify first-prompt mechanics and
+allowed/denied/pending behavior with isolated M2 apps that use both a distinct
+bundle identifier and a distinct Mach-O UUID. Never deny the retained stable
+identity. If exact clean-user behavior for the stable identity is still needed,
+use a separate local macOS user and record it as a distinct operator gate.
+Qualify client absence and relaunch, reboot, logout/login, update, rollback, and
+uninstall on the stable Developer ID signed bundle without changing its consent
+state destructively. Record exact bundle URL, bundle identifier, Team ID,
+CDHash, Mach-O UUID, Launch Services records, service PID, client state timing,
+and cleanup evidence.
+
+## Remaining Qualification Plan
+
+The remaining matrix is split by host and consent identity. Do not weaken the
+sealed host-model contract to manufacture production install state on the M2,
+and never use the release-authoritative M4 UUID for a deny experiment.
+
+- **M2 consent-state classification:** use throwaway apps with distinct bundle
+  identifiers and Mach-O UUIDs for first prompt, pending, explicit deny, and
+  allow recovery.
+- **M4 production `consent`:** require an exact committed install journal,
+  exact Launch Services identity, and foreground consent result.
+- **M4 lifecycle matrix:** test retained UUID, changed CDHash, changed UUID,
+  rollback, and retained-anchor uninstall behavior.
+- **M4 release service:** prove launchd-owned startup and zero blocked events
+  after lifecycle changes.
+
+The M2 throwaway lane exercises the bridge classifier through direct foreground
+launches rather than production `runtime_cli.py consent`. The M4 production
+command is exercised only with an allowed stable identity. Its non-ready result
+mapping therefore remains fixture-backed even after the physical matrix; do not
+describe deny or pending as end-to-end production-command evidence.
+
+The bridge classifier pinned at ALVR commit
+`9bc309546fd1c4cdb229ec2a5f11e304154dfc3d` uses `NWBrowser` state and its
+error only; it does not inspect `NWPath` or query TCC state:
+
+- `ready` publishes `ready` with `networkAvailable: true`.
+- `waiting` with DNS `kDNSServiceErr_PolicyDenied` publishes `policy-denied`
+  with `networkAvailable: false`.
+- Any other `waiting` state publishes `waiting` with
+  `networkAvailable: null`.
+- `failed` publishes `failed` with `networkAvailable: null`.
+- `cancelled`, including the bridge's 120-second modal watchdog, publishes
+  `cancelled` with `networkAvailable: null`.
+- Browser setup failure publishes `setup-failed` with
+  `networkAvailable: null`.
+
+The initial bridge outcome is `waiting`. A Continue click before any browser
+state therefore publishes `waiting`. Browser cancellation preserves an already
+observed `ready` or `policy-denied` outcome, but the 120-second modal watchdog
+unconditionally replaces the current outcome with `cancelled`. The operator
+must press Continue after an allow or deny observation before that watchdog to
+preserve the observed result.
+
+The production command allows 150 seconds for `open -W`, leaving a 30-second
+margin beyond the bridge watchdog for result publication and process exit. The
+fixture contract pins that bound so the ordinary command-runner default cannot
+silently shorten an operator consent session.
+
+`policy-denied` is therefore a specific Network.framework observation, while
+`waiting` intentionally combines undecided consent and other non-policy wait
+conditions. The physical matrix must preserve that distinction instead of
+claiming a general supported Local Network permission query.
+
+Automation may launch the exact bridge, authenticate its process and window,
+press the bridge-owned `Continue` button, collect the private `0600` result,
+and observe bounded system logs. Only the operator may answer Apple's Local
+Network prompt or change its System Settings switch. Automation must not press
+Apple's Allow or Don't Allow controls, read the TCC database, or bypass the
+sealed host-model prerequisite.
+
+Execute the matrix in this order:
+
+1. Add deterministic fixture coverage for every supported non-ready outcome,
+   command timeout, nonzero `open` exit with a valid result, and transient-state
+   cleanup or safe timeout-evidence preservation.
+2. Stage M2 identity, Launch Services, helper, process, and bounded-log evidence
+   without opening a privacy prompt.
+3. With an operator present, use separate throwaway bundle identifiers and
+   UUIDs for first-prompt allow, pending, explicit deny, and allow recovery.
+   Perform deny last and never against either retained stable identity.
+4. On the M4, run the production command from an exact committed installation,
+   then qualify ordinary uninstall, retained-UUID update, changed-CDHash update,
+   changed-UUID update, and transaction rollback.
+5. After every case, prove no bridge process, launchd job, transient result, or
+   duplicate Launch Services record remains. A runtime timeout retains its
+   private result directory for late evidence and retry; remove it only after
+   the exact bridge exits and the result is archived. Preserve the stable
+   consent anchor unless the case explicitly tests a distinct throwaway app.
 
 ## Actual Evidence
+
+Consent-matrix preparation on 2026-08-10 passes:
+
+- all 85 runtime-start fixtures locally and on the M2 with the documented short
+  `/private/tmp` fixture root, including every supported non-ready consent
+  result, timeout action reporting, nonzero `open` exit with a valid result,
+  completed-path cleanup, and safe late-result retry after timeout;
+- source inspection of pinned ALVR commit
+  `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d` confirms the documented
+  `NWBrowser` classifier, 120-second modal watchdog, private atomic result
+  publication, and process exit behavior; and
+- the M2 remains intentionally unable to create a production committed install
+  because the sealed release artifact requires Mac16,9. The physical consent
+  state lane uses throwaway UUIDs without weakening that prerequisite.
+
+A read-only production `consent` admission rerun on the M2 on 2026-08-10
+stopped at `preflight.missing` for the absent Freedom install root. It did not
+launch the bridge, mutate the stable app, or open a privacy prompt. This confirms
+that the dated post-merge observation below remains accurate; the later
+`runtime.not_installed` gate is reachable only after profile preflight passes.
 
 Hardware-free validation on 2026-08-08 passes:
 
@@ -291,9 +410,10 @@ service refusal.
   artifact is installed and exercised from the M2 host-local GUI Lab session.
 
 This proves the visible exact-executable foreground path and the already-allowed
-result. A clean-user first prompt, explicit deny for the final UUID, and
-persistence across reboot, logout/login, update, rollback, and uninstall remain
-physical follow-up gates.
+result. Clean-user behavior for the exact stable identity and persistence across
+update, rollback, and uninstall remain physical follow-up gates. Explicit deny
+and pending qualification must use an isolated throwaway bundle identifier and
+UUID rather than the retained stable identity.
 
 The M2 lane may qualify Launch Services and Local Network behavior and provide
 secondary compatibility evidence. It does not satisfy the pinned M4 production
@@ -306,7 +426,8 @@ Hardware-free and foreground-consent slices pass. Stable Launch Services
 registration, steady-state removal of Xcode, and the exact-executable visible
 consent path are implemented. The M2 qualifies historical denied-state evidence,
 allowed recovery, and a final dev15 foreground `ready` result while preserving
-one stable identity. Clean-user first prompt, explicit deny for the final UUID,
-pending-state behavior, and persistence across reboot, logout/login, update,
-rollback, and uninstall remain physical issue-#62 gates. The M4 remains
-authoritative for release qualification.
+one stable identity. Clean-user behavior for that stable identity, isolated
+throwaway-app deny and pending states, and persistence across update, rollback,
+and uninstall remain physical issue-#62 gates. Reboot and logout/login
+persistence already pass on the M2 secondary lane. The M4 remains authoritative
+for release qualification.

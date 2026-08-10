@@ -1465,20 +1465,35 @@ def authorize_local_network(
             )
 
         consent_root = paths.state_root / "local-network-consent"
-        _make_private_directory(paths.state_root, consent_root)
+        try:
+            runtime_descriptor.ensure_private_directory(
+                consent_root,
+                paths.state_root,
+                owner_uid=os.getuid(),
+            )
+        except runtime_descriptor.DescriptorError as error:
+            raise ControlError(error.code, error.message, **error.context) from error
         result_path = consent_root / f"result-{secrets.token_hex(8)}.json"
         command = _local_network_consent_command(paths, result_path)
         actions = (shlex.join(command),)
+        preserve_timeout_evidence = False
         try:
             result = context.runner.run(
                 command,
                 timeout=LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS,
             )
             if result.error is not None:
+                preserve_timeout_evidence = result.error == "timeout"
                 return LocalNetworkConsentReport(
                     False,
                     f"local_network.{result.error}",
-                    "Foreground Local Network consent mode did not complete",
+                    (
+                        "Foreground Local Network consent mode timed out; wait for the "
+                        "exact bridge to exit and inspect the retained result path before "
+                        "retrying"
+                        if preserve_timeout_evidence
+                        else "Foreground Local Network consent mode did not complete"
+                    ),
                     admission.artifact,
                     paths.bridge_bundle,
                     actions=actions,
@@ -1504,11 +1519,12 @@ def authorize_local_network(
                 actions,
             )
         finally:
-            result_path.unlink(missing_ok=True)
-            try:
-                consent_root.rmdir()
-            except OSError:
-                pass
+            if not preserve_timeout_evidence:
+                result_path.unlink(missing_ok=True)
+                try:
+                    consent_root.rmdir()
+                except OSError:
+                    pass
 
 
 def _seed_alvr_session(admission: StartAdmission, run_dir: pathlib.Path) -> int:
