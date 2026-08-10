@@ -323,6 +323,12 @@ probe was attempted. Dev14 live reconfirmation therefore remains open and
 requires the pinned macOS build, an exact stock tree, compatible local bindings,
 and a quiet host before retrying.
 
+The current dev15 contract does not provide an unattended alternative on this
+boot. Its manifest and lock validate, but build-input validation stops on the
+same operating-system prerequisite: actual build `26A5406e` does not match the
+pinned `26A5388g`. No current-contract artifact build or signing step was
+started.
+
 ## Hardware-Free Fixture Matrix
 
 - existing singleton profile/state/start/stop/install fixtures remain green;
