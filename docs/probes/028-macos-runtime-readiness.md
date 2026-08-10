@@ -182,6 +182,37 @@ absence; and cleanup status. Known failure signatures are
 `consent_stage.signature_invalid`, `consent_stage.register_failed`, and
 `consent_stage.residue`.
 
+The supported per-lane relink command keeps the pinned source tree unchanged and
+adds one deterministic marker section to the final executable:
+
+```bash
+printf '%s' "$lane_bundle_id" >"$lane_marker"
+CARGO_TARGET_DIR="$target_root" cargo rustc \
+  --manifest-path "$pinned_alvr_checkout/Cargo.toml" \
+  -p alvr_macos_bridge \
+  --bin alvr_macos_bridge \
+  --release \
+  -- \
+  -C "link-arg=-Wl,-sectcreate,__TEXT,__consent_lane,$lane_marker"
+```
+
+The app packaging step copies that executable to
+`Contents/MacOS/alvr_macos_bridge`, writes the lane-specific plist, and signs
+the final bundle with the retained Developer ID identity, hardened runtime, and
+`--timestamp=none`. The staging helper then independently validates the plist,
+signature, Team ID, CDHash, UUID, executable hash, tree hash, ownership, modes,
+quarantine state, and Launch Services records.
+
+The 2026-08-10 build-host probe reproduced identical bytes and UUID when the
+same marker was linked twice, while different markers produced distinct UUIDs.
+Run `r20260810t142139z` prepared four signed arm64 lanes with unique IDs and
+UUIDs `23436645-2C52-35E6-8A0E-EFB72C6766A2`,
+`1118445C-27C0-38E7-B240-B78DC2FCA333`,
+`2E94FB7B-650A-3EAB-8522-3406D33D9E12`, and
+`46986F17-93E8-3443-8153-32F28FD27B44`. Every bundle verifies under Team ID
+`MM5YXC7T6E`, carries the hardened-runtime flag, and has no quarantine xattr.
+No bundle was launched or registered during the build-host probe.
+
 The bridge classifier pinned at ALVR commit
 `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d` uses `NWBrowser` state and its
 error only; it does not inspect `NWPath` or query TCC state:
