@@ -47,6 +47,7 @@ from runtime_start import (
     ClientTelemetry,
     ClientTelemetryMonitor,
     DeadlineRunner,
+    LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS,
     ProducerIdentity,
     STARTUP_RESULT_NAME,
     ProfileStartAdmission,
@@ -1366,6 +1367,230 @@ class RuntimeStartTests(unittest.TestCase):
         self.assertEqual(report.outcome, "ready")
         open_command = next(command for command in runner.commands if command[0] == "/usr/bin/open")
         self.assertEqual(open_command[3], str(fixture.paths.bridge_bundle))
+        self.assertFalse((fixture.paths.state_root / "local-network-consent").exists())
+
+    def _authorize_local_network_with_runner(
+        self,
+        runner: Any,
+    ) -> tuple[LocalNetworkConsentReport, list[tuple[str, ...]]]:
+        fixture = self.fixture
+        context = replace(fixture.context, runner=runner)
+        with mock.patch(
+            "runtime_start.inspect_start_admission",
+            return_value=fixture.admission,
+        ), mock.patch(
+            "runtime_start.check_launch_services_registration",
+            return_value=CheckResult(
+                "launch_services.registration",
+                "pass",
+                "exact registration",
+                "",
+                {"expected": {}, "records": [{}]},
+            ),
+        ):
+            report = authorize_local_network(
+                context,
+                fixture.artifact,
+                fixture.profile.installed.loaded.data["id"],
+            )
+        return report, getattr(runner, "commands", [])
+
+    def test_authorize_local_network_reports_all_supported_non_ready_outcomes(self) -> None:
+        fixture = self.fixture
+
+        class ConsentRunner:
+            def __init__(self, result_outcome: str, result_network_available: bool | None) -> None:
+                self.result_outcome = result_outcome
+                self.result_network_available = result_network_available
+                self.commands: list[tuple[str, ...]] = []
+                self.timeouts: list[float] = []
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                timeout: float = 10.0,
+            ) -> CommandResult:
+                command = tuple(str(item) for item in argv)
+                self.commands.append(command)
+                if command[:2] == ("/bin/launchctl", "print"):
+                    return CommandResult(command, 113, stderr="Could not find service")
+                if command[:3] == ("/usr/bin/open", "-W", "-n"):
+                    self.timeouts.append(timeout)
+                    result_path = pathlib.Path(command[-1])
+                    result_path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "local-network-consent",
+                                "outcome": self.result_outcome,
+                                "networkAvailable": self.result_network_available,
+                                "message": f"{self.result_outcome} message",
+                            }
+                        )
+                    )
+                    result_path.chmod(0o600)
+                    return CommandResult(command, 0)
+                return CommandResult(command, 1)
+
+        outcomes = (
+            ("policy-denied", False),
+            ("waiting", None),
+            ("failed", None),
+            ("cancelled", None),
+            ("setup-failed", None),
+        )
+
+        for outcome, network_available in outcomes:
+            with self.subTest(outcome=outcome):
+                runner = ConsentRunner(outcome, network_available)
+                report, commands = self._authorize_local_network_with_runner(runner)
+
+                self.assertFalse(report.ok)
+                self.assertEqual(report.outcome, outcome)
+                self.assertEqual(report.network_available, network_available)
+                result_path = pathlib.Path(commands[-1][-1])
+                expected_command = _local_network_consent_command(fixture.paths, result_path)
+                self.assertEqual(report.actions, (shlex.join(expected_command),))
+                self.assertEqual(
+                    runner.timeouts,
+                    [LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS],
+                )
+                self.assertFalse(
+                    (fixture.paths.state_root / "local-network-consent").exists()
+                )
+
+    def test_authorize_local_network_timeout_preserves_evidence_and_allows_retry(self) -> None:
+        fixture = self.fixture
+
+        class TimeoutRunner:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, ...]] = []
+                self.timeouts: list[float] = []
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                timeout: float = 10.0,
+            ) -> CommandResult:
+                command = tuple(str(item) for item in argv)
+                self.commands.append(command)
+                if command[:2] == ("/bin/launchctl", "print"):
+                    return CommandResult(command, 113, stderr="Could not find service")
+                if command[:3] == ("/usr/bin/open", "-W", "-n"):
+                    self.timeouts.append(timeout)
+                    return CommandResult(command, None, error="timeout")
+                return CommandResult(command, 1)
+
+        runner = TimeoutRunner()
+        report, commands = self._authorize_local_network_with_runner(runner)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.outcome, "local_network.timeout")
+        result_path = pathlib.Path(commands[-1][-1])
+        expected_command = _local_network_consent_command(fixture.paths, result_path)
+        self.assertEqual(report.actions, (shlex.join(expected_command),))
+        self.assertEqual(runner.timeouts, [LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS])
+        self.assertGreater(LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS, 120.0)
+        self.assertIsNone(report.network_available)
+        self.assertTrue((fixture.paths.state_root / "local-network-consent").is_dir())
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "mode": "local-network-consent",
+                    "outcome": "cancelled",
+                    "networkAvailable": None,
+                    "message": "late timeout result",
+                }
+            )
+        )
+        result_path.chmod(0o600)
+
+        class RetryRunner:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, ...]] = []
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                timeout: float = 10.0,
+            ) -> CommandResult:
+                command = tuple(str(item) for item in argv)
+                self.commands.append(command)
+                if command[:2] == ("/bin/launchctl", "print"):
+                    return CommandResult(command, 113, stderr="Could not find service")
+                if command[:3] == ("/usr/bin/open", "-W", "-n"):
+                    retry_result_path = pathlib.Path(command[-1])
+                    retry_result_path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "local-network-consent",
+                                "outcome": "ready",
+                                "networkAvailable": True,
+                                "message": "ready after timeout",
+                            }
+                        )
+                    )
+                    retry_result_path.chmod(0o600)
+                    return CommandResult(command, 0)
+                return CommandResult(command, 1)
+
+        retry_report, _ = self._authorize_local_network_with_runner(RetryRunner())
+        self.assertTrue(retry_report.ok)
+        self.assertEqual(retry_report.outcome, "ready")
+        self.assertTrue(result_path.is_file())
+
+    def test_authorize_local_network_honors_valid_result_after_nonzero_open(self) -> None:
+        fixture = self.fixture
+
+        class NonZeroOpenRunner:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, ...]] = []
+                self.timeouts: list[float] = []
+
+            def run(
+                self,
+                argv: Sequence[str],
+                *,
+                timeout: float = 10.0,
+            ) -> CommandResult:
+                command = tuple(str(item) for item in argv)
+                self.commands.append(command)
+                if command[:2] == ("/bin/launchctl", "print"):
+                    return CommandResult(command, 113, stderr="Could not find service")
+                if command[:3] == ("/usr/bin/open", "-W", "-n"):
+                    self.timeouts.append(timeout)
+                    result_path = pathlib.Path(command[-1])
+                    result_path.write_text(
+                        json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "mode": "local-network-consent",
+                                "outcome": "policy-denied",
+                                "networkAvailable": False,
+                                "message": "policy denied message",
+                            }
+                        )
+                    )
+                    result_path.chmod(0o600)
+                    return CommandResult(command, 1, stderr="fixture open returned nonzero")
+                return CommandResult(command, 1)
+
+        runner = NonZeroOpenRunner()
+        report, commands = self._authorize_local_network_with_runner(runner)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.outcome, "policy-denied")
+        self.assertFalse(report.network_available)
+        result_path = pathlib.Path(commands[-1][-1])
+        expected_command = _local_network_consent_command(fixture.paths, result_path)
+        self.assertEqual(report.actions, (shlex.join(expected_command),))
+        self.assertEqual(runner.timeouts, [LOCAL_NETWORK_CONSENT_TIMEOUT_SECONDS])
         self.assertFalse((fixture.paths.state_root / "local-network-consent").exists())
 
     def test_authorize_local_network_refuses_active_service(self) -> None:
