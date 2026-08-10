@@ -299,9 +299,11 @@ slice.
 ### August 10, 2026 Preflight Outcome
 
 The unattended attempt stopped before runtime or game mutation. From detached
-source commit `0dc9ddf95d190f82d73c7e3deea7b9437a58155f`, all 15 profile,
-67 control, 75 start, 30 install, 31 transaction, and 2 cleanup fixtures passed.
-Artifact verification and the checked-in dev14 contract also passed.
+source commit `0dc9ddf95d190f82d73c7e3deea7b9437a58155f`, the first fixture
+invocation stopped before tests because its declared `/private/tmp` fixture root
+was absent. After creating that empty root, the exact retry passed all 15
+profile, 67 control, 75 start, 30 install, 31 transaction, and 2 cleanup
+fixtures. Artifact verification and the checked-in dev14 contract also passed.
 
 Three independent admission blockers remained:
 
@@ -316,12 +318,12 @@ Three independent admission blockers remained:
 - doctor measured macOS build `26A5406e`, while dev14 pins `26A5388g`, so the
   exact artifact is not admissible on the currently booted operating system.
 
-The host was also not quiet: the first sample was `4.23 12.94 17.76`, with
-unrelated processes above 20 percent CPU. No doctor failure was bypassed, no
-cleanup command was needed, and no install, start, stop, uninstall, or cadence
-probe was attempted. Dev14 live reconfirmation therefore remains open and
-requires the pinned macOS build, an exact stock tree, compatible local bindings,
-and a quiet host before retrying.
+The host was also not quiet: the recorded first sample was
+`4.04 12.47 17.51`. No doctor failure was bypassed, no cleanup command was
+needed, and no install, start, stop, uninstall, or cadence probe was attempted.
+Dev14 live reconfirmation therefore remains open and requires the pinned macOS
+build, an exact stock tree, compatible local bindings, and a quiet host before
+retrying.
 
 The current dev15 contract does not provide an unattended alternative on this
 boot. Its manifest and lock validate, but build-input validation stops on the
