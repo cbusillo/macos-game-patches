@@ -289,6 +289,20 @@ class ConsentMatrixTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertEqual(report["errors"][0]["code"], "consent_stage.path_refused")
 
+    def test_invalid_plist_value_still_emits_json(self) -> None:
+        plist = self.stable / "Contents" / "Info.plist"
+        with plist.open("wb") as stream:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": matrix.PRODUCTION_BUNDLE_ID,
+                    "CFBundleExecutable": b"not-json-serializable",
+                },
+                stream,
+            )
+        report = matrix.run_matrix("inspect", stable_app=self.stable, runner=self.runner)
+        self.assertEqual(report["errors"][0]["code"], "consent_stage.bundle_invalid")
+        json.dumps(report)
+
     def test_active_process_and_service_are_refused(self) -> None:
         long_path = "/Users/example/Library/Application Support/" + "x" * 100 + "/alvr_macos_bridge"
         self.runner.process_output = f"42 {long_path}\n"

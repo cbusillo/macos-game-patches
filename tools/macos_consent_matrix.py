@@ -206,7 +206,8 @@ def _read_plist(path: pathlib.Path) -> tuple[str, str]:
             "consent_stage.bundle_invalid",
             "Bundle Info.plist has no safe executable name",
             path=str(path),
-            executable=executable,
+            executableType=type(executable).__name__,
+            executable=executable if isinstance(executable, (str, int, float, bool, type(None))) else None,
         )
     return bundle_id, executable
 
