@@ -25,6 +25,7 @@ PROCESS_LIST_COMMAND = (
     "/usr/bin/env",
     "LC_ALL=C",
     "/bin/ps",
+    "-ww",
     "-axo",
     "pid=,comm=",
 )
@@ -52,6 +53,7 @@ class BundleEvidence:
     team_id: str
     cd_hash: str
     uuid: str
+    architectures: tuple[str, ...]
     tree_hash: str
     entries: tuple[dict[str, Any], ...]
     quarantine: tuple[str, ...]
@@ -67,6 +69,7 @@ class BundleEvidence:
             "teamId": self.team_id,
             "cdHash": self.cd_hash,
             "uuid": self.uuid,
+            "architectures": list(self.architectures),
             "treeHash": self.tree_hash,
         }
 
@@ -340,6 +343,45 @@ def _require_private_parent(path: pathlib.Path) -> None:
             uid=info.st_uid,
             mode=oct(mode),
         )
+    current = parent.parent
+    while True:
+        try:
+            ancestor = current.stat()
+        except OSError as error:
+            raise MatrixError(
+                "consent_stage.path_refused",
+                "Lane staging ancestor could not be inspected",
+                path=str(current),
+                reason="ancestor_inspection_failed",
+                error=str(error),
+            ) from error
+        ancestor_mode = stat.S_IMODE(ancestor.st_mode)
+        if ancestor_mode & 0o022:
+            raise MatrixError(
+                "consent_stage.path_refused",
+                "Lane staging ancestor is writable by another user",
+                path=str(current),
+                reason="ancestor_writable",
+                mode=oct(ancestor_mode),
+            )
+        if current.parent == current:
+            break
+        current = current.parent
+
+
+def _reject_auto_registration_path(path: pathlib.Path) -> None:
+    roots = (
+        pathlib.Path("/Applications"),
+        pathlib.Path("/System/Applications"),
+        pathlib.Path.home() / "Applications",
+    )
+    if any(path == root or path.is_relative_to(root) for root in roots):
+        raise MatrixError(
+            "consent_stage.path_refused",
+            "Lane app must remain outside automatic application registration roots",
+            path=str(path),
+            reason="auto_registration_root",
+        )
 
 
 def _sha256_file(path: pathlib.Path) -> str:
@@ -375,7 +417,7 @@ def _codesign_identity(
             path=str(path),
             returncode=verification.returncode,
             error=verification.error,
-            stderr=verification.stderr.strip(),
+            stderr=_bounded_output(verification.stderr.strip()),
         )
     display = _run(
         runner,
@@ -389,7 +431,7 @@ def _codesign_identity(
             path=str(path),
             returncode=display.returncode,
             error=display.error,
-            stderr=display.stderr.strip(),
+            stderr=_bounded_output(display.stderr.strip()),
         )
     fields: dict[str, str] = {}
     for line in display.stderr.splitlines():
@@ -422,7 +464,7 @@ def _mach_uuid(
             executable=str(executable),
             returncode=result.returncode,
             error=result.error,
-            stderr=result.stderr.strip(),
+            stderr=_bounded_output(result.stderr.strip()),
         )
     match = re.search(
         r"cmd\s+LC_UUID\b.*?\buuid\s+([0-9A-Fa-f-]{36})\b",
@@ -436,6 +478,32 @@ def _mach_uuid(
             executable=str(executable),
         )
     return match.group(1).upper()
+
+
+def _architectures(
+    executable: pathlib.Path,
+    runner: runtime_control.CommandRunner,
+    commands: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    result = _run(runner, commands, ("/usr/bin/lipo", "-archs", str(executable)))
+    if result.error is not None or result.returncode != 0:
+        raise MatrixError(
+            "consent_stage.bundle_invalid",
+            "Bundle architectures could not be read",
+            executable=str(executable),
+            returncode=result.returncode,
+            error=result.error,
+            stderr=_bounded_output(result.stderr.strip()),
+        )
+    architectures = tuple(result.stdout.split())
+    if architectures != ("arm64",):
+        raise MatrixError(
+            "consent_stage.bundle_invalid",
+            "Consent lane executable must contain exactly one arm64 slice",
+            executable=str(executable),
+            architectures=list(architectures),
+        )
+    return architectures
 
 
 def _inspect_bundle(
@@ -473,6 +541,7 @@ def _inspect_bundle(
             reason="quarantine",
         )
     if private:
+        _reject_auto_registration_path(path)
         _require_private_parent(path)
     signed_identifier, team_id, cd_hash = _codesign_identity(path, runner, commands)
     if signed_identifier != bundle_id:
@@ -494,6 +563,7 @@ def _inspect_bundle(
         team_id=team_id,
         cd_hash=cd_hash,
         uuid=uuid,
+        architectures=_architectures(executable_path, runner, commands),
         tree_hash=tree_hash,
         entries=entries,
         quarantine=quarantine,
@@ -512,7 +582,7 @@ def _query_processes(
             argv=list(result.argv),
             returncode=result.returncode,
             error=result.error,
-            stderr=result.stderr.strip(),
+            stderr=_bounded_output(result.stderr.strip()),
         )
     processes: list[dict[str, Any]] = []
     for line in result.stdout.splitlines():
@@ -520,7 +590,7 @@ def _query_processes(
         if len(fields) != 2 or not fields[0].isdigit():
             continue
         command = fields[1].strip()
-        if pathlib.Path(command.split()[0]).name == PRODUCTION_EXECUTABLE:
+        if pathlib.Path(command).name == PRODUCTION_EXECUTABLE:
             processes.append({"pid": int(fields[0]), "command": command})
     return processes
 
@@ -557,7 +627,7 @@ def _query_service(
             "consent_stage.active_service",
             "The bridge launchd service is active",
             target=target,
-            output=f"{result.stdout}{result.stderr}",
+            output=_bounded_output(f"{result.stdout}{result.stderr}"),
         )
     if not missing:
         raise MatrixError(
@@ -565,7 +635,7 @@ def _query_service(
             "Bridge launchd service query failed",
             target=target,
             returncode=result.returncode,
-            stderr=result.stderr.strip(),
+            stderr=_bounded_output(result.stderr.strip()),
         )
     return {"target": target, "active": False}
 
@@ -598,7 +668,7 @@ def _dump(
             argv=list(result.argv),
             returncode=result.returncode,
             error=result.error,
-            stderr=result.stderr.strip(),
+            stderr=_bounded_output(result.stderr.strip()),
         )
     return {"records": runtime_control.parse_launch_services_records(result.stdout, bundle_id)}
 
@@ -812,9 +882,14 @@ def _lifecycle_guard(
     apply: bool,
     lock_path: pathlib.Path | None,
 ) -> Iterator[None]:
-    if not apply or lock_path is None:
+    if not apply:
         yield
         return
+    if lock_path is None:
+        raise MatrixError(
+            "consent_stage.lock_failed",
+            "Apply operations require the global lifecycle lock",
+        )
     try:
         _reject_symlink_components(lock_path, role="lifecycle lock", require_exists=False)
         parent = lock_path.parent
@@ -853,19 +928,23 @@ def _run_baseline(
     roots: Sequence[pathlib.Path],
     runner: runtime_control.CommandRunner,
     commands: list[dict[str, Any]],
+    evidence: dict[str, Any],
     apply: bool,
 ) -> dict[str, Any]:
     preflight = _preflight(runner, commands)
     baseline, launch_services = _stable_candidate(stable, runner, commands)
     duplicates = _select_duplicates(launch_services["records"], baseline.path, roots)
     actions = [(str(runtime_control.LSREGISTER_PATH), "-u", str(path)) for path in duplicates]
-    evidence: dict[str, Any] = {
-        "preflight": preflight,
-        "stable": baseline.to_dict(),
-        "launchServices": launch_services,
-        "duplicates": [str(path) for path in duplicates],
-        "plannedActions": [list(argv) for argv in actions],
-    }
+    evidence.update(
+        {
+            "preflight": preflight,
+            "stable": baseline.to_dict(),
+            "launchServices": launch_services,
+            "duplicates": [str(path) for path in duplicates],
+            "plannedActions": [list(argv) for argv in actions],
+            "unregistered": [],
+        }
+    )
     if not apply:
         return _result("baseline", "dry-run", evidence, commands + [{"argv": list(argv), "executed": False} for argv in actions])
     for argv in actions:
@@ -880,6 +959,7 @@ def _run_baseline(
                 "Launch Services duplicate cleanup left the targeted record",
                 path=argv[-1],
             )
+        evidence["unregistered"].append(argv[-1])
     final = _revalidate_stable(baseline, runner, commands)
     evidence["finalLaunchServices"] = final
     evidence["appliedActions"] = [list(argv) for argv in actions]
@@ -943,22 +1023,25 @@ def _run_stage(
     lane_paths: Sequence[pathlib.Path],
     runner: runtime_control.CommandRunner,
     commands: list[dict[str, Any]],
+    evidence: dict[str, Any],
     apply: bool,
 ) -> dict[str, Any]:
     preflight = _preflight(runner, commands)
     baseline, launch_services = _stable_baseline(stable, runner, commands)
     lanes = _validate_lanes(baseline, lane_paths, runner, commands)
     actions = [(str(runtime_control.LSREGISTER_PATH), "-f", str(lane.path)) for lane in lanes]
-    evidence: dict[str, Any] = {
-        "preflight": preflight,
-        "stable": baseline.to_dict(),
-        "launchServices": launch_services,
-        "lanes": [lane.to_dict() for lane in lanes],
-        "plannedActions": [list(argv) for argv in actions],
-    }
+    evidence.update(
+        {
+            "preflight": preflight,
+            "stable": baseline.to_dict(),
+            "launchServices": launch_services,
+            "lanes": [lane.to_dict() for lane in lanes],
+            "plannedActions": [list(argv) for argv in actions],
+            "staged": [],
+        }
+    )
     if not apply:
         return _result("stage", "dry-run", evidence, commands + [{"argv": list(argv), "executed": False} for argv in actions])
-    staged: list[str] = []
     for lane, argv in zip(lanes, actions):
         result = _run(runner, commands, argv)
         observed = _dump(lane.bundle_id, runner, commands)
@@ -971,8 +1054,7 @@ def _run_stage(
                 records=observed["records"],
             )
         _revalidate_stable(baseline, runner, commands)
-        staged.append(str(lane.path))
-    evidence["staged"] = staged
+        evidence["staged"].append(str(lane.path))
     return _result("stage", "applied", evidence, commands)
 
 
@@ -981,6 +1063,7 @@ def _run_cleanup(
     lane_paths: Sequence[pathlib.Path],
     runner: runtime_control.CommandRunner,
     commands: list[dict[str, Any]],
+    evidence: dict[str, Any],
     apply: bool,
 ) -> dict[str, Any]:
     preflight = _preflight(runner, commands)
@@ -988,17 +1071,19 @@ def _run_cleanup(
     lanes = _validate_cleanup_lanes(lane_paths, runner, commands)
     ordered = tuple(reversed(lanes))
     actions = [(str(runtime_control.LSREGISTER_PATH), "-u", str(lane.path)) for lane in ordered]
-    evidence: dict[str, Any] = {
-        "preflight": preflight,
-        "stable": baseline.to_dict(),
-        "launchServices": launch_services,
-        "lanes": [lane.to_dict() for lane in lanes],
-        "plannedActions": [list(argv) for argv in actions],
-        "filesystemRemoval": "separate explicit operator action",
-    }
+    evidence.update(
+        {
+            "preflight": preflight,
+            "stable": baseline.to_dict(),
+            "launchServices": launch_services,
+            "lanes": [lane.to_dict() for lane in lanes],
+            "plannedActions": [list(argv) for argv in actions],
+            "filesystemRemoval": "separate explicit operator action",
+            "removed": [],
+        }
+    )
     if not apply:
         return _result("cleanup", "dry-run", evidence, commands + [{"argv": list(argv), "executed": False} for argv in actions])
-    removed: list[str] = []
     for lane, argv in zip(ordered, actions):
         result = _run(runner, commands, argv)
         observed = _dump(lane.bundle_id, runner, commands)
@@ -1011,8 +1096,7 @@ def _run_cleanup(
                 records=observed["records"],
             )
         _revalidate_stable(baseline, runner, commands)
-        removed.append(str(lane.path))
-    evidence["removed"] = removed
+        evidence["removed"].append(str(lane.path))
     return _result("cleanup", "applied", evidence, commands)
 
 
@@ -1084,15 +1168,15 @@ def run_matrix(
             if action == "baseline":
                 if not roots:
                     raise MatrixError("consent_stage.path_refused", "Baseline requires one or more explicit allowed duplicate roots")
-                return _run_baseline(stable, roots, command_runner, commands, apply)
+                return _run_baseline(stable, roots, command_runner, commands, evidence, apply)
             if action == "stage":
                 if not 1 <= len(lanes) <= 4:
                     raise MatrixError("consent_stage.path_refused", "Stage requires between one and four lane apps", count=len(lanes))
-                return _run_stage(stable, lanes, command_runner, commands, apply)
+                return _run_stage(stable, lanes, command_runner, commands, evidence, apply)
             if action == "cleanup":
                 if not lanes:
                     raise MatrixError("consent_stage.path_refused", "Cleanup requires at least one exact lane app path")
-                return _run_cleanup(stable, lanes, command_runner, commands, apply)
+                return _run_cleanup(stable, lanes, command_runner, commands, evidence, apply)
             raise MatrixError("consent_stage.path_refused", "Unsupported consent matrix action", action=action)
     except MatrixError as error:
         return _error_result(action, error, commands, evidence)

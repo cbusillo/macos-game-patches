@@ -34,12 +34,14 @@ class FakeRunner:
         uuid: str,
         cd_hash: str,
         team_id: str = "TEAM123456",
+        architectures: str = "arm64",
     ) -> None:
         self.apps[str(app)] = {
             "bundleId": bundle_id,
             "uuid": uuid,
             "cdHash": cd_hash,
             "teamId": team_id,
+            "architectures": architectures,
         }
 
     def add_record(self, app: pathlib.Path, *, path: pathlib.Path | None = None) -> None:
@@ -124,6 +126,9 @@ class FakeRunner:
                 0,
                 stdout=f"cmd LC_UUID\ncmdsize 24\nuuid {identity['uuid']}\n",
             )
+        if command[:2] == ("/usr/bin/lipo", "-archs"):
+            identity = self.apps[str(pathlib.Path(command[2]).parent.parent.parent)]
+            return runtime_control.CommandResult(command, 0, stdout=f"{identity['architectures']}\n")
         raise AssertionError(f"unexpected command: {command}")
 
 
@@ -133,6 +138,7 @@ class ConsentMatrixTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name).resolve()
         self.fixture_root = self.root / "fixtures"
         self.fixture_root.mkdir(mode=0o700)
+        self.lock_path = self.root / "locks" / "runtime.lock"
         self.runner = FakeRunner()
         self.stable = self.make_app(
             "stable.app",
@@ -187,6 +193,7 @@ class ConsentMatrixTests(unittest.TestCase):
             allowed_roots=[self.fixture_root],
             apply=True,
             runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
         )
         self.assertFalse(report["ok"])
         self.assertEqual(report["errors"][0]["code"], "consent_stage.duplicate_baseline")
@@ -214,6 +221,7 @@ class ConsentMatrixTests(unittest.TestCase):
             allowed_roots=[allowed],
             apply=True,
             runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
         )
         self.assertFalse(report["ok"])
         self.assertEqual(report["errors"][0]["code"], "consent_stage.path_refused")
@@ -226,6 +234,7 @@ class ConsentMatrixTests(unittest.TestCase):
             allowed_roots=[allowed],
             apply=True,
             runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
         )
         self.assertTrue(report["ok"])
         self.assertEqual(
@@ -251,6 +260,7 @@ class ConsentMatrixTests(unittest.TestCase):
             allowed_roots=[duplicates[0].parent],
             apply=True,
             runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
         )
         self.assertTrue(report["ok"])
         self.assertEqual(
@@ -280,9 +290,11 @@ class ConsentMatrixTests(unittest.TestCase):
             self.assertEqual(report["errors"][0]["code"], "consent_stage.path_refused")
 
     def test_active_process_and_service_are_refused(self) -> None:
-        self.runner.process_output = "42 alvr_macos_bridge\n"
+        long_path = "/Users/example/Library/Application Support/" + "x" * 100 + "/alvr_macos_bridge"
+        self.runner.process_output = f"42 {long_path}\n"
         report = matrix.run_matrix("inspect", stable_app=self.stable, runner=self.runner)
         self.assertEqual(report["errors"][0]["code"], "consent_stage.active_process")
+        self.assertIn("-ww", matrix.PROCESS_LIST_COMMAND)
 
         self.runner.process_output = ""
         self.runner.service_active = True
@@ -332,6 +344,7 @@ class ConsentMatrixTests(unittest.TestCase):
             allowed_roots=[self.fixture_root],
             apply=True,
             runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
         )
         self.assertFalse(report["ok"])
         self.assertEqual(report["errors"][0]["code"], "consent_stage.stable_changed")
@@ -355,6 +368,34 @@ class ConsentMatrixTests(unittest.TestCase):
         report = matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[uuid_lane], runner=self.runner)
         self.assertEqual(report["errors"][0]["code"], "consent_stage.uuid_collision")
 
+    def test_stage_refuses_duplicate_production_baseline(self) -> None:
+        duplicate = self.make_app(
+            "duplicate.app",
+            bundle_id=matrix.PRODUCTION_BUNDLE_ID,
+            uuid="22222222-2222-2222-2222-222222222222",
+            cd_hash="2222222222222222222222222222222222222222",
+        )
+        lane = self.make_app(
+            "lane.app",
+            bundle_id="com.example.lane",
+            uuid="33333333-3333-3333-3333-333333333333",
+            cd_hash="3333333333333333333333333333333333333333",
+        )
+        self.runner.add_record(duplicate)
+        report = matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[lane], runner=self.runner)
+        self.assertEqual(report["errors"][0]["code"], "consent_stage.duplicate_baseline")
+
+    def test_stage_requires_single_arm64_slice(self) -> None:
+        lane = self.make_app(
+            "lane.app",
+            bundle_id="com.example.lane",
+            uuid="22222222-2222-2222-2222-222222222222",
+            cd_hash="2222222222222222222222222222222222222222",
+        )
+        self.runner.apps[str(lane)]["architectures"] = "arm64 x86_64"
+        report = matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[lane], runner=self.runner)
+        self.assertEqual(report["errors"][0]["code"], "consent_stage.bundle_invalid")
+
     def test_stage_and_cleanup_ordering(self) -> None:
         first = self.make_app(
             "first.app",
@@ -368,11 +409,25 @@ class ConsentMatrixTests(unittest.TestCase):
             uuid="33333333-3333-3333-3333-333333333333",
             cd_hash="3333333333333333333333333333333333333333",
         )
-        report = matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[first, second], apply=True, runner=self.runner)
+        report = matrix.run_matrix(
+            "stage",
+            stable_app=self.stable,
+            lane_apps=[first, second],
+            apply=True,
+            runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
+        )
         self.assertTrue(report["ok"])
         register_calls = [call for call in self.runner.calls if len(call) > 1 and call[1] == "-f"]
         self.assertEqual([call[2] for call in register_calls], [str(first), str(second)])
-        report = matrix.run_matrix("cleanup", stable_app=self.stable, lane_apps=[first, second], apply=True, runner=self.runner)
+        report = matrix.run_matrix(
+            "cleanup",
+            stable_app=self.stable,
+            lane_apps=[first, second],
+            apply=True,
+            runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
+        )
         self.assertTrue(report["ok"])
         unregister_calls = [call for call in self.runner.calls if len(call) > 1 and call[1] == "-u"]
         self.assertEqual([call[2] for call in unregister_calls[-2:]], [str(second), str(first)])
@@ -393,9 +448,17 @@ class ConsentMatrixTests(unittest.TestCase):
             cd_hash="3333333333333333333333333333333333333333",
         )
         self.runner.fail_register.add(str(second))
-        report = matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[first, second], apply=True, runner=self.runner)
+        report = matrix.run_matrix(
+            "stage",
+            stable_app=self.stable,
+            lane_apps=[first, second],
+            apply=True,
+            runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
+        )
         self.assertFalse(report["ok"])
         self.assertEqual(report["errors"][0]["code"], "consent_stage.register_failed")
+        self.assertEqual(report["evidence"]["staged"], [str(first)])
         self.assertEqual(len(self.runner.records["com.example.first"]), 1)
         self.assertNotIn("-u", [part for call in self.runner.calls for part in call])
 
@@ -412,13 +475,44 @@ class ConsentMatrixTests(unittest.TestCase):
             uuid="33333333-3333-3333-3333-333333333333",
             cd_hash="3333333333333333333333333333333333333333",
         )
-        matrix.run_matrix("stage", stable_app=self.stable, lane_apps=[first, second], apply=True, runner=self.runner)
-        self.runner.fail_unregister.add(str(second))
-        report = matrix.run_matrix("cleanup", stable_app=self.stable, lane_apps=[first, second], apply=True, runner=self.runner)
+        matrix.run_matrix(
+            "stage",
+            stable_app=self.stable,
+            lane_apps=[first, second],
+            apply=True,
+            runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
+        )
+        self.runner.fail_unregister.add(str(first))
+        report = matrix.run_matrix(
+            "cleanup",
+            stable_app=self.stable,
+            lane_apps=[first, second],
+            apply=True,
+            runner=self.runner,
+            lifecycle_lock_path=self.lock_path,
+        )
         self.assertFalse(report["ok"])
         self.assertEqual(report["errors"][0]["code"], "consent_stage.residue")
+        self.assertEqual(report["evidence"]["removed"], [str(second)])
         self.assertEqual(len(self.runner.records["com.example.first"]), 1)
-        self.assertEqual(len(self.runner.records["com.example.second"]), 1)
+        self.assertEqual(self.runner.records["com.example.second"], [])
+
+    def test_apply_requires_lifecycle_lock(self) -> None:
+        lane = self.make_app(
+            "lane.app",
+            bundle_id="com.example.lane",
+            uuid="22222222-2222-2222-2222-222222222222",
+            cd_hash="2222222222222222222222222222222222222222",
+        )
+        report = matrix.run_matrix(
+            "stage",
+            stable_app=self.stable,
+            lane_apps=[lane],
+            apply=True,
+            runner=self.runner,
+        )
+        self.assertEqual(report["errors"][0]["code"], "consent_stage.lock_failed")
 
     def test_dry_run_never_uses_launch_or_tcc_commands(self) -> None:
         lane = self.make_app(
@@ -433,6 +527,12 @@ class ConsentMatrixTests(unittest.TestCase):
         command_text = " ".join(" ".join(call) for call in self.runner.calls)
         self.assertTrue(forbidden.isdisjoint(command_text.split()))
         self.assertFalse(any(call[1:] == ("-f", str(lane)) for call in self.runner.calls))
+
+    def test_launch_services_dump_text_is_not_embedded_in_report(self) -> None:
+        payload = f"{self.runner._dump()}\nPRIVATE-LS-DUMP-SENTINEL"
+        with mock.patch.object(self.runner, "_dump", return_value=payload):
+            report = matrix.run_matrix("inspect", stable_app=self.stable, runner=self.runner)
+        self.assertNotIn("PRIVATE-LS-DUMP-SENTINEL", json.dumps(report))
 
     def test_apply_uses_private_lifecycle_lock_when_supplied(self) -> None:
         lane = self.make_app(
