@@ -271,6 +271,66 @@ evidence remains historical; dev14 live reconfirmation waits for a genuinely
 quiet host, and physical Secret Shop and Robot Repair transitions still require
 the owner and headset.
 
+### Dev14 Reconfirmation Plan
+
+Run the sealed dev14 artifact only from detached source commit
+`0dc9ddf95d190f82d73c7e3deea7b9437a58155f`, whose manifest and lock hashes
+match the artifact provenance. Keep the existing repository path so the
+preserved bridge bundle retains its Launch Services identity. Do not rewrite the
+current manifest, lock, profile, or artifact contract to force compatibility.
+
+Before each live lifecycle or disconnected phase, require three host samples 60
+seconds apart with one-minute load at or below `2.0` and `0.15 * hw.ncpu`,
+five-minute load at or below `2.5`, 15-minute load at or below `4.0` and not
+increasing, no unrelated process at or above 20 percent CPU, AC power, and no
+relevant Steam, CrossOver, Wine, game, build, indexing, backup, or recording
+work. Any failed sample stops the phase without mutation.
+
+The unattended sequence is read-only state census, hardware-free fixtures,
+stock preflight, default-scope VR cleanup, 18-check doctor, profile-bound
+install, schema-v6 hub start, status capture, cooperative stop, exact uninstall,
+stock restoration, and two consecutive 5,400-frame disconnected cadence runs.
+Every failure uses exact-owned stop, profile-bound uninstall, default cleanup,
+and stock preflight in that order; failed restoration freezes all state for
+review. No physical mode, headset connection, privacy consent, controller work,
+or Secret Shop and Robot Repair transition is permitted in this unattended
+slice.
+
+### August 10, 2026 Preflight Outcome
+
+The unattended attempt stopped before runtime or game mutation. From detached
+source commit `0dc9ddf95d190f82d73c7e3deea7b9437a58155f`, the first fixture
+invocation stopped before tests because its declared `/private/tmp` fixture root
+was absent. After creating that empty root, the exact retry passed all 15
+profile, 67 control, 75 start, 30 install, 31 transaction, and 2 cleanup
+fixtures. Artifact verification and the checked-in dev14 contract also passed.
+
+Three independent admission blockers remained:
+
+- stock preflight found 1,667 files instead of the sealed 1,665-file tree;
+  read-only inspection identified only `.DS_Store` at the game root and under
+  `RobotRepair/`, and the unattended run preserved both files;
+- the current local bindings file contains the post-dev14
+  `ALVR_HOST_CHECKOUT` key, which the historical manifest correctly rejects as
+  `binding.unknown`; a future retry must use a separately recorded
+  historical-compatible bindings file rather than editing the checked-in
+  contract;
+- doctor measured macOS build `26A5406e`, while dev14 pins `26A5388g`, so the
+  exact artifact is not admissible on the currently booted operating system.
+
+The host was also not quiet: the recorded first sample was
+`4.04 12.47 17.51`. No doctor failure was bypassed, no cleanup command was
+needed, and no install, start, stop, uninstall, or cadence probe was attempted.
+Dev14 live reconfirmation therefore remains open and requires the pinned macOS
+build, an exact stock tree, compatible local bindings, and a quiet host before
+retrying.
+
+The current dev15 contract does not provide an unattended alternative on this
+boot. Its manifest and lock validate, but build-input validation stops on the
+same operating-system prerequisite: actual build `26A5406e` does not match the
+pinned `26A5388g`. No current-contract artifact build or signing step was
+started.
+
 ## Hardware-Free Fixture Matrix
 
 - existing singleton profile/state/start/stop/install fixtures remain green;
