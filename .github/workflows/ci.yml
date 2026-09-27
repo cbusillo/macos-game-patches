@@ -9,11 +9,51 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pull-request time budget per lane. Exceeding it warns; it does not fail.
+  LANE_BUDGET_SECONDS: "300"
+
 jobs:
+  changes:
+    name: Detect Product Changes
+    runs-on: ubuntu-latest
+    outputs:
+      product: ${{ steps.classify.outputs.product }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Pushes to main always run everything. Pull requests that only touch
+          # Markdown, docs/ evidence, or .github/github.json metadata skip the
+          # product fixture suites; hygiene and contract checks still run.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "product=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          product_files=$(git diff --name-only "$BASE_SHA" HEAD -- . ':(exclude)docs/**' ':(exclude)*.md' ':(exclude)LICENSE' ':(exclude).github/github.json')
+          if [ -n "$product_files" ]; then
+            echo "product=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "product=false" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change: product fixture suites skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   repo-hygiene:
     name: Repo Hygiene
+    needs: changes
     runs-on: ubuntu-latest
     steps:
+      - name: Start lane timer
+        run: echo "LANE_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -50,6 +90,7 @@ jobs:
         run: |
           python3 -m py_compile \
             tools/vr_stack_cleanup.py \
+            tools/vr_stack_cleanup_test.py \
             tools/launch_freedom_crossover.py \
             tools/build_macos_ui_helper.py \
             tools/macos_ui_helper_client.py \
@@ -77,14 +118,23 @@ jobs:
         run: |
           python3 tools/runtime_profile.py check
           python3 tools/runtime_profile.py self-test
-          python3 tools/runtime_profile_test.py
+
+      - name: Validate runtime profile fixtures
+        if: needs.changes.outputs.product == 'true'
+        run: python3 tools/runtime_profile_test.py
+
+      - name: Validate VR stack cleanup matching
+        if: needs.changes.outputs.product == 'true'
+        run: python3 tools/vr_stack_cleanup_test.py
 
       - name: Validate macOS lab helpers
+        if: needs.changes.outputs.product == 'true'
         run: |
           python3 tools/macos_ui_helper_client_test.py
           python3 tools/macos_app_server_launch_agent_test.py
 
       - name: Validate runtime control plane
+        if: needs.changes.outputs.product == 'true'
         run: |
           python3 tools/runtime_control_test.py
           python3 tools/macos_consent_matrix_test.py
@@ -92,11 +142,13 @@ jobs:
           python3 tools/runtime_cli.py --help
 
       - name: Validate runtime transactions
+        if: needs.changes.outputs.product == 'true'
         run: |
           python3 tools/runtime_descriptor_test.py
           python3 tools/runtime_transaction_test.py
 
       - name: Validate runtime lifecycle coordination
+        if: needs.changes.outputs.product == 'true'
         run: python3 tools/runtime_install_test.py
 
       - name: Validate runtime artifact contract
@@ -119,12 +171,26 @@ jobs:
       - name: Secret scan tracked files
         run: gitleaks detect --source . --no-git --redact --verbose
 
+      - name: Report lane time budget
+        if: always()
+        run: |
+          elapsed=$(( $(date +%s) - LANE_STARTED ))
+          echo "Lane time: ${elapsed}s (budget ${LANE_BUDGET_SECONDS}s)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$elapsed" -gt "$LANE_BUDGET_SECONDS" ]; then
+            echo "::warning title=CI time budget exceeded::${GITHUB_JOB} took ${elapsed}s; budget is ${LANE_BUDGET_SECONDS}s"
+          fi
+
   runtime-lifecycle-macos:
     name: Runtime Lifecycle (macOS)
+    needs: changes
+    if: needs.changes.outputs.product == 'true'
     runs-on: macos-latest
     env:
       RUNTIME_FIXTURE_ROOT: /private/tmp/runtime-fixtures
     steps:
+      - name: Start lane timer
+        run: echo "LANE_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -179,3 +245,12 @@ jobs:
           python3 tools/runtime_descriptor_test.py
           python3 tools/runtime_transaction_test.py
           python3 tools/runtime_install_test.py
+
+      - name: Report lane time budget
+        if: always()
+        run: |
+          elapsed=$(( $(date +%s) - LANE_STARTED ))
+          echo "Lane time: ${elapsed}s (budget ${LANE_BUDGET_SECONDS}s)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$elapsed" -gt "$LANE_BUDGET_SECONDS" ]; then
+            echo "::warning title=CI time budget exceeded::${GITHUB_JOB} took ${elapsed}s; budget is ${LANE_BUDGET_SECONDS}s"
+          fi

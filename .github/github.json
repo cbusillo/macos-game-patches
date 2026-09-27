@@ -88,6 +88,11 @@
       "secretScan": "gitleaks detect --source . --no-git --redact --verbose",
       "gitleaksVersion": "8.30.1"
     },
+    "ciScope": {
+      "docsOnlyPullRequests": "Pull requests whose changes are limited to Markdown, docs/, LICENSE, or .github/github.json run hygiene, JSON, lint, secret scan, and the profile/artifact contract checks, and skip the Python fixture suites and the macOS lifecycle lane. Pushes to main run everything.",
+      "laneBudgetSeconds": 300,
+      "laneBudget": "Each CI lane writes its elapsed time to the job summary and emits a warning when it exceeds the budget; it does not fail the lane."
+    },
     "macosUiHelper": {
       "contract": "python3 tools/build_macos_ui_helper.py check",
       "unit": "swift test --package-path tools/macos_ui_helper",
