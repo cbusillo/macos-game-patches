@@ -84,7 +84,8 @@ jobs:
           package="github.com/rhysd/actionlint/cmd/actionlint"
           go run "${package}@${ACTIONLINT_VERSION}" \
             -config-file .github/actionlint.yaml \
-            .github/workflows/ci.yml
+            .github/workflows/ci.yml \
+            .github/workflows/codeql.yml
 
       - name: Validate Python tools
         run: |
