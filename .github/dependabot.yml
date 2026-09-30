@@ -2,6 +2,8 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    cooldown:
+      semver-major-days: 30
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
