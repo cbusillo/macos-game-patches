@@ -1,11 +1,11 @@
 # Option B: ALVR v21 Native Bridge Plan
 
 > Historical note: this document records the Option B/shared-memory viability
-> workstream and probe evidence. The active durable plan has moved to GitHub
-> issue #36, "Plan: GPU-resident Mac ALVR bridge", with issue #38 as the next
-> implementation focus. Treat synthetic grids, CPU BGRA shared memory, and
-> hand-rendered diagnostics here as evidence-gathering tools only, not the
-> current product architecture or next milestone.
+> workstream and probe evidence. Its plan moved to GitHub issue #36, "Plan:
+> GPU-resident Mac ALVR bridge", which is now closed; the current plan is issue
+> #56, "Plan: Reproducible Mac ALVR Runtime". Treat synthetic grids, CPU BGRA
+> shared memory, and hand-rendered diagnostics here as evidence-gathering tools
+> only, not the current product architecture or next milestone.
 
 ## Decision
 

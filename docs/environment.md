@@ -4,21 +4,25 @@ This repo targets reproducible VR experiments on Apple hardware.
 
 ## Qualified Local Baseline
 
+The runtime contract in `runtime/manifest.json` (`1.0.0-dev15`) enforces the
+host model, macOS build, and CrossOver version below. The Xcode build is checked
+for artifact builds only, not when running a sealed artifact.
+
 - Host: Mac Studio `Mac16,9`, Apple M4 Max, 128 GB
-- macOS: 27.0 beta, build `26A5378n`
+- macOS: 27.0 beta, build `26A5388g`
 - Architecture: Apple Silicon / arm64
 - CrossOver: 26.2.0 build `39821`
 - GPTK: 4.0
 - Xcode: 27.0 build 27A5194q
 - visionOS SDK: 27.0
 - Metal Toolchain: 27A5194o
-- Physical client: Apple Vision Pro on visionOS 27.0 beta, build `24M5316k`
+- Physical client: Apple Vision Pro on visionOS 27.0 beta 4, build `24M5326g`
 
 ## Qualified Source Baseline
 
 - ALVR protocol/version: `21.0.0-dev12`
-- Host fork: `cbusillo/ALVR@229e8ced76be9b62307fe79690229c5e6bc020d5`
-  on `diagnostic/bgra-nv12-probe`
+- Host fork: `cbusillo/ALVR@9bc309546fd1c4cdb229ec2a5f11e304154dfc3d`
+  (foreground Local Network consent, merged to `master` by cbusillo/ALVR#10)
 - visionOS client fork:
   `cbusillo/alvr-visionos@171cd9dca5ef85c9dfd9f35c565c265c08e8ce82`
 - visionOS client-core fork:
