@@ -5,8 +5,8 @@ This repo targets reproducible VR experiments on Apple hardware.
 ## Qualified Local Baseline
 
 The runtime contract in `runtime/manifest.json` (`1.0.0-dev15`) enforces the
-host model, macOS build, Xcode build, and CrossOver version below; this list
-follows it.
+host model, macOS build, and CrossOver version below. The Xcode build is checked
+for artifact builds only, not when running a sealed artifact.
 
 - Host: Mac Studio `Mac16,9`, Apple M4 Max, 128 GB
 - macOS: 27.0 beta, build `26A5388g`
