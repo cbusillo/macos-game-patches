@@ -93,8 +93,9 @@ declared runtime target, bind the curated profile ID and SHA-256 into a
 journal-v3 transaction, and commit or roll back the complete target set as one
 unit. Shared host resources remain single in either mode.
 
-The dev8 contract still uses a separate signing step, but readiness now comes
-from verified artifact stage rather than manifest mode alone. Unsealed artifacts
+The runtime contract (`1.0.0-dev15` in `runtime/manifest.json`) still uses a
+separate signing step, but readiness comes from verified artifact stage rather
+than manifest mode alone. Unsealed artifacts
 return `artifact.sealing_required` before any lifecycle mutation; a final sealed
 artifact carries its exact signed tree into the transaction plan. A prior bridge
 at the fixed consent-preserving URL is admitted only after marker and Developer
@@ -108,7 +109,7 @@ qualified installed layout is now the admission boundary for runtime start.
 
 ## Runtime Control Plane
 
-Issue #60 is extracting the proven runtime lifecycle from the research runner.
+Issue #60 extracted the proven runtime lifecycle from the research runner.
 The artifact-backed control plane provides truthful prerequisite diagnostics,
 a bounded detached host supervisor, synchronized live status, and exact owned
 teardown without changing the launchd/Mach data plane:
@@ -149,7 +150,10 @@ quiesces each live owned process group, refuses ambiguous dead-owner cleanup,
 revalidates service and producer identity before publication or launchd
 bootout, ignores late client telemetry, and never signals serialized PIDs. The
 production-admitted single-process profiles are `freedom-locomotion` and
-`aircar`; The Lab remains a separate multi-target lifecycle slice.
+`aircar`. The Lab uses the multi-target ownership in
+`docs/probes/027-the-lab-multi-target-ownership.md`: its hub lifecycle and
+disconnected cadence are qualified, and its physical Secret Shop and Robot
+Repair transitions remain headset gates under issue #112.
 
 ## Starting New Work
 

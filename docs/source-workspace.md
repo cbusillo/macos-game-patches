@@ -20,8 +20,9 @@ tree outside the visionOS client checkout.
 
 ## Qualified Runtime Baseline
 
-- Host: `cbusillo/ALVR`, branch `diagnostic/bgra-nv12-probe`, commit
-  `229e8ced76be9b62307fe79690229c5e6bc020d5`
+- Host: `cbusillo/ALVR`, commit `9bc309546fd1c4cdb229ec2a5f11e304154dfc3d`
+  (on `master` through cbusillo/ALVR#10; it adds foreground Local Network
+  consent to the earlier `diagnostic/bgra-nv12-probe` commit `229e8ced`)
 - visionOS client: `cbusillo/alvr-visionos`, branch `main`, commit
   `171cd9dca5ef85c9dfd9f35c565c265c08e8ce82`
 - visionOS client core: `cbusillo/ALVR`, branch
@@ -29,7 +30,7 @@ tree outside the visionOS client checkout.
   `109643c88e402b36766020b8f6a99ea48aa8d55f`
 - Protocol/version: `21.0.0-dev12`
 
-These commits are the physically qualified owner-runtime baseline. The earlier
+These commits match the `gitSources` pins in `runtime/manifest.json`. The earlier
 upstream commits in patch READMEs remain provenance for individual patches, not
 the complete current runtime.
 
@@ -49,7 +50,7 @@ git -C ALVR checkout 109643c88e402b36766020b8f6a99ea48aa8d55f
 git -C ALVR submodule update --init --recursive
 
 cd ~/Developer/alvr
-git checkout 229e8ced76be9b62307fe79690229c5e6bc020d5
+git checkout 9bc309546fd1c4cdb229ec2a5f11e304154dfc3d
 ```
 
 Add `alvr-org` remotes when comparing or preparing upstream work. Do not apply

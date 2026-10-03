@@ -12,7 +12,9 @@ expectations, docs routing, and cleanup policy.
 
 ## Experiment Hygiene
 
-- Start new work with a short plan under `docs/` before adding scripts.
+- Start new work from its owning GitHub issue (see `docs/probes/README.md` for
+  routing). The issue is the plan; record a new probe's question and gates in
+  `docs/probes/` before adding scripts.
 - Commit reproducible commands, cleanup steps, expected artifacts, and known
   failure signatures with each experiment.
 - Keep tools narrowly scoped until a path has real evidence.
@@ -21,10 +23,21 @@ expectations, docs routing, and cleanup policy.
 
 ## Validation
 
-There is currently no repo-wide executable validation gate. For documentation
-only changes, verify the changed Markdown and repository metadata are internally
-consistent. When new tooling is added, record the relevant validation command in
-`.github/github.json`.
+CI (`.github/workflows/ci.yml`) runs on pull requests, `main`, and merge-train
+candidates. `Repo Hygiene` is the required check: JSON, Markdown and workflow
+lint, Python compile, runtime profile and artifact contract checks, the fixture
+suites, and a secret scan. `Runtime Lifecycle (macOS)` runs the Swift helper and
+lifecycle fixtures. Pull requests that change only Markdown, `docs/`, `LICENSE`,
+or `.github/github.json` skip the fixture suites and the macOS lane. The local
+commands are under `qualityGate` in `.github/github.json`; record new ones there.
+
+`runtime/manifest.json` pins the SHA-256 of some docs as artifact inputs:
+`docs/reproducible-mac-alvr-runtime-v1.md`,
+`docs/reproducible-runtime-artifact.md`, and the `patches/crossover-dxvk/` and
+`patches/crossover-moltenvk/` READMEs. Editing one fails
+`python3 tools/build_runtime_artifact.py check` until the manifest and lock are
+updated, which changes the runtime contract. Change them only as part of a
+contract update.
 
 ## Test Guard Rules
 

@@ -1,5 +1,9 @@
 # Probe 030: M2 Every Code App Server LaunchAgent
 
+> Retired: Every Code is retired, so this LaunchAgent and its tool are no longer
+> supported. This page is a historical record. Issue #141 tracks removing the
+> tool and docs, and unloading the LaunchAgent on the M2 with the Director.
+
 ## Question
 
 Can the secondary M2 test host run its Every Code app server as a durable,

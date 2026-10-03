@@ -64,14 +64,17 @@ encoded frame contract view_params ...
 
 Route plan updates to the owning issue before moving on:
 
-- #59 for the pre-release OpenVR/D3D11 compatibility tranche.
+- #59 for the pre-release OpenVR/D3D11 compatibility tranche, and #112 for
+  The Lab multi-target ownership under it.
+- #62 for macOS lifecycle, signing, and privacy integration.
+- #63 for release qualification and the release documentation.
 - #56 for parent-level runtime direction or product-boundary changes.
-- #38 for submitted-frame contract facts.
-- #39 for native macOS encode surface facts.
-- #40 for the completed CrossOver/GPTK texture-handoff discovery record.
-- #53 for production handoff-pool implementation facts.
-- #41 for AVP validation and human-observation rules.
-- #36 for historical GPU-resident bridge context.
+
+These closed issues are historical records; open a new issue under #56 rather
+than reopening them: #38 (submitted-frame contract), #39 (native macOS encode
+surface), #40 (CrossOver/GPTK texture-handoff discovery), #53 (production
+handoff pool), #41 (AVP validation and human-observation rules), and #36
+(GPU-resident bridge).
 
 If a run changes the plan, update the owning GitHub issue's `Current Status`
 before starting another experiment.
@@ -117,3 +120,4 @@ Use this shape:
 - [028 - macOS runtime readiness](028-macos-runtime-readiness.md)
 - [029 - Signed macOS Lab UI helper](029-macos-lab-ui-helper.md)
 - [030 - M2 Every Code app-server LaunchAgent](030-m2-every-code-app-server-launchagent.md)
+  (retired with Every Code; removal tracked in #141)
