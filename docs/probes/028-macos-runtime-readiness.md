@@ -503,6 +503,9 @@ consent path are implemented. The M2 qualifies historical denied-state evidence,
 allowed recovery, and a final dev15 foreground `ready` result while preserving
 one stable identity. Clean-user behavior for that stable identity, isolated
 throwaway-app deny and pending states, and persistence across update, rollback,
-and uninstall remain physical issue-#62 gates. Reboot and logout/login
-persistence already pass on the M2 secondary lane. The M4 remains authoritative
-for release qualification.
+and uninstall remain physical issue-#62 gates. Historical M2 reboot and
+logout/login results were recorded in the retired probe 030, recoverable from
+[the pre-removal source](https://github.com/cbusillo/macos-game-patches/blob/a7db14d/docs/probes/030-m2-every-code-app-server-launchagent.md).
+That record does not qualify the current host state; issue #141 retains the
+M2 unload and UI-helper decision. The M4 remains authoritative for release
+qualification.
