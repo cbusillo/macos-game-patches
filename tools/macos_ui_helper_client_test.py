@@ -116,12 +116,14 @@ class ClientTests(unittest.TestCase):
             client.read_result(directory)
 
     def run_reader_child(self, source: str, path: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        completed = subprocess.run(
             [sys.executable, "-B", "-c",
              "import sys; sys.path.insert(0, sys.argv[1]); " + source,
              str(Path(client.__file__).resolve().parent), str(path)],
-            capture_output=True, text=True, timeout=5, check=True,
+            capture_output=True, text=True, timeout=5, check=False,
         )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed
 
     def test_fifo_result_is_refused_without_a_writer(self) -> None:
         path = self.results / "fifo-result.json"
@@ -151,7 +153,7 @@ else:
         path = self.write_result(prefix)
         padding = b' ' * client.MAX_RESULT_BYTES
         with path.open("ab") as stream:
-            for _ in range(32):
+            for _ in range(12):
                 stream.write(padding)
         completed = self.run_reader_child('''
 import json

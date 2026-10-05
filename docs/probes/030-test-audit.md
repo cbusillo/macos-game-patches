@@ -138,7 +138,8 @@ All result files and directory permissions are disposable fixture state.
 
 In the landed audit slice, an additional fault tripled the read loop's bound;
 its descriptor observer detected consumption of the whole oversized file.
-The API-independent allocation fixture below supersedes that observer.
+The API-independent fixture below checks whole-file allocation instead; it does
+not detect every small multiple of the read ceiling.
 As an intended-change control, temporarily change only
 `MAX_RESULT_BYTES` to a different finite ceiling and rerun the UI suite: all
 fixtures must pass without edits. Restore the ceiling afterward.
@@ -174,6 +175,8 @@ The growth fixture reports a small stat size for a large valid JSON result and
 measures peak Python allocations in a fresh child with `tracemalloc`. Its budget
 scales with `MAX_RESULT_BYTES`, with room for bounded copies and buffering; the
 file is substantially larger than that budget. It does not observe read calls.
+The file uses twelve ceiling-sized padding blocks against an eight-ceiling
+allocation budget, limiting fixture cost while leaving room for buffering.
 
 Using the save/replace/run/restore procedure above, plant these faults:
 
