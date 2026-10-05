@@ -108,6 +108,16 @@ class RuntimeProfileTests(unittest.TestCase):
             self.load_curated()
         self.assertEqual(raised.exception.code, "profile.noncanonical")
 
+    def test_curated_filename_must_match_declared_profile_id(self) -> None:
+        self.profile["id"] = "foreign-fixture"
+        self.profile_path.write_bytes(runtime_profile.canonical_json_bytes(self.profile))
+        fixture_sha256 = runtime_profile.sha256_file(self.profile_path)
+        self.manifest["sourceFiles"][0]["sha256"] = fixture_sha256
+        self.write_build_inputs(fixture_sha256)
+        with self.assertRaises(ProfileError) as raised:
+            self.load_curated()
+        self.assertEqual(raised.exception.code, "profile.not_curated")
+
     def test_manifest_profile_drift_is_rejected(self) -> None:
         self.manifest["sourceFiles"][0]["sha256"] = "0" * 64
         with self.assertRaises(ProfileError) as raised:

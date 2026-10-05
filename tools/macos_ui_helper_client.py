@@ -23,6 +23,7 @@ DEFAULT_APP = (
     / "MacOSUIHelper.app"
 )
 RESULT_ROOT = DEFAULT_APP.parent / "Results"
+MAX_RESULT_BYTES = 1_048_576
 ALLOWED_COMMANDS = {
     "status",
     "request-accessibility",
@@ -45,10 +46,10 @@ def read_result(path: Path) -> dict[str, object]:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
             raise RuntimeError("result is not an owner-controlled regular file")
-        if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > 1_048_576:
+        if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > MAX_RESULT_BYTES:
             raise RuntimeError("result permissions or size violate the transport contract")
         chunks: list[bytes] = []
-        remaining = 1_048_577
+        remaining = MAX_RESULT_BYTES + 1
         while remaining > 0:
             chunk = os.read(descriptor, remaining)
             if not chunk:
@@ -58,7 +59,7 @@ def read_result(path: Path) -> dict[str, object]:
         payload = b"".join(chunks)
     finally:
         os.close(descriptor)
-    if len(payload) > 1_048_576:
+    if len(payload) > MAX_RESULT_BYTES:
         raise RuntimeError("result exceeds the transport limit")
     parsed = json.loads(payload)
     if not isinstance(parsed, dict) or parsed.get("schema") != 1 or not isinstance(parsed.get("ok"), bool):

@@ -82,6 +82,158 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(OSError):
             client.read_result(link)
 
+    def write_result(self, payload: bytes, *, mode: int = 0o600, name: str = "result.json") -> Path:
+        path = self.results / name
+        path.write_bytes(payload)
+        path.chmod(mode)
+        return path
+
+    def test_result_permissions_must_be_private_and_readable(self) -> None:
+        for mode in (0o644, 0o400, 0o700):
+            with self.subTest(mode=oct(mode)):
+                path = self.write_result(b'{"schema":1,"ok":true}', mode=mode, name=f"result-{mode:o}.json")
+                with self.assertRaises(RuntimeError):
+                    client.read_result(path)
+
+    def test_foreign_owned_result_is_refused(self) -> None:
+        path = self.write_result(b'{"schema":1,"ok":true}')
+        metadata = path.stat()
+        foreign = SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_uid=metadata.st_uid + 1,
+            st_size=metadata.st_size,
+        )
+        with mock.patch.object(client.os, "fstat", return_value=foreign):
+            with self.assertRaises(RuntimeError):
+                client.read_result(path)
+
+    def test_nonregular_result_is_refused(self) -> None:
+        directory = self.root / "directory-result"
+        directory.mkdir()
+        directory.chmod(0o600)
+        self.addCleanup(directory.chmod, 0o700)
+        with self.assertRaises(RuntimeError):
+            client.read_result(directory)
+
+    def test_oversized_result_is_refused_before_read(self) -> None:
+        # Distinct from the implementation limit; valid JSON if size admission breaks.
+        path = self.write_result(json.dumps({"schema": 1, "ok": True, "data": "x" * (client.MAX_RESULT_BYTES * 2)}).encode())
+        with mock.patch.object(client.os, "read", wraps=os.read) as read:
+            with self.assertRaises(RuntimeError):
+                client.read_result(path)
+        read.assert_not_called()
+
+    def test_growth_after_stat_is_still_bounded(self) -> None:
+        path = self.write_result(b'{"schema":1,"ok":true}' + b' ' * (client.MAX_RESULT_BYTES * 2))
+        metadata = path.stat()
+        earlier = SimpleNamespace(st_mode=metadata.st_mode, st_uid=metadata.st_uid, st_size=20)
+        chunks: list[bytes] = []
+        original_read = os.read
+
+        def read(descriptor: int, size: int) -> bytes:
+            chunk = original_read(descriptor, size)
+            chunks.append(chunk)
+            return chunk
+
+        with mock.patch.object(client.os, "fstat", return_value=earlier), mock.patch.object(
+            client.os, "read", side_effect=read
+        ):
+            with self.assertRaises(RuntimeError):
+                client.read_result(path)
+        self.assertLess(sum(len(chunk) for chunk in chunks), metadata.st_size)
+
+    def test_malformed_json_and_schema_are_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            client.read_result(self.write_result(b'{'))
+        for payload in ([], {"ok": True}, {"schema": 73, "ok": True}, {"schema": 1, "ok": 1}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(RuntimeError):
+                    client.read_result(self.write_result(json.dumps(payload).encode()))
+
+    def test_helper_failure_is_preserved_and_result_removed(self) -> None:
+        token = "1" * 32
+        payload = {"schema": 1, "ok": False, "error": {"code": "fixture.denied"}}
+
+        def launch(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            self.write_result(json.dumps(payload).encode(), name=f"{token}.json")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(client.uuid, "uuid4", return_value=SimpleNamespace(hex=token)), mock.patch.object(
+            client.subprocess, "run", side_effect=launch
+        ):
+            status, result = self.run_main(["status"])
+        self.assertEqual(status, 1)
+        self.assertEqual(result, payload)
+        self.assertFalse((self.results / f"{token}.json").exists())
+
+    def test_invalid_result_is_reported_and_removed(self) -> None:
+        token = "2" * 32
+
+        def launch(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            self.write_result(b'{"schema":1,"ok":true}', mode=0o644, name=f"{token}.json")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(client.uuid, "uuid4", return_value=SimpleNamespace(hex=token)), mock.patch.object(
+            client.subprocess, "run", side_effect=launch
+        ):
+            status, payload = self.run_main(["status"])
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["error"]["code"], "client.result_invalid")
+        self.assertFalse((self.results / f"{token}.json").exists())
+
+    def test_result_wait_expires_without_real_sleep(self) -> None:
+        clock = 40.0
+
+        def advance(duration: float) -> None:
+            nonlocal clock
+            clock += duration
+
+        def monotonic() -> float:
+            advance(0.01)
+            if clock > 44.0:
+                raise AssertionError("result waiting exceeded the fixture deadline")
+            return clock
+
+        with mock.patch.object(client.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), mock.patch.object(
+            client.time, "monotonic", side_effect=monotonic
+        ), mock.patch.object(client.time, "sleep", side_effect=advance):
+            status, payload = self.run_main(["--timeout", "1", "status"])
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["error"]["code"], "client.timeout")
+        self.assertLess(clock, 42.0)
+
+    def test_launch_failure_is_reported(self) -> None:
+        with mock.patch.object(client.subprocess, "run", return_value=subprocess.CompletedProcess([], 9, "", "fixture launch failure")), mock.patch.object(
+            client.time, "sleep", side_effect=AssertionError("waited after a rejected launch")
+        ):
+            status, payload = self.run_main(["status"])
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["error"]["code"], "client.launch_failed")
+        self.assertIn("fixture launch failure", payload["error"]["details"]["message"])
+
+    def test_preexisting_result_is_preserved_without_launch(self) -> None:
+        token = "3" * 32
+        original = b'{"schema":1,"ok":true,"result":{"owner":"previous run"}}'
+        path = self.write_result(original, name=f"{token}.json")
+        with mock.patch.object(client.uuid, "uuid4", return_value=SimpleNamespace(hex=token)), mock.patch.object(
+            client.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+        ) as launch:
+            status, payload = self.run_main(["status"])
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["error"]["code"], "client.result_collision")
+        launch.assert_not_called()
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_unallowed_command_never_launches(self) -> None:
+        with mock.patch.object(
+            client.subprocess, "run", return_value=subprocess.CompletedProcess([], 9, "", "fixture")
+        ) as launch:
+            status, payload = self.run_main(["fixture-unapproved-command"])
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["error"]["code"], "client.command_not_allowed")
+        launch.assert_not_called()
+
+
 
 if __name__ == "__main__":
     unittest.main()
