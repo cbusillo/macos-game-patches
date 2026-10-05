@@ -115,6 +115,29 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             client.read_result(directory)
 
+    def run_reader_child(self, source: str, path: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-B", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); " + source,
+             str(Path(client.__file__).resolve().parent), str(path)],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+
+    def test_fifo_result_is_refused_without_a_writer(self) -> None:
+        path = self.results / "fifo-result.json"
+        os.mkfifo(path, 0o600)
+        completed = self.run_reader_child('''
+from pathlib import Path
+import macos_ui_helper_client as client
+try:
+    client.read_result(Path(sys.argv[2]))
+except RuntimeError as error:
+    print(error)
+else:
+    raise AssertionError("FIFO was admitted")
+''', path)
+        self.assertIn("regular file", completed.stdout)
+
     def test_oversized_result_is_refused_before_read(self) -> None:
         # Distinct from the implementation limit; valid JSON if size admission breaks.
         path = self.write_result(json.dumps({"schema": 1, "ok": True, "data": "x" * (client.MAX_RESULT_BYTES * 2)}).encode())
@@ -124,28 +147,44 @@ class ClientTests(unittest.TestCase):
         read.assert_not_called()
 
     def test_growth_after_stat_is_still_bounded(self) -> None:
-        path = self.write_result(b'{"schema":1,"ok":true}' + b' ' * (client.MAX_RESULT_BYTES * 2))
-        metadata = path.stat()
-        earlier = SimpleNamespace(st_mode=metadata.st_mode, st_uid=metadata.st_uid, st_size=20)
-        chunks: list[bytes] = []
-        original_read = os.read
-
-        def read(descriptor: int, size: int) -> bytes:
-            chunk = original_read(descriptor, size)
-            chunks.append(chunk)
-            return chunk
-
-        with mock.patch.object(client.os, "fstat", return_value=earlier), mock.patch.object(
-            client.os, "read", side_effect=read
-        ):
-            with self.assertRaises(RuntimeError):
-                client.read_result(path)
-        self.assertLess(sum(len(chunk) for chunk in chunks), metadata.st_size)
+        prefix = b'{"schema":1,"ok":true}'
+        path = self.write_result(prefix)
+        padding = b' ' * client.MAX_RESULT_BYTES
+        with path.open("ab") as stream:
+            for _ in range(32):
+                stream.write(padding)
+        completed = self.run_reader_child('''
+import json
+import tracemalloc
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+import macos_ui_helper_client as client
+path = Path(sys.argv[2])
+metadata = path.stat()
+earlier = SimpleNamespace(st_mode=metadata.st_mode, st_uid=metadata.st_uid, st_size=20)
+with mock.patch.object(client.os, "fstat", return_value=earlier):
+    tracemalloc.start()
+    refused = False
+    try:
+        client.read_result(path)
+    except RuntimeError:
+        refused = True
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+print(json.dumps({"refused": refused, "peak": peak, "limit": client.MAX_RESULT_BYTES}))
+''', path)
+        evidence = json.loads(completed.stdout)
+        self.assertTrue(evidence["refused"], "grew beyond the limit but was admitted")
+        # Allow copies/buffering while ruling out materializing the whole file.
+        self.assertLess(evidence["peak"], 8 * (evidence["limit"] + 1))
 
     def test_malformed_json_and_schema_are_refused(self) -> None:
         with self.assertRaises(ValueError):
             client.read_result(self.write_result(b'{'))
-        for payload in ([], {"ok": True}, {"schema": 73, "ok": True}, {"schema": 1, "ok": 1}):
+        payloads = [[], {"ok": True}, {"schema": 1, "ok": 1}]
+        payloads.extend({"schema": value, "ok": True} for value in (73, True, False, 1.0, "1", None, [], {}))
+        for payload in payloads:
             with self.subTest(payload=payload):
                 with self.assertRaises(RuntimeError):
                     client.read_result(self.write_result(json.dumps(payload).encode()))

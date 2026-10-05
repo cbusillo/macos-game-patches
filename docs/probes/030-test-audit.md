@@ -136,9 +136,10 @@ advances on monotonic reads and mocked sleeps, with an upper guard on the
 monotonic path. A polling loop that stops sleeping still reaches its deadline.
 All result files and directory permissions are disposable fixture state.
 
-An additional fault triples `remaining = MAX_RESULT_BYTES + 1` in the read
-loop. The growth test must fail because it consumes the whole oversized file
-before rejecting it. As an intended-change control, temporarily change only
+In the landed audit slice, an additional fault tripled the read loop's bound;
+its descriptor observer detected consumption of the whole oversized file.
+The API-independent allocation fixture below supersedes that observer.
+As an intended-change control, temporarily change only
 `MAX_RESULT_BYTES` to a different finite ceiling and rerun the UI suite: all
 fixtures must pass without edits. Restore the ceiling afterward.
 
@@ -159,3 +160,35 @@ the retained profile gate still detects weakened cadence admission.
 Lane durations from each PR's CI run belong in the issue closeout. Removing
 these small duplicate checks is not a claim of measurable overall speedup;
 both native lifecycle lanes remain because their platform behavior has value.
+
+## UI result admission follow-up
+
+Issue routing: [#158](https://github.com/cbusillo/macos-game-patches/issues/158).
+Can result admission refuse a writerless FIFO promptly, reject noninteger
+schema values, and retain a bounded allocation footprint after file growth?
+Use only disposable files and fixture subprocesses; no installed helper runs.
+
+Run `uv run --no-project python tools/macos_ui_helper_client_test.py`.
+The FIFO fixture has a five-second child deadline and expects a domain refusal.
+The growth fixture reports a small stat size for a large valid JSON result and
+measures peak Python allocations in a fresh child with `tracemalloc`. Its budget
+scales with `MAX_RESULT_BYTES`, with room for bounded copies and buffering; the
+file is substantially larger than that budget. It does not observe read calls.
+
+Using the save/replace/run/restore procedure above, plant these faults:
+
+- Remove nonblocking open: `test_fifo_result_is_refused_without_a_writer`
+  must fail its child deadline; the child is terminated and reaped.
+- Remove the integer schema guard: `test_malformed_json_and_schema_are_refused`
+  must fail for boolean and float schema values that compare equal to 1.
+- Replace the bounded loop with a whole-file descriptor read or buffered
+  `read()`, retaining the final size guard:
+  `test_growth_after_stat_is_still_bounded` must fail its allocation budget.
+- Remove the final payload size guard: the growth fixture must fail because
+  oversized valid JSON was admitted.
+
+Intended controls: a bounded buffered `read(MAX_RESULT_BYTES + 1)` and a
+different finite byte ceiling both pass without test edits. Restore production
+bytes after every mutation and rerun the whole UI suite. Private result files
+are cleaned by their temporary-directory contexts. Retain raw proof logs in
+the task evidence group until the issue is resolved; discard mutation scratch.
