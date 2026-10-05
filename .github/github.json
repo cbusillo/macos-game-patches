@@ -92,7 +92,8 @@
     "ciScope": {
       "docsOnlyPullRequests": "Pull requests whose changes are limited to Markdown, docs/, LICENSE, or .github/github.json run hygiene, JSON, lint, secret scan, and the profile/artifact contract checks, and skip the Python fixture suites and the macOS lifecycle lane. Pushes to main run everything.",
       "laneBudgetSeconds": 300,
-      "laneBudget": "Each CI lane writes its elapsed time to the job summary and emits a warning when it exceeds the budget; it does not fail the lane."
+      "laneBudget": "Each CI lane writes its elapsed time to the job summary and emits a warning when it exceeds the budget; it does not fail the lane.",
+      "macosLane": "Repo Hygiene owns shared Python compilation and profile check/self-test. The macOS lane retains Swift/helper contract checks and all platform-sensitive lifecycle/profile fixtures; duplicate compile and pure profile checks are omitted there."
     },
     "macosUiHelper": {
       "contract": "python3 tools/build_macos_ui_helper.py check",
