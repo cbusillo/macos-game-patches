@@ -27,16 +27,26 @@ uv run python tools/macos_consent_matrix.py cleanup \
 - `inspect` reports the stable identity and Launch Services state.
 - `baseline` unregisters duplicate stable-app records only under explicitly
   allowed roots, preserving the retained stable app and revalidating its identity.
+  Any duplicate outside those roots refuses the whole operation.
 - `stage` registers already-built, signed lane apps. Their bundle identifiers and
   Mach-O UUIDs must be distinct from the stable app and each other, and their
   signing Team ID must match the stable app.
 - `cleanup` unregisters the specified lane apps in reverse order and verifies
   zero remaining records for each lane. It preserves the stable registration and
   does not delete app bundles; filesystem removal is a separate operator step.
+  Keep the lane bundles on disk until `cleanup --apply` succeeds with zero records.
 
-Apply uses the global lifecycle lock. Baseline, staging, and cleanup refuse while
-the bridge process or service is live and revalidate the stable identity around
-registration changes. Review the dry-run report before applying a change. Keep
+Staging and cleanup require exactly one matching stable-app registration. Resolve
+duplicates with a reviewed `baseline --apply` before staging. Repeat `--lane-app`
+to stage one to four apps. Each staging app must be arm64-only, signed, free of
+quarantine attributes, and in a private operator-owned directory with mode 0700
+and no group- or world-writable ancestors. Apps must be outside `/Applications`,
+`/System/Applications`, and `~/Applications`, and their bundle identifiers must
+have no existing Launch Services records.
+
+All four commands refuse while the bridge process or service is live. Apply uses
+the global lifecycle lock and revalidates the stable identity around registration
+changes. Review the dry-run report before applying a change. Keep
 host-specific app paths and identity evidence in the qualification record rather
 than repository workflow metadata.
 

@@ -158,12 +158,6 @@
       "waitForActions": true,
       "checkSecurityAndQuality": true
     },
-    "capabilities": {
-      "codeScanning": "available",
-      "secretScanning": "available",
-      "dependabotAlerts": "available",
-      "securityAdvisories": "available"
-    },
     "refreshWhen": [
       "repo visibility changes",
       "GitHub plan changes",

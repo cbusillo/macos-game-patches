@@ -81,8 +81,8 @@ artifact payload.
 
 ## Reproducible Commands
 
-The exact profile commands will be recorded in `.github/github.json` when the
-tool exists. Existing prerequisites are:
+The profile preflight and probe commands are recorded in the qualification
+sections below. Existing prerequisites are:
 
 ```bash
 python3 tools/vr_stack_cleanup.py
