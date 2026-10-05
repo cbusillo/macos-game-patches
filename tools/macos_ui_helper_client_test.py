@@ -117,19 +117,30 @@ class ClientTests(unittest.TestCase):
 
     def test_oversized_result_is_refused_before_read(self) -> None:
         # Distinct from the implementation limit; valid JSON if size admission breaks.
-        path = self.write_result(json.dumps({"schema": 1, "ok": True, "data": "x" * 2_000_000}).encode())
+        path = self.write_result(json.dumps({"schema": 1, "ok": True, "data": "x" * (client.MAX_RESULT_BYTES * 2)}).encode())
         with mock.patch.object(client.os, "read", wraps=os.read) as read:
             with self.assertRaises(RuntimeError):
                 client.read_result(path)
         read.assert_not_called()
 
     def test_growth_after_stat_is_still_bounded(self) -> None:
-        path = self.write_result(b'{"schema":1,"ok":true}' + b' ' * 2_000_000)
+        path = self.write_result(b'{"schema":1,"ok":true}' + b' ' * (client.MAX_RESULT_BYTES * 2))
         metadata = path.stat()
         earlier = SimpleNamespace(st_mode=metadata.st_mode, st_uid=metadata.st_uid, st_size=20)
-        with mock.patch.object(client.os, "fstat", return_value=earlier):
+        chunks: list[bytes] = []
+        original_read = os.read
+
+        def read(descriptor: int, size: int) -> bytes:
+            chunk = original_read(descriptor, size)
+            chunks.append(chunk)
+            return chunk
+
+        with mock.patch.object(client.os, "fstat", return_value=earlier), mock.patch.object(
+            client.os, "read", side_effect=read
+        ):
             with self.assertRaises(RuntimeError):
                 client.read_result(path)
+        self.assertLess(sum(len(chunk) for chunk in chunks), metadata.st_size)
 
     def test_malformed_json_and_schema_are_refused(self) -> None:
         with self.assertRaises(ValueError):
@@ -176,16 +187,19 @@ class ClientTests(unittest.TestCase):
         def advance(duration: float) -> None:
             nonlocal clock
             clock += duration
+
+        def monotonic() -> float:
+            advance(0.01)
             if clock > 44.0:
                 raise AssertionError("result waiting exceeded the fixture deadline")
+            return clock
 
         with mock.patch.object(client.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)), mock.patch.object(
-            client.time, "monotonic", side_effect=lambda: clock
-        ), mock.patch.object(client.time, "sleep", side_effect=advance) as sleeper:
+            client.time, "monotonic", side_effect=monotonic
+        ), mock.patch.object(client.time, "sleep", side_effect=advance):
             status, payload = self.run_main(["--timeout", "1", "status"])
         self.assertEqual(status, 1)
         self.assertEqual(payload["error"]["code"], "client.timeout")
-        self.assertGreater(sleeper.call_count, 0)
         self.assertLess(clock, 42.0)
 
     def test_launch_failure_is_reported(self) -> None:

@@ -108,7 +108,7 @@ to `macos_ui_helper_client_test.ClientTests`:
   `test_nonregular_result_is_refused` must fail on incorrect error admission.
 - Replace the stat size check with `False`:
   `test_oversized_result_is_refused_before_read` must fail because a read occurs.
-- Disable `if len(payload) > 1_048_576`:
+- Disable `if len(payload) > MAX_RESULT_BYTES`:
   `test_growth_after_stat_is_still_bounded` must fail on oversized valid JSON.
 - Disable the parsed schema/status guard:
   `test_malformed_json_and_schema_are_refused` must fail.
@@ -130,6 +130,14 @@ to `macos_ui_helper_client_test.ClientTests`:
   `runtime_profile_test.RuntimeProfileTests`'s
   `test_curated_filename_must_match_declared_profile_id` must fail.
 
-Oversized inputs use two million bytes, distinct from the transport's limit.
-The fake clock has its own upper guard so a broken wait cannot hang the suite.
+Oversized inputs derive from the published `MAX_RESULT_BYTES` ceiling. An
+intended ceiling change therefore needs no fixture edits. The fake clock
+advances on monotonic reads and mocked sleeps, with an upper guard on the
+monotonic path. A polling loop that stops sleeping still reaches its deadline.
 All result files and directory permissions are disposable fixture state.
+
+An additional fault triples `remaining = MAX_RESULT_BYTES + 1` in the read
+loop. The growth test must fail because it consumes the whole oversized file
+before rejecting it. As an intended-change control, temporarily change only
+`MAX_RESULT_BYTES` to a different finite ceiling and rerun the UI suite: all
+fixtures must pass without edits. Restore the ceiling afterward.
