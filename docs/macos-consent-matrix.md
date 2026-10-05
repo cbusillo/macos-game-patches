@@ -16,8 +16,9 @@ Services registration changes.
 ```sh
 uv run --no-project --python 3.12 python tools/macos_consent_matrix.py inspect \
   --stable-app <absolute-stable-app>
-uv run --no-project --python 3.12 python tools/macos_consent_matrix.py baseline \
-  --stable-app <absolute-stable-app> --allowed-root <absolute-duplicate-root>
+uv run --no-project --python 3.12 python tools/macos_consent_matrix.py \
+  baseline --stable-app <absolute-stable-app> \
+  --allowed-root <absolute-duplicate-root>
 uv run --no-project --python 3.12 python tools/macos_consent_matrix.py stage \
   --stable-app <absolute-stable-app> --lane-app <absolute-lane-app>
 uv run --no-project --python 3.12 python tools/macos_consent_matrix.py cleanup \
