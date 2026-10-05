@@ -14,7 +14,7 @@ the proven frame, pose, transport, controller, or native handoff protocols?
   its missing production `iosurface` host entrypoint. The current eye/input
   compatibility correction is packaged as `1.0.0-dev5`.
 - Host matrix: Mac16,9, macOS 27.0, CrossOver 26.2, and the pinned ALVR and
-  ALVR visionOS checkouts in `.github/github.json`.
+  ALVR visionOS checkouts in `runtime/manifest.json` under `gitSources`.
 - Supported title path: official OpenVR plus D3D11 only.
 - Required title behavior: hub launch, one hub-to-experience transition, two
   meaningful interactive experiences, bounded declared stereo geometry, and
@@ -81,8 +81,8 @@ artifact payload.
 
 ## Reproducible Commands
 
-The exact profile commands will be recorded in `.github/github.json` when the
-tool exists. Existing prerequisites are:
+The profile preflight and probe commands are recorded in the qualification
+sections below. Existing prerequisites are:
 
 ```bash
 python3 tools/vr_stack_cleanup.py
