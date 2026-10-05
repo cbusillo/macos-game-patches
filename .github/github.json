@@ -53,6 +53,7 @@
     "fixedResolutionProfileQualification": "docs/probes/026-fixed-resolution-profile-qualification.md",
     "theLabMultiTargetOwnership": "docs/probes/027-the-lab-multi-target-ownership.md",
     "macosRuntimeReadiness": "docs/probes/028-macos-runtime-readiness.md",
+    "macosConsentMatrix": "docs/macos-consent-matrix.md",
     "macosLabUiHelper": "docs/probes/029-macos-lab-ui-helper.md",
     "crossoverDxvkPatches": "patches/crossover-dxvk/README.md",
     "crossoverMoltenVkPatches": "patches/crossover-moltenvk/README.md",
