@@ -73,7 +73,8 @@
     "macosLabUiHelper": "docs/probes/029-macos-lab-ui-helper.md",
     "crossoverDxvkPatches": "patches/crossover-dxvk/README.md",
     "crossoverMoltenVkPatches": "patches/crossover-moltenvk/README.md",
-    "alvrVisionOsPatches": "patches/alvr-visionos/README.md"
+    "alvrVisionOsPatches": "patches/alvr-visionos/README.md",
+    "testAudit": "docs/probes/030-test-audit.md"
   },
   "qualityGate": {
     "json": {
