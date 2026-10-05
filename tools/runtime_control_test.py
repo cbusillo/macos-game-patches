@@ -39,6 +39,7 @@ from runtime_control import (
     request_supervisor_ping,
     request_supervisor_stop,
     resolve_context_paths,
+    resolve_runtime_paths,
     status_runtime,
     stop_runtime,
     verify_artifact_reference,
@@ -540,14 +541,43 @@ class LifecycleTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_preserved_bundle_owner_content_is_derived_from_contract(self) -> None:
-        self.assertEqual(
-            self.paths.bridge_owner_content,
-            {
-                "artifactId": "mac-alvr-runtime",
-                "bundleId": "com.alvr.macos-bridge.iosurface",
-                "ownershipSchemaVersion": 1,
-            },
+        manifest, bindings, _ = resolve_context_paths(self.context)
+        owner = next(
+            item for item in manifest["generatedFiles"] if item["id"] == "native_bundle_owner"
         )
+        self.assertEqual(self.paths.bridge_owner_content, owner["content"])
+
+        fixture_manifest = copy.deepcopy(manifest)
+        fixture_owner = next(
+            item for item in fixture_manifest["generatedFiles"] if item["id"] == "native_bundle_owner"
+        )
+        fixture_owner["content"] = {
+            "artifactId": "fixture-runtime-owner",
+            "bundleId": "example.fixture.owner",
+            "ownershipSchemaVersion": owner["content"]["ownershipSchemaVersion"],
+        }
+        paths = resolve_runtime_paths(fixture_manifest, bindings)
+        self.assertEqual(paths.bridge_owner_content, fixture_owner["content"])
+
+        fixture_manifest["generatedFiles"] = [
+            item for item in fixture_manifest["generatedFiles"] if item["id"] != "native_bundle_owner"
+        ]
+        fixture_manifest["sealing"]["mode"] = "preserved-bundle"
+        fixture_manifest["artifact"]["id"] = "fixture-preserved-artifact"
+        fixture_manifest["sealing"]["bundleId"] = "example.fixture.preserved"
+        preserved_paths = resolve_runtime_paths(fixture_manifest, bindings)
+        preserved_fixture = artifact_contract.create_preserved_bundle_fixture(self.root / "owner-fixture.app")
+        try:
+            expected_preserved_owner = artifact_contract.load_json(
+                preserved_fixture / artifact_contract.STABLE_BUNDLE_MARKER
+            )
+        finally:
+            artifact_contract.make_tree_writable(preserved_fixture)
+        expected_preserved_owner.update(
+            artifactId=fixture_manifest["artifact"]["id"],
+            bundleId=fixture_manifest["sealing"]["bundleId"],
+        )
+        self.assertEqual(preserved_paths.bridge_owner_content, expected_preserved_owner)
 
     def create_bridge(self) -> None:
         self.paths.bridge_program.parent.mkdir(parents=True, exist_ok=True)
