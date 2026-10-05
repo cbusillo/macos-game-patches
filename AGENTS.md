@@ -1,5 +1,13 @@
 # AI Agent Guidelines
 
+Read [the Director's overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md)
+before this file. This repository has no `DIRECTION.md` of its own; priorities
+and stop boundaries come from that overall direction. Use the installed shared
+skills for issue claims, review, validation, landing, and closeout.
+
+`AGENTS.md` is the only agent-instruction filename in this repository. Read
+nested `AGENTS.md` files when working in their directories.
+
 Use `.github/github.json` for non-secret repo workflow facts, validation
 expectations, docs routing, and cleanup policy.
 

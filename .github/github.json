@@ -25,6 +25,7 @@
   "docs": {
     "overview": "README.md",
     "agentGuidelines": "AGENTS.md",
+    "overallDirection": "https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md",
     "repoMetadata": ".github/github.json",
     "ciWorkflow": ".github/workflows/ci.yml",
     "codeqlWorkflow": ".github/workflows/codeql.yml",
