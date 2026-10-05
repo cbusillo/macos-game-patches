@@ -15,6 +15,11 @@ and second-title decision are recorded in
 issue #56 and its native sub-issues. Real SteamVR compositor operation is not
 part of the current accepted architecture.
 
+Work follows [the Director's overall direction](https://github.com/cbusillo/direction/blob/HEAD/DIRECTION.md).
+This repository has no separate `DIRECTION.md`. See [AGENTS.md](AGENTS.md) for
+repository execution guidance and [.github/github.json](.github/github.json)
+for validation commands and workflow facts.
+
 ## Working Style
 
 - Define the target game, runtime, headset, macOS version, hardware, and success
@@ -69,8 +74,10 @@ publishes a new final content address with signed source and tree provenance.
 Issue #61 converts that read-only plan into fail-closed filesystem transactions.
 The coordinator verifies planner-owned paths, serializes both
 directions through one lifecycle lock, archives terminal journals, checks free
-space and open targets, and recovers interrupted work before a retry. Its full
-install/uninstall cycle remains hardware-free and fenced below temporary roots:
+space and open targets, and recovers interrupted work before a retry. The
+install/uninstall fixture suites run below temporary roots; physical lifecycle
+qualification is recorded below and in
+[probe 019](docs/probes/019-runtime-stable-bundle-lifecycle.md):
 
 ```bash
 python3 tools/runtime_descriptor_test.py
