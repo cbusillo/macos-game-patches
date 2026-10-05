@@ -1,7 +1,7 @@
 # macOS Consent Matrix Helper
 
 `tools/macos_consent_matrix.py` inspects Launch Services registrations and stages
-signed apps for the consent qualification tracked in issues #62 and #141. See
+signed apps for the consent qualification tracked in issue #62. See
 [runtime readiness](probes/028-macos-runtime-readiness.md) for the physical
 qualification plan. The helper does not launch apps, read or change TCC or System
 Settings, install runtime artifacts, build ALVR, or rewrite Mach-O UUIDs.
