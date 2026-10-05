@@ -52,6 +52,18 @@ implementation has no Git diff after restoration.
   `runtime_profile_test.RuntimeProfileTests`'s
   `test_owned_targets_resolve_from_runtime_targets` must fail on IDs/order.
 
+- Fallback marker: replace `"artifactId": artifact["id"]` with
+  `"artifactId": sealing["bundleId"]` in `native_bundle_owner_content`.
+  The owner-content test must fail on the preserved-bundle fixture.
+- Truncated selection: iterate `owned_target_ids[:2]` in `owned_processes`.
+  The full permutation subtest must fail while the subset remains valid.
+- Entrypoint ordering: return `targets` without sorting in `ordered_targets`.
+  `test_entrypoint_is_ordered_before_other_targets` must fail because the
+  declared last target must become the first resolved target.
+- Install root: return `install_root.parent / "Freedom Locomotion VR"` from
+  `resolve_installed_profile`. The installed-profile test must fail on its
+  declared fixture root.
+
 The alternate owner marker, alternate launcher/producer paths and reordered
 owned-target subset are successful intended-change controls in the same tests.
 Hashes and byte equality on disposable artifacts remain restoration evidence.

@@ -202,10 +202,8 @@ class RuntimeProfileTests(unittest.TestCase):
                 critical["path"] = target["executable"]
         runtime_profile.validate_profile(self.profile)
         steam_bottle = self.root / "Steam"
-        install_root = (
-            steam_bottle
-            / "drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR"
-        )
+        self.profile["launch"]["installRoot"] = "${STEAM_BOTTLE}/fixture-game"
+        install_root = steam_bottle / "fixture-game"
         write_pe_x86_64(install_root / target["executable"])
         write_pe_x86_64(install_root / owned_process["executable"])
         write_pe_x86_64(install_root / target["openvrDirectory"] / "openvr_api.dll")
@@ -228,6 +226,8 @@ class RuntimeProfileTests(unittest.TestCase):
             f'"InstalledDepots" {{ "{depot["id"]}" {{ '
             f'"manifest" "{depot["manifest"]}" "size" "{depot["sizeBytes"]}" }} }} }}'
         )
+        self.profile_path.write_bytes(runtime_profile.canonical_json_bytes(self.profile))
+        self.profile_sha256 = runtime_profile.sha256_file(self.profile_path)
         loaded = runtime_profile.LoadedProfile(
             path=self.profile_path,
             data=self.profile,
@@ -292,20 +292,33 @@ class RuntimeProfileTests(unittest.TestCase):
             targets=targets,
             owned_process=None,
         )
-        self.assertEqual(
-            [owned.target_id for owned in installed.owned_processes],
-            profile["launch"]["ownedTargets"],
-        )
         targets_by_id = {target.id: target for target in targets}
-        selected_targets = [targets_by_id[target_id] for target_id in profile["launch"]["ownedTargets"]]
-        self.assertEqual(
-            [owned.executable for owned in installed.owned_processes],
-            [target.executable for target in selected_targets],
-        )
-        self.assertEqual(
-            [owned.process_pattern for owned in installed.owned_processes],
-            [target.process_pattern for target in selected_targets],
-        )
+        for selected_ids in (list(reversed(target_ids)), [target_ids[-1], target_ids[0]]):
+            with self.subTest(selected_ids=selected_ids):
+                profile["launch"]["ownedTargets"] = selected_ids
+                runtime_profile.validate_profile(profile)
+                self.assertEqual(
+                    [owned.target_id for owned in installed.owned_processes],
+                    profile["launch"]["ownedTargets"],
+                )
+                selected_targets = [targets_by_id[target_id] for target_id in profile["launch"]["ownedTargets"]]
+                self.assertEqual(
+                    [owned.executable for owned in installed.owned_processes],
+                    [target.executable for target in selected_targets],
+                )
+                self.assertEqual(
+                    [owned.process_pattern for owned in installed.owned_processes],
+                    [target.process_pattern for target in selected_targets],
+                )
+
+    def test_entrypoint_is_ordered_before_other_targets(self) -> None:
+        profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
+        declared_targets = profile["runtime"]["targets"]
+        profile["launch"]["entrypointTarget"] = declared_targets[-1]["id"]
+        runtime_profile.validate_profile(profile)
+        ordered = runtime_profile.ordered_targets(profile)
+        self.assertEqual(ordered[0], declared_targets[-1])
+        self.assertEqual(ordered[1:], declared_targets[:-1])
 
     def test_owned_targets_reject_unknown_runtime_target(self) -> None:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
