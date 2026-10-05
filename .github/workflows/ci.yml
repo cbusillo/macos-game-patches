@@ -204,36 +204,11 @@ jobs:
           python3 tools/macos_ui_helper_client_test.py
           python3 tools/build_macos_ui_helper.py check
 
-      - name: Compile lifecycle tools
-        run: |
-          python3 -m py_compile \
-            tools/build_macos_ui_helper.py \
-            tools/macos_ui_helper_client.py \
-            tools/macos_ui_helper_client_test.py \
-            tools/build_runtime_artifact.py \
-            tools/runtime_profile.py \
-            tools/runtime_profile_test.py \
-            tools/runtime_control.py \
-            tools/macos_consent_matrix.py \
-            tools/macos_consent_matrix_test.py \
-            tools/runtime_cli.py \
-            tools/runtime_start.py \
-            tools/runtime_descriptor.py \
-            tools/runtime_transaction.py \
-            tools/runtime_install.py \
-            tools/runtime_control_test.py \
-            tools/runtime_start_test.py \
-            tools/runtime_descriptor_test.py \
-            tools/runtime_transaction_test.py \
-            tools/runtime_install_test.py
-
       - name: Prepare fixture root
         run: mkdir -p "$RUNTIME_FIXTURE_ROOT"
 
       - name: Validate lifecycle fixtures
         run: |
-          python3 tools/runtime_profile.py check
-          python3 tools/runtime_profile.py self-test
           python3 tools/runtime_profile_test.py
           python3 tools/runtime_control_test.py
           python3 tools/macos_consent_matrix_test.py

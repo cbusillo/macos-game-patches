@@ -141,3 +141,21 @@ loop. The growth test must fail because it consumes the whole oversized file
 before rejecting it. As an intended-change control, temporarily change only
 `MAX_RESULT_BYTES` to a different finite ceiling and rerun the UI suite: all
 fixtures must pass without edits. Restore the ceiling afterward.
+
+## Retained CI lane proof
+
+Repo Hygiene retains Python compilation and the profile check/self-test. The
+macOS lane retains Swift/private-output tests, the helper contract check and all
+lifecycle/profile fixture suites; only duplicate compilation and pure profile
+checks are removed there. Use actionlint for workflow validity, never tests of
+workflow text.
+
+Run the retained `uv run --no-project python tools/runtime_profile.py self-test`
+first. Temporarily replace `minimum_fps < GLOBAL_MINIMUM_FPS` with `False` in
+`validate_validation`, run the same command, and expect `self-test.failed` for
+`weak-cadence`. Restore the implementation and rerun successfully. This proves
+the retained profile gate still detects weakened cadence admission.
+
+Lane durations from each PR's CI run belong in the issue closeout. Removing
+these small duplicate checks is not a claim of measurable overall speedup;
+both native lifecycle lanes remain because their platform behavior has value.
