@@ -556,6 +556,8 @@ class LifecycleTests(unittest.TestCase):
             "bundleId": "example.fixture.owner",
             "ownershipSchemaVersion": owner["content"]["ownershipSchemaVersion"],
         }
+        fixture_manifest["artifact"]["id"] = fixture_owner["content"]["artifactId"]
+        fixture_manifest["sealing"]["bundleId"] = fixture_owner["content"]["bundleId"]
         paths = resolve_runtime_paths(fixture_manifest, bindings)
         self.assertEqual(paths.bridge_owner_content, fixture_owner["content"])
 
