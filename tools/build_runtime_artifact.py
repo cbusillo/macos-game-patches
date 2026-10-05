@@ -938,6 +938,11 @@ def validate_stable_bundle_contract(
                 "manifest.invalid",
                 "Stable-bundle ownership marker must bind the sealed bundle identifier",
             )
+        if owner_content.get("artifactId") != manifest["artifact"]["id"]:
+            raise ArtifactError(
+                "manifest.invalid",
+                "Stable-bundle ownership marker must bind the artifact identifier",
+            )
     stable_state = [
         item for item in manifest["mutableState"] if item["location"] == STABLE_BUNDLE_TARGET
     ]
@@ -4247,6 +4252,29 @@ def self_test() -> dict[str, Any]:
     completed: list[str] = []
     stable_manifest = load_json(DEFAULT_MANIFEST)
     validate_manifest_structure(json.loads(json.dumps(stable_manifest)))
+    alternate_identity = copy.deepcopy(stable_manifest)
+    alternate_identity["artifact"]["id"] = "fixture-alternate-runtime"
+    marker_path = pathlib.PurePosixPath(alternate_identity["sealing"]["bundlePath"]) / (
+        STABLE_BUNDLE_MARKER
+    )
+    owner_content = next(
+        item["content"]
+        for item in alternate_identity["generatedFiles"]
+        if pathlib.PurePosixPath(item["artifactPath"]) == marker_path
+    )
+    owner_content["artifactId"] = alternate_identity["artifact"]["id"]
+    validate_manifest_structure(copy.deepcopy(alternate_identity))
+    owner_content["artifactId"] = "fixture-marker-mismatch"
+    expect_error(
+        "manifest.invalid",
+        lambda: validate_manifest_structure(copy.deepcopy(alternate_identity)),
+    )
+    del owner_content["artifactId"]
+    expect_error(
+        "manifest.invalid",
+        lambda: validate_manifest_structure(copy.deepcopy(alternate_identity)),
+    )
+    completed.append("generated-owner-artifact-id-agreement")
     alternate_target = json.loads(json.dumps(stable_manifest))
     for plan_name in ("installPlan", "uninstallPlan"):
         for operation in alternate_target[plan_name]:
