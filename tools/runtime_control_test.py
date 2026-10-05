@@ -566,12 +566,12 @@ class LifecycleTests(unittest.TestCase):
         fixture_manifest["artifact"]["id"] = "fixture-preserved-artifact"
         fixture_manifest["sealing"]["bundleId"] = "example.fixture.preserved"
         preserved_paths = resolve_runtime_paths(fixture_manifest, bindings)
-        self.assertEqual(
-            preserved_paths.bridge_owner_content["artifactId"], fixture_manifest["artifact"]["id"]
+        expected_preserved_owner = dict(owner["content"])
+        expected_preserved_owner.update(
+            artifactId=fixture_manifest["artifact"]["id"],
+            bundleId=fixture_manifest["sealing"]["bundleId"],
         )
-        self.assertEqual(
-            preserved_paths.bridge_owner_content["bundleId"], fixture_manifest["sealing"]["bundleId"]
-        )
+        self.assertEqual(preserved_paths.bridge_owner_content, expected_preserved_owner)
 
     def create_bridge(self) -> None:
         self.paths.bridge_program.parent.mkdir(parents=True, exist_ok=True)

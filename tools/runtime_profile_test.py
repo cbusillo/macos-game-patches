@@ -260,8 +260,29 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile.validate_profile(profile)
         self.assertEqual(raised.exception.code, "profile.invalid")
 
-    def test_owned_targets_resolve_from_runtime_targets(self) -> None:
+    def multi_target_profile(self) -> dict:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
+        template = profile["runtime"]["targets"][0]
+        profile["runtime"]["targets"] = [
+            {
+                **template,
+                "id": f"fixture-{index}",
+                "role": "hub" if index == 0 else "experience",
+                "executable": f"Fixture{index}/app.exe",
+                "workingDirectory": f"Fixture{index}",
+                "openvrDirectory": f"Fixture{index}",
+                "graphicsDirectory": f"Fixture{index}",
+                "processPattern": f"[F]ixture{index}",
+            }
+            for index in range(3)
+        ]
+        profile["launch"]["entrypointTarget"] = profile["runtime"]["targets"][0]["id"]
+        profile["launch"]["ownedTargets"] = [target["id"] for target in profile["runtime"]["targets"]]
+        profile["launch"]["ownedProcess"] = None
+        return profile
+
+    def test_owned_targets_resolve_from_runtime_targets(self) -> None:
+        profile = self.multi_target_profile()
         # A reordered subset proves selection and order, not only enumeration.
         target_ids = [target["id"] for target in profile["runtime"]["targets"]]
         profile["launch"]["ownedTargets"] = [target_ids[-1], target_ids[0]]
@@ -312,13 +333,28 @@ class RuntimeProfileTests(unittest.TestCase):
                 )
 
     def test_entrypoint_is_ordered_before_other_targets(self) -> None:
-        profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
+        profile = self.multi_target_profile()
         declared_targets = profile["runtime"]["targets"]
         profile["launch"]["entrypointTarget"] = declared_targets[-1]["id"]
         runtime_profile.validate_profile(profile)
         ordered = runtime_profile.ordered_targets(profile)
         self.assertEqual(ordered[0], declared_targets[-1])
         self.assertEqual(ordered[1:], declared_targets[:-1])
+
+        install_root = self.root / "fixture-installed"
+        for target in declared_targets:
+            write_pe_x86_64(install_root / target["executable"])
+            write_pe_x86_64(install_root / target["openvrDirectory"] / "openvr_api.dll")
+        loaded = runtime_profile.LoadedProfile(self.root / "fixture.json", profile, "f" * 64)
+        with mock.patch.object(
+            runtime_profile,
+            "verify_steam_identity",
+            return_value=(install_root, self.root / "appmanifest.acf", "e" * 64),
+        ):
+            installed = runtime_profile.resolve_installed_profile(loaded, {})
+        self.assertEqual(installed.entrypoint.id, profile["launch"]["entrypointTarget"])
+        self.assertEqual(installed.entrypoint.executable, install_root / declared_targets[-1]["executable"])
+
 
     def test_owned_targets_reject_unknown_runtime_target(self) -> None:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
