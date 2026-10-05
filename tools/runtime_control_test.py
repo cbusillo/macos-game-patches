@@ -39,6 +39,7 @@ from runtime_control import (
     request_supervisor_ping,
     request_supervisor_stop,
     resolve_context_paths,
+    resolve_runtime_paths,
     status_runtime,
     stop_runtime,
     verify_artifact_reference,
@@ -540,14 +541,23 @@ class LifecycleTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_preserved_bundle_owner_content_is_derived_from_contract(self) -> None:
-        self.assertEqual(
-            self.paths.bridge_owner_content,
-            {
-                "artifactId": "mac-alvr-runtime",
-                "bundleId": "com.alvr.macos-bridge.iosurface",
-                "ownershipSchemaVersion": 1,
-            },
+        manifest, bindings, _ = resolve_context_paths(self.context)
+        owner = next(
+            item for item in manifest["generatedFiles"] if item["id"] == "native_bundle_owner"
         )
+        self.assertEqual(self.paths.bridge_owner_content, owner["content"])
+
+        fixture_manifest = copy.deepcopy(manifest)
+        fixture_owner = next(
+            item for item in fixture_manifest["generatedFiles"] if item["id"] == "native_bundle_owner"
+        )
+        fixture_owner["content"] = {
+            "artifactId": "fixture-runtime-owner",
+            "bundleId": "example.fixture.owner",
+            "ownershipSchemaVersion": owner["content"]["ownershipSchemaVersion"],
+        }
+        paths = resolve_runtime_paths(fixture_manifest, bindings)
+        self.assertEqual(paths.bridge_owner_content, fixture_owner["content"])
 
     def create_bridge(self) -> None:
         self.paths.bridge_program.parent.mkdir(parents=True, exist_ok=True)
