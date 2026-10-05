@@ -41,7 +41,8 @@ def fail(code: str, detail: str) -> int:
 
 
 def read_result(path: Path) -> dict[str, object]:
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    # Inspect special files without waiting for a FIFO writer to appear.
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
@@ -62,7 +63,12 @@ def read_result(path: Path) -> dict[str, object]:
     if len(payload) > MAX_RESULT_BYTES:
         raise RuntimeError("result exceeds the transport limit")
     parsed = json.loads(payload)
-    if not isinstance(parsed, dict) or parsed.get("schema") != 1 or not isinstance(parsed.get("ok"), bool):
+    if (
+        not isinstance(parsed, dict)
+        or type(parsed.get("schema")) is not int
+        or parsed.get("schema") != 1
+        or not isinstance(parsed.get("ok"), bool)
+    ):
         raise RuntimeError("result does not match schema v1")
     return parsed
 
