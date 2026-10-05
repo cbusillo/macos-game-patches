@@ -72,7 +72,8 @@ implementation has no Git diff after restoration.
   must fail after resolving three disposable executable/OpenVR pairs.
 
 The alternate owner marker, alternate launcher/producer paths and reordered
-owned-target subset and full permutation are successful intended-change controls in the same tests.
+owned-target subset and full permutation are successful intended-change controls
+in the same tests.
 Hashes and byte equality on disposable artifacts remain restoration evidence.
 
 ## Artifacts and cleanup
