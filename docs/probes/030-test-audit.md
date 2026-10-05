@@ -66,7 +66,7 @@ implementation has no Git diff after restoration.
 
 - Fallback schema: change the fallback's `ownershipSchemaVersion` to a foreign
   version. The owner-content test must fail because it compares the whole marker
-  to the canonical generated marker with fixture artifact/bundle identities.
+  to the preserved artifact fixture with distinct artifact/bundle identities.
 - Resolved entrypoint: iterate `profile["runtime"]["targets"]` instead of
   `ordered_targets(profile)` in `resolve_profile_targets`. The entrypoint test
   must fail after resolving three disposable executable/OpenVR pairs.

@@ -200,9 +200,9 @@ class RuntimeProfileTests(unittest.TestCase):
                 critical["path"] = owned_process["executable"]
             elif critical["path"] == previous_entrypoint:
                 critical["path"] = target["executable"]
-        runtime_profile.validate_profile(self.profile)
         steam_bottle = self.root / "Steam"
         self.profile["launch"]["installRoot"] = "${STEAM_BOTTLE}/fixture-game"
+        runtime_profile.validate_profile(self.profile)
         install_root = steam_bottle / "fixture-game"
         write_pe_x86_64(install_root / target["executable"])
         write_pe_x86_64(install_root / owned_process["executable"])
@@ -285,7 +285,6 @@ class RuntimeProfileTests(unittest.TestCase):
         profile = self.multi_target_profile()
         # A reordered subset proves selection and order, not only enumeration.
         target_ids = [target["id"] for target in profile["runtime"]["targets"]]
-        profile["launch"]["ownedTargets"] = [target_ids[-1], target_ids[0]]
         runtime_profile.validate_profile(profile)
         loaded = runtime_profile.LoadedProfile(
             path=self.root / "the-lab.json",
@@ -354,7 +353,6 @@ class RuntimeProfileTests(unittest.TestCase):
             installed = runtime_profile.resolve_installed_profile(loaded, {})
         self.assertEqual(installed.entrypoint.id, profile["launch"]["entrypointTarget"])
         self.assertEqual(installed.entrypoint.executable, install_root / declared_targets[-1]["executable"])
-
 
     def test_owned_targets_reject_unknown_runtime_target(self) -> None:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)

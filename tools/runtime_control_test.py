@@ -566,7 +566,13 @@ class LifecycleTests(unittest.TestCase):
         fixture_manifest["artifact"]["id"] = "fixture-preserved-artifact"
         fixture_manifest["sealing"]["bundleId"] = "example.fixture.preserved"
         preserved_paths = resolve_runtime_paths(fixture_manifest, bindings)
-        expected_preserved_owner = dict(owner["content"])
+        preserved_fixture = artifact_contract.create_preserved_bundle_fixture(self.root / "owner-fixture.app")
+        try:
+            expected_preserved_owner = artifact_contract.load_json(
+                preserved_fixture / artifact_contract.STABLE_BUNDLE_MARKER
+            )
+        finally:
+            artifact_contract.make_tree_writable(preserved_fixture)
         expected_preserved_owner.update(
             artifactId=fixture_manifest["artifact"]["id"],
             bundleId=fixture_manifest["sealing"]["bundleId"],
