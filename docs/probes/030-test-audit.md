@@ -191,7 +191,9 @@ Using the save/replace/run/restore procedure above, plant these faults:
   oversized valid JSON was admitted.
 
 Intended controls: a bounded buffered `read(MAX_RESULT_BYTES + 1)` and a
-different finite byte ceiling both pass without test edits. Restore production
+different finite byte ceiling both pass without test edits. A bounded read based
+on the earlier stat size may refuse through JSON parsing instead of the size
+guard; fixtures accept the same refusal classes as the client. Restore production
 bytes after every mutation and rerun the whole UI suite. Private result files
 are cleaned by their temporary-directory contexts. Retain raw proof logs in
 the task evidence group until the issue is resolved; discard mutation scratch.
