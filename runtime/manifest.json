@@ -853,7 +853,7 @@
     {
       "id": "artifact_builder",
       "path": "${REPO_ROOT}/tools/build_runtime_artifact.py",
-      "sha256": "7354715a6e856e232eec26a4634d958e050b18b9f3162a70adbc44a8f0adc07f",
+      "sha256": "642710e5e8c93879c6fae6c9a27ab4aae0151c07ff1859f306e2d5de5aadc2ee",
       "supplyClass": "repo-source"
     },
     {
