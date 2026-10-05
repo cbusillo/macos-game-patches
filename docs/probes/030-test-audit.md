@@ -84,3 +84,52 @@ Each PR records its exact commands and observed failures. Remove temporary
 fixture directories after tests; preserve proof logs for the issue's audit.
 No runtime installation, signing identity change, device run or production
 operation is part of this audit.
+
+## UI transport and curated identity slice
+
+```sh
+uv run --no-project python tools/macos_ui_helper_client_test.py
+uv run --no-project python tools/runtime_profile_test.py
+```
+
+The UI tests use private temporary result files, mocked Launch Services calls
+and a fake clock. They never launch the installed helper or request permissions.
+The curated-ID fixture updates both admission hashes, so only the declared ID
+mismatch can explain its rejection.
+
+Use the same save/replace/run/restore procedure above. UI test names below belong
+to `macos_ui_helper_client_test.ClientTests`:
+
+- Replace the mode check with `False`:
+  `test_result_permissions_must_be_private_and_readable` must fail.
+- Replace the UID check with `False`:
+  `test_foreign_owned_result_is_refused` must fail.
+- Replace the regular-file check with `False`:
+  `test_nonregular_result_is_refused` must fail on incorrect error admission.
+- Replace the stat size check with `False`:
+  `test_oversized_result_is_refused_before_read` must fail because a read occurs.
+- Disable `if len(payload) > 1_048_576`:
+  `test_growth_after_stat_is_still_bounded` must fail on oversized valid JSON.
+- Disable the parsed schema/status guard:
+  `test_malformed_json_and_schema_are_refused` must fail.
+- Replace JSON parsing with a constant successful result:
+  `test_malformed_json_and_schema_are_refused` must fail on malformed JSON.
+- Return success regardless of helper status:
+  `test_helper_failure_is_preserved_and_result_removed` must fail on exit code.
+- Replace result unlink with `pass`:
+  `test_invalid_result_is_reported_and_removed` must fail on leftover evidence.
+- Multiply the result wait deadline by three:
+  `test_result_wait_expires_without_real_sleep` must fail on its fake clock.
+- Disable failed-launch refusal:
+  `test_launch_failure_is_reported` must fail before any real sleep.
+- Disable preexisting-token refusal:
+  `test_preexisting_result_is_preserved_without_launch` must fail.
+- Disable the allowed-command guard:
+  `test_unallowed_command_never_launches` must fail.
+- Remove only the declared-ID comparison from `load_curated_profile`:
+  `runtime_profile_test.RuntimeProfileTests`'s
+  `test_curated_filename_must_match_declared_profile_id` must fail.
+
+Oversized inputs use two million bytes, distinct from the transport's limit.
+The fake clock has its own upper guard so a broken wait cannot hang the suite.
+All result files and directory permissions are disposable fixture state.
