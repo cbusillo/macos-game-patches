@@ -80,7 +80,7 @@ class RuntimeProfileTests(unittest.TestCase):
 
     def test_curated_profile_matches_manifest_and_artifact(self) -> None:
         loaded = self.load_curated()
-        self.assertEqual(loaded.data["id"], "freedom-locomotion")
+        self.assertEqual(loaded.data["id"], self.profile["id"])
         self.assertEqual(loaded.sha256, self.profile_sha256)
 
     def test_unknown_profile_is_rejected(self) -> None:
@@ -187,15 +187,24 @@ class RuntimeProfileTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "profile.artifact_mismatch")
 
     def test_installed_profile_resolves_exact_steam_identity_and_targets(self) -> None:
-        steam_bottle = self.root / "Steam"
-        install_root = (
-            steam_bottle
-            / "drive_c/Program Files (x86)/Steam/steamapps/common/Freedom Locomotion VR"
-        )
+        # Distinct declarations catch resolvers that hardcode a curated game's paths.
         target = self.profile["runtime"]["targets"][0]
-        write_pe_x86_64(install_root / target["executable"])
+        previous_entrypoint = target["executable"]
+        target["executable"] = "FixtureLauncher.exe"
         owned_process = self.profile["launch"]["ownedProcess"]
         assert owned_process is not None
+        previous_owned = owned_process["executable"]
+        owned_process["executable"] = "Fixture/Binaries/FixtureProducer.exe"
+        for critical in self.profile["source"]["payload"]["criticalFiles"]:
+            if critical["path"] == previous_owned:
+                critical["path"] = owned_process["executable"]
+            elif critical["path"] == previous_entrypoint:
+                critical["path"] = target["executable"]
+        steam_bottle = self.root / "Steam"
+        self.profile["launch"]["installRoot"] = "${STEAM_BOTTLE}/fixture-game"
+        runtime_profile.validate_profile(self.profile)
+        install_root = steam_bottle / "fixture-game"
+        write_pe_x86_64(install_root / target["executable"])
         write_pe_x86_64(install_root / owned_process["executable"])
         write_pe_x86_64(install_root / target["openvrDirectory"] / "openvr_api.dll")
         (install_root / target["workingDirectory"]).mkdir(parents=True, exist_ok=True)
@@ -217,6 +226,8 @@ class RuntimeProfileTests(unittest.TestCase):
             f'"InstalledDepots" {{ "{depot["id"]}" {{ '
             f'"manifest" "{depot["manifest"]}" "size" "{depot["sizeBytes"]}" }} }} }}'
         )
+        self.profile_path.write_bytes(runtime_profile.canonical_json_bytes(self.profile))
+        self.profile_sha256 = runtime_profile.sha256_file(self.profile_path)
         loaded = runtime_profile.LoadedProfile(
             path=self.profile_path,
             data=self.profile,
@@ -231,14 +242,13 @@ class RuntimeProfileTests(unittest.TestCase):
             },
         )
         self.assertEqual(installed.install_root, install_root)
-        self.assertEqual(installed.entrypoint.id, "game")
-        self.assertEqual(installed.entrypoint.executable, install_root / "FreedomLocomotion.exe")
+        self.assertEqual(installed.entrypoint.id, self.profile["launch"]["entrypointTarget"])
+        self.assertEqual(installed.entrypoint.executable, install_root / target["executable"])
         self.assertIsNotNone(installed.owned_process)
         assert installed.owned_process is not None
         self.assertEqual(
             installed.owned_process.executable,
-            install_root
-            / "FreedomLocomotion/Binaries/Win64/FreedomLocomotion-Win64-Shipping.exe",
+            install_root / owned_process["executable"],
         )
         self.assertEqual(installed.owned_processes, (installed.owned_process,))
         self.assertEqual(installed.steam_manifest_sha256, runtime_profile.sha256_file(app_manifest))
@@ -250,13 +260,31 @@ class RuntimeProfileTests(unittest.TestCase):
             runtime_profile.validate_profile(profile)
         self.assertEqual(raised.exception.code, "profile.invalid")
 
-    def test_owned_targets_resolve_from_runtime_targets(self) -> None:
+    def multi_target_profile(self) -> dict:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
-        profile["launch"]["ownedTargets"] = [
-            "hub",
-            "secret-shop",
-            "robot-repair",
+        template = profile["runtime"]["targets"][0]
+        profile["runtime"]["targets"] = [
+            {
+                **template,
+                "id": f"fixture-{index}",
+                "role": "hub" if index == 0 else "experience",
+                "executable": f"Fixture{index}/app.exe",
+                "workingDirectory": f"Fixture{index}",
+                "openvrDirectory": f"Fixture{index}",
+                "graphicsDirectory": f"Fixture{index}",
+                "processPattern": f"[F]ixture{index}",
+            }
+            for index in range(3)
         ]
+        profile["launch"]["entrypointTarget"] = profile["runtime"]["targets"][0]["id"]
+        profile["launch"]["ownedTargets"] = [target["id"] for target in profile["runtime"]["targets"]]
+        profile["launch"]["ownedProcess"] = None
+        return profile
+
+    def test_owned_targets_resolve_from_runtime_targets(self) -> None:
+        profile = self.multi_target_profile()
+        # A reordered subset proves selection and order, not only enumeration.
+        target_ids = [target["id"] for target in profile["runtime"]["targets"]]
         runtime_profile.validate_profile(profile)
         loaded = runtime_profile.LoadedProfile(
             path=self.root / "the-lab.json",
@@ -284,14 +312,47 @@ class RuntimeProfileTests(unittest.TestCase):
             targets=targets,
             owned_process=None,
         )
-        self.assertEqual(
-            [owned.target_id for owned in installed.owned_processes],
-            ["hub", "secret-shop", "robot-repair"],
-        )
-        self.assertEqual(
-            [owned.executable for owned in installed.owned_processes],
-            [target.executable for target in targets],
-        )
+        targets_by_id = {target.id: target for target in targets}
+        for selected_ids in (list(reversed(target_ids)), [target_ids[-1], target_ids[0]]):
+            with self.subTest(selected_ids=selected_ids):
+                profile["launch"]["ownedTargets"] = selected_ids
+                runtime_profile.validate_profile(profile)
+                self.assertEqual(
+                    [owned.target_id for owned in installed.owned_processes],
+                    profile["launch"]["ownedTargets"],
+                )
+                selected_targets = [targets_by_id[target_id] for target_id in profile["launch"]["ownedTargets"]]
+                self.assertEqual(
+                    [owned.executable for owned in installed.owned_processes],
+                    [target.executable for target in selected_targets],
+                )
+                self.assertEqual(
+                    [owned.process_pattern for owned in installed.owned_processes],
+                    [target.process_pattern for target in selected_targets],
+                )
+
+    def test_entrypoint_is_ordered_before_other_targets(self) -> None:
+        profile = self.multi_target_profile()
+        declared_targets = profile["runtime"]["targets"]
+        profile["launch"]["entrypointTarget"] = declared_targets[-1]["id"]
+        runtime_profile.validate_profile(profile)
+        ordered = runtime_profile.ordered_targets(profile)
+        self.assertEqual(ordered[0], declared_targets[-1])
+        self.assertEqual(ordered[1:], declared_targets[:-1])
+
+        install_root = self.root / "fixture-installed"
+        for target in declared_targets:
+            write_pe_x86_64(install_root / target["executable"])
+            write_pe_x86_64(install_root / target["openvrDirectory"] / "openvr_api.dll")
+        loaded = runtime_profile.LoadedProfile(self.root / "fixture.json", profile, "f" * 64)
+        with mock.patch.object(
+            runtime_profile,
+            "verify_steam_identity",
+            return_value=(install_root, self.root / "appmanifest.acf", "e" * 64),
+        ):
+            installed = runtime_profile.resolve_installed_profile(loaded, {})
+        self.assertEqual(installed.entrypoint.id, profile["launch"]["entrypointTarget"])
+        self.assertEqual(installed.entrypoint.executable, install_root / declared_targets[-1]["executable"])
 
     def test_owned_targets_reject_unknown_runtime_target(self) -> None:
         profile = copy.deepcopy(runtime_profile.load_profile("the-lab").data)
